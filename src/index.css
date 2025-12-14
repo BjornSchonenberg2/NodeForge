@@ -1,0 +1,62 @@
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+/* Base glassy scroll container */
+.glass-scroll {
+  /* ensure the scrollbars appear when needed */
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: rgba(148, 163, 184, 0.75) transparent;
+}
+
+/* WebKit (Chrome, Edge, Safari) */
+.glass-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.glass-scroll::-webkit-scrollbar-track {
+  background: radial-gradient(
+          120px 120px at 0% 0%,
+          rgba(30, 64, 175, 0.24),
+          rgba(15, 23, 42, 1)
+  );
+  border-radius: 999px;
+}
+
+.glass-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: linear-gradient(
+          180deg,
+          rgba(148, 163, 184, 0.9),
+          rgba(94, 234, 212, 0.75)
+  );
+  box-shadow:
+          inset 0 0 0 1px rgba(15, 23, 42, 0.85),
+          0 0 12px rgba(56, 189, 248, 0.45);
+}
+
+/* Hover state – a bit brighter, but still subtle */
+.glass-scroll::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(
+          180deg,
+          rgba(191, 219, 254, 0.98),
+          rgba(45, 212, 191, 0.95)
+  );
+}
+
+/* Optional: slightly dim when not focused */
+.glass-scroll::-webkit-scrollbar-thumb:active {
+  box-shadow:
+          inset 0 0 0 1px rgba(15, 23, 42, 0.95),
+          0 0 18px rgba(56, 189, 248, 0.85);
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}

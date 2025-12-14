@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Totalplay Remote</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        #ipField { width: 200px; padding: 5px; margin-bottom: 15px; }
+        .remote { display: grid; grid-template-columns: repeat(3, 80px); gap: 10px; margin-bottom: 20px; }
+        .row { display: flex; justify-content: center; margin: 10px 0; }
+        button { padding: 10px; font-size: 14px; cursor: pointer; }
+        .dpad { display: grid; grid-template-columns: 60px 60px 60px; grid-template-rows: 60px 60px 60px; gap: 5px; justify-content: center; }
+        .dpad button { width: 60px; height: 60px; }
+    </style>
+</head>
+<body>
+<h2>Totalplay Remote Control</h2>
+<label>IP Address: <input type="text" id="ipField" placeholder="192.168.x.x"></label>
+
+<h3>Numbers</h3>
+<div class="remote" id="numbers"></div>
+
+<h3>Navigation</h3>
+<div class="dpad">
+    <div></div>
+    <button data-key="up">▲</button>
+    <div></div>
+    <button data-key="left">◀</button>
+    <button data-key="select">OK</button>
+    <button data-key="right">▶</button>
+    <div></div>
+    <button data-key="down">▼</button>
+    <div></div>
+</div>
+
+<h3>Playback</h3>
+<div class="row">
+    <button data-key="rewind">⏪</button>
+    <button data-key="play">▶️</button>
+    <button data-key="pause">⏸</button>
+    <button data-key="stop">⏹</button>
+    <button data-key="fast_forward">⏩</button>
+</div>
+
+<h3>Other Controls</h3>
+<div class="row" id="others"></div>
+
+<script>
+    const signals = [
+        {button:'0',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=0'},
+        {button:'1',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=1'},
+        {button:'2',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=2'},
+        {button:'3',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=3'},
+        {button:'4',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=4'},
+        {button:'5',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=5'},
+        {button:'6',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=6'},
+        {button:'7',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=7'},
+        {button:'8',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=8'},
+        {button:'9',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=9'},
+        {button:'up',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=up'},
+        {button:'down',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=down'},
+        {button:'left',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=left'},
+        {button:'right',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=right'},
+        {button:'select',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=ok'},
+        {button:'play',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=play_pause'},
+        {button:'pause',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=play_pause'},
+        {button:'rewind',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=prev'},
+        {button:'fast_forward',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=next'},
+        {button:'stop',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=stop'},
+        {button:'help',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=info'},
+        {button:'back_up',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=back'},
+        {button:'channel_up',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=channel_up'},
+        {button:'channel_down',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=channel_down'},
+        {button:'info',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=info'},
+        {button:'interactive',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=KEY_MENU'},
+        {button:'services',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=KEY_MENU'},
+        {button:'power',cmd:'http://{0}/RemoteControl/KeyHandling/sendKey?key=on_off'}
+    ];
+
+    // Populate number buttons
+    const numContainer = document.getElementById('numbers');
+    for (let i=1;i<=9;i++) {
+        const btn = document.createElement('button');
+        btn.textContent = i;
+        btn.dataset.key = i;
+        numContainer.appendChild(btn);
+    }
+    const zeroBtn = document.createElement('button');
+    zeroBtn.textContent = '0';
+    zeroBtn.dataset.key = '0';
+    numContainer.appendChild(zeroBtn);
+
+    // Populate other buttons
+    const otherKeys = ['sky','tv','box_office','tv_guide','mute','text','record','red','green','yellow','blue'];
+    const otherContainer = document.getElementById('others');
+    otherKeys.forEach(k=>{
+        const btn = document.createElement('button');
+        btn.textContent = k;
+        btn.dataset.key = k;
+        otherContainer.appendChild(btn);
+    });
+
+    function sendCommand(key) {
+        const ip = document.getElementById('ipField').value.trim();
+        if (!ip) { alert('Enter IP address first'); return; }
+        const signal = signals.find(s=>s.button===key);
+        if (signal && signal.cmd) {
+            const url = signal.cmd.replace('{0}', ip);
+            fetch(url).then(()=>console.log('Sent',url)).catch(err=>console.error(err));
+        } else {
+            console.warn('No command mapped for', key);
+        }
+    }
+
+    // Click handler
+    document.body.addEventListener('click', e=>{
+        if (e.target.tagName==='BUTTON') {
+            const key = e.target.dataset.key;
+            sendCommand(key);
+        }
+    });
+
+    // Keyboard handler
+    document.addEventListener('keydown', e=>{
+        if (e.key >= '0' && e.key <= '9') {
+            sendCommand(e.key);
+        } else if (e.key === 'ArrowUp') {
+            sendCommand('up');
+        } else if (e.key === 'ArrowDown') {
+            sendCommand('down');
+        } else if (e.key === 'ArrowLeft') {
+            sendCommand('left');
+        } else if (e.key === 'ArrowRight') {
+            sendCommand('right');
+        } else if (e.key === 'Enter') {
+            sendCommand('select');
+        }
+    });
+</script>
+</body>
+</html>

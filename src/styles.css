@@ -1,0 +1,167 @@
+/* === Dark UI theme for all form controls === */
+:root {
+    color-scheme: dark; /* hint Safari/Chrome to render native bits in dark mode */
+    --ui-bg: #0b1020;
+    --ui-panel: rgba(17,25,45,0.55);
+    --ui-panel-border: rgba(255,255,255,0.12);
+    --ui-field-bg: rgba(13,19,36,0.90);
+    --ui-field-bg-hover: rgba(16,23,41,0.95);
+    --ui-field-border: rgba(255,255,255,0.14);
+    --ui-field-border-hover: rgba(80,227,194,0.55);
+    --ui-text: #eaf9ff;
+    --ui-text-dim: #a9bdc9;
+    --ui-accent: #50e3c2;
+    --ui-accent-2: #46dcff;
+}
+
+/* Base text & labels */
+label, .label, .panel label {
+    color: var(--ui-text);
+    font-size: 12px;
+    opacity: 0.95;
+}
+
+/* Inputs / Selects / Textareas share the same look */
+input[type="text"],
+input[type="number"],
+input[type="email"],
+input[type="color"],
+input[type="password"],
+input[type="search"],
+textarea,
+select {
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--ui-field-bg);
+    color: var(--ui-text);
+    border: 1px solid var(--ui-field-border);
+    border-radius: 10px;
+    padding: 8px 10px;
+    line-height: 1.25;
+    outline: none;
+    transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+    min-height: 34px;
+}
+
+input::placeholder, textarea::placeholder {
+    color: var(--ui-text-dim);
+    opacity: 0.9;
+}
+
+/* Hover & focus */
+input:hover, textarea:hover, select:hover {
+    background: var(--ui-field-bg-hover);
+    border-color: var(--ui-field-border-hover);
+}
+input:focus, textarea:focus, select:focus {
+    border-color: var(--ui-field-border-hover);
+    box-shadow:
+            0 0 0 3px rgba(80,227,194,0.16),
+            inset 0 0 0 1px rgba(80,227,194,0.35);
+}
+
+/* Disabled */
+input:disabled, textarea:disabled, select:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Nice-looking native select with a custom chevron */
+select {
+    padding-right: 34px; /* room for the arrow */
+    background-image:
+            url('data:image/svg+xml;charset=UTF-8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" viewBox="0 0 12 8" fill="none"><path d="M1 1l5 5 5-5" stroke="%23a9bdc9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    background-size: 12px 8px;
+}
+select::-ms-expand { display: none; } /* old IE */
+option {
+    background: #0f1524; /* dropdown list background */
+    color: var(--ui-text);
+}
+/* Topbar tweaks */
+.tb-ibtn { transition: transform 120ms ease, background 120ms ease, border-color 120ms ease; }
+.tb-ibtn:hover { transform: translateY(-1px); }
+.tb-ibtn:active { transform: translateY(0); }
+.tb-ibtn[disabled] { pointer-events: none; }
+
+/* Checkbox (custom, but still simple & accessible) */
+input[type="checkbox"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 4px;
+    border: 1px solid var(--ui-field-border);
+    background: var(--ui-field-bg);
+    display: inline-grid;
+    place-content: center;
+    cursor: pointer;
+    transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+input[type="checkbox"]:hover {
+    border-color: var(--ui-field-border-hover);
+}
+input[type="checkbox"]::after {
+    content: "";
+    width: 9px; height: 9px;
+    transform: scale(0);
+    transition: transform 120ms ease;
+    box-shadow: inset 1em 1em var(--ui-accent);
+    border-radius: 3px;
+}
+input[type="checkbox"]:checked::after {
+    transform: scale(1);
+}
+
+/* Range slider */
+input[type="range"] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 26px;
+    background: transparent;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    background: linear-gradient(90deg, rgba(80,227,194,0.65), rgba(70,220,255,0.45));
+    border-radius: 999px;
+}
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    margin-top: -6px; /* centers thumb on track */
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--ui-text);
+    border: 2px solid var(--ui-accent);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.35);
+}
+input[type="range"]::-moz-range-track {
+    height: 4px;
+    background: linear-gradient(90deg, rgba(80,227,194,0.65), rgba(70,220,255,0.45));
+    border-radius: 999px;
+}
+input[type="range"]::-moz-range-thumb {
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--ui-text);
+    border: 2px solid var(--ui-accent);
+    box-shadow: 0 2px 10px rgba(0,0,0,0.35);
+}
+
+/* Buttons (native <button>) to match your glass theme */
+button {
+    cursor: pointer;
+    border: 1px solid rgba(70,220,255,0.35);
+    color: #eaffff;
+    background: linear-gradient(180deg, rgba(70,220,255,0.15), rgba(70,220,255,0.08));
+    border-radius: 10px;
+    padding: 8px 12px;
+    font-weight: 700;
+    letter-spacing: .3px;
+    transition: transform 80ms ease, box-shadow 120ms ease, border-color 120ms ease;
+}
+button:hover {
+    border-color: rgba(80,227,194,0.6);
+    box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+}
+button:active {
+    transform: translateY(1px);
+}
