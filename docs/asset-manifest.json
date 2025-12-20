@@ -1,0 +1,40 @@
+{
+  "files": {
+    "main.css": "/NodeForge/static/css/main.428f0908.css",
+    "main.js": "/NodeForge/static/js/main.67abaa43.js",
+    "static/js/453.d6c4c014.chunk.js": "/NodeForge/static/js/453.d6c4c014.chunk.js",
+    "static/media/Model-MY-GO-Textured.glb": "/NodeForge/static/media/Model-MY-GO-Textured.131bae85b9611e3be2cd.glb",
+    "static/media/LAVIE Box 4 - Front.jpg": "/NodeForge/static/media/LAVIE Box 4 - Front.ba00d4ea5935fc7a93e0.jpg",
+    "static/media/LAVIE Box 4 - Front - open.JPG": "/NodeForge/static/media/LAVIE Box 4 - Front - open.fd9167fd1284d751674d.JPG",
+    "static/media/LAVIE Box 4 - Side - open.JPG": "/NodeForge/static/media/LAVIE Box 4 - Side - open.d744f27cafee0da22ffe.JPG",
+    "static/media/Unas Pro 4 1U.png": "/NodeForge/static/media/Unas Pro 4 1U.34753c1b31c30fe79cd4.png",
+    "static/media/Model-MY-GO.glb": "/NodeForge/static/media/Model-MY-GO.1395901a1cb594585f8e.glb",
+    "static/media/UniFi Access Point Black.png": "/NodeForge/static/media/UniFi Access Point Black.052c5c64f53835c28730.png",
+    "static/media/LAVIE Box 5.1-U Front - Blue.jpg": "/NodeForge/static/media/LAVIE Box 5.1-U Front - Blue.88f8e23369656eb825a6.jpg",
+    "static/media/LAVIE Box 4 - Back.png": "/NodeForge/static/media/LAVIE Box 4 - Back.575c6cf67a2dc9fefed2.png",
+    "static/media/LAVIE Box 5.1-U Front - Red.jpg": "/NodeForge/static/media/LAVIE Box 5.1-U Front - Red.30e644f824068f4d3c5b.jpg",
+    "static/media/logo.png": "/NodeForge/static/media/logo.abe1f37689a59518b93b.png",
+    "static/media/LED Ceilling Light Reccessed Spot.jpg": "/NodeForge/static/media/LED Ceilling Light Reccessed Spot.1d2397173aeafadafe5e.jpg",
+    "static/media/UniFi Dream Machine Pro Max.png": "/NodeForge/static/media/UniFi Dream Machine Pro Max.135545ab693a76e435df.png",
+    "static/media/UniFi Dream Machine Pro.png": "/NodeForge/static/media/UniFi Dream Machine Pro.c1d16064f5fc336ac20e.png",
+    "static/media/HPE ProLiant MicroServer Gen10+ V2.png": "/NodeForge/static/media/HPE ProLiant MicroServer Gen10+ V2.a5eaf4a34fdaa32c0a5f.png",
+    "static/media/Samsung The Frame 43LS03F - QLED.png": "/NodeForge/static/media/Samsung The Frame 43LS03F - QLED.898d47cd667eef60179c.png",
+    "static/media/SYIPTV Server NUC.png": "/NodeForge/static/media/SYIPTV Server NUC.3c4524bb64e64d2ba5ef.png",
+    "static/media/HPE ProLiant DL360 Gen 11.png": "/NodeForge/static/media/HPE ProLiant DL360 Gen 11.3fdf98792a6da9d0e869.png",
+    "static/media/UniFi Fortress Gateway.png": "/NodeForge/static/media/UniFi Fortress Gateway.fe2c26188b92e4555243.png",
+    "static/media/UniFI USW-Pro 48-Port-PoE++ Gigabit Switch.webp": "/NodeForge/static/media/UniFI USW-Pro 48-Port-PoE++ Gigabit Switch.69a69568cf3278e0700d.webp",
+    "static/media/UniFi 8P Switch US-8-60W.png": "/NodeForge/static/media/UniFi 8P Switch US-8-60W.22beec90b0a6d6ff5f3c.png",
+    "static/media/UniFi Cloud Key.png": "/NodeForge/static/media/UniFi Cloud Key.45ecde8fabd3816b7bb5.png",
+    "static/media/USW Flex 5 Port.png": "/NodeForge/static/media/USW Flex 5 Port.585d0b972e8469877e29.png",
+    "static/media/Doqie Wall Dock.png": "/NodeForge/static/media/Doqie Wall Dock.60fbc18b6f40f844a6a9.png",
+    "static/media/UniFi Access Point.jpg": "/NodeForge/static/media/UniFi Access Point.be5801f18b3ca7ebf4d2.jpg",
+    "index.html": "/NodeForge/index.html",
+    "main.428f0908.css.map": "/NodeForge/static/css/main.428f0908.css.map",
+    "main.67abaa43.js.map": "/NodeForge/static/js/main.67abaa43.js.map",
+    "453.d6c4c014.chunk.js.map": "/NodeForge/static/js/453.d6c4c014.chunk.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.428f0908.css",
+    "static/js/main.67abaa43.js"
+  ]
+}

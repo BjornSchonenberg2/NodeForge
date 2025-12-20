@@ -335,9 +335,9 @@ function NodeInspector({
                            levelFromNodeId,        // 👈 NEW
                            setLevelFromNodeId,     // 👈 NEW
                        }) {
-    if (!n) return null;
 
     const [openMasterId, setOpenMasterId] = useState(null);
+    if (!n) return null;
 
     // "Master links" = incoming links where this node is the target.
     // This lets you edit flows "vice versa" without hunting for the source node.
