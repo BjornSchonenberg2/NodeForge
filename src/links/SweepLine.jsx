@@ -2,6 +2,43 @@ import React, { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
 
+const TAU = Math.PI * 2;
+
+function clamp01(x) {
+    return x < 0 ? 0 : (x > 1 ? 1 : x);
+}
+
+function ease01(x, curve = "linear") {
+    x = clamp01(x);
+    switch (curve) {
+        case "linear":
+            return x;
+        case "smooth":
+            return x * x * (3 - 2 * x);
+        case "sine":
+            return 0.5 - 0.5 * Math.cos(Math.PI * x);
+        case "exp":
+            return 1 - Math.exp(-5 * x);
+        case "expo":
+            return 1 - Math.pow(2, -10 * x);
+        case "back": {
+            const c1 = 1.70158;
+            const c3 = c1 + 1;
+            return c3 * x * x * x - c1 * x * x;
+        }
+        case "bounce": {
+            const n1 = 7.5625;
+            const d1 = 2.75;
+            if (x < 1 / d1) return n1 * x * x;
+            if (x < 2 / d1) { x -= 1.5 / d1; return n1 * x * x + 0.75; }
+            if (x < 2.5 / d1) { x -= 2.25 / d1; return n1 * x * x + 0.9375; }
+            x -= 2.625 / d1; return n1 * x * x + 0.984375;
+        }
+        default:
+            return x;
+    }
+}
+
 /**
  * SweepLine (ultra)
  * - Pulse draw: "trail" mode shows only a moving window (trailLength) behind the head.
@@ -47,6 +84,26 @@ function SweepPass({
                        headPulseFreq = 1.6,
                        pulseAmp = 0.0,
                        pulseFreq = 1.5,
+                       // motion shaping
+                       moveCurve = "linear",
+                       moveSteps = 0,
+                       moveJitterAmp = 0.0,
+                       moveJitterFreq = 1.5,
+                       // draw pattern
+                       drawStyle = "solid", // solid|dashed|strobe
+                       dashFreq = 14.0,
+                       dashDuty = 0.55,
+                       dashSpeed = 0.55,
+                       strobeFreq = 22.0,
+                       strobeDuty = 0.28,
+                       strobeSpeed = 1.2,
+                       // fades & shimmer
+                       tailFade = 0.0,
+                       tailFadePow = 1.6,
+                       startFade = 0.0,
+                       startFadeLen = 0.12,
+                       shimmerAmp = 0.0,
+                       shimmerFreq = 1.0,
                        // end fx
                        endFx = { enabled: false, type: "wave", duration: 0.6, size: 1.0, speed: 1.0, color: null, angleDeg: 0, ease: "smooth", softness: 0.4 },
                        // direction
@@ -67,6 +124,20 @@ function SweepPass({
             uTrail: { value: THREE.MathUtils.clamp(trailLength, 0, 1) },
             uFill: { value: fillMode === "fill" ? 1 : 0 },
             uInvert: { value: invert ? 1 : 0 },
+            uTime: { value: 0 },
+            uDrawMode: { value: drawStyle === "dashed" ? 1 : drawStyle === "strobe" ? 2 : 0 },
+            uDashFreq: { value: dashFreq },
+            uDashDuty: { value: dashDuty },
+            uDashSpeed: { value: dashSpeed },
+            uStrobeFreq: { value: strobeFreq },
+            uStrobeDuty: { value: strobeDuty },
+            uStrobeSpeed: { value: strobeSpeed },
+            uTailFade: { value: THREE.MathUtils.clamp(tailFade, 0, 1) },
+            uTailFadePow: { value: Math.max(0.1, tailFadePow) },
+            uStartFade: { value: THREE.MathUtils.clamp(startFade, 0, 1) },
+            uStartFadeLen: { value: Math.max(0.001, startFadeLen) },
+            uShimmerAmp: { value: THREE.MathUtils.clamp(shimmerAmp, 0, 1) },
+            uShimmerFreq: { value: Math.max(0.001, shimmerFreq) },
         };
         return new THREE.ShaderMaterial({
             transparent: true,
@@ -87,30 +158,68 @@ function SweepPass({
         uniform int uUseGradient;
         uniform float uProg, uGlobalFade, uFeather, uEmissiveBoost, uPulse;
         uniform float uTrail, uFill, uInvert;
+        uniform float uTime;
+        uniform float uTailFade, uTailFadePow;
+        uniform float uStartFade, uStartFadeLen;
+        uniform int uDrawMode; // 0 solid, 1 dashed, 2 strobe
+        uniform float uDashFreq, uDashDuty, uDashSpeed;
+        uniform float uStrobeFreq, uStrobeDuty, uStrobeSpeed;
+        uniform float uShimmerAmp, uShimmerFreq;
         varying vec2 vUv;
         void main() {
           float sRaw = clamp(vUv.x, 0.0, 1.0);
           float s = (uInvert >= 0.5) ? (1.0 - sRaw) : sRaw;
 
+          // Head mask
           float head = smoothstep(uProg - uFeather, uProg, s);
-          float alpha;
+
+          // Body window (fill or trail)
+          float body;
           if (uFill >= 0.5) {
-            float body = step(s, uProg);        // full body behind head
-            alpha = body * head;
+            body = step(s, uProg);
           } else {
-            float trail = smoothstep(uProg - uTrail, uProg, s); // only a window
-            alpha = trail * head;
+            float tail = smoothstep(uProg - uTrail, uProg, s);
+            body = tail * step(s, uProg);
           }
+          float alpha = body * head;
+
+          // Tail fade: 0 at tail, 1 at head
+          float denom = (uFill >= 0.5) ? max(uProg, 0.0001) : max(uTrail, 0.0001);
+          float tailStart = (uFill >= 0.5) ? 0.0 : (uProg - uTrail);
+          float localT = clamp((s - tailStart) / denom, 0.0, 1.0);
+          float tailF = mix(1.0, pow(localT, uTailFadePow), uTailFade);
+          alpha *= tailF;
+
+          // Optional start fade (near source)
+          float startF = mix(1.0, smoothstep(0.0, uStartFadeLen, s), uStartFade);
+          alpha *= startF;
+
+          // Draw patterns (dash/strobe)
+          float pattern = 1.0;
+          if (uDrawMode == 1) {
+            float ph = fract(sRaw * uDashFreq + uTime * uDashSpeed);
+            pattern = step(ph, uDashDuty);
+          } else if (uDrawMode == 2) {
+            float ph = fract(sRaw * uStrobeFreq + uTime * uStrobeSpeed);
+            pattern = step(ph, uStrobeDuty);
+          }
+          alpha *= pattern;
+
           float vis = alpha * (1.0 - uGlobalFade);
           if (vis <= 0.0001) discard;
 
           vec3 col = (uUseGradient == 1) ? mix(uColor, uColor2, sRaw) : uColor;
+
+          // Shimmer along the line
+          float sh = 1.0 + uShimmerAmp * sin((sRaw * 3.0 + uTime * uShimmerFreq) * 6.2831853);
+          col *= sh;
+
           col *= (1.0 + uEmissiveBoost * 0.65) * uPulse;
           gl_FragColor = vec4(col, vis);
         }
       `,
         });
-    }, [color, color2, gradient, feather, glow, trailLength, fillMode, invert]);
+    }, [color, color2, gradient, feather, glow, trailLength, fillMode, invert, drawStyle, dashFreq, dashDuty, dashSpeed, strobeFreq, strobeDuty, strobeSpeed, tailFade, tailFadePow, startFade, startFadeLen, shimmerAmp, shimmerFreq]);
 
     const baseMat = useMemo(
         () =>
@@ -167,6 +276,19 @@ function SweepPass({
             uProg = 0.0; uFade = 1.0;
         }
 
+        // motion shaping
+        if (moveCurve && moveCurve !== "linear") {
+            if (dir >= 0) uProg = ease01(uProg, moveCurve);
+            else uProg = 1.0 - ease01(1.0 - uProg, moveCurve);
+        }
+        if (moveSteps && moveSteps > 1) {
+            uProg = Math.round(uProg * moveSteps) / moveSteps;
+        }
+        if ((moveJitterAmp || 0) > 0 && uFade <= 0.001) {
+            const j = Math.sin(t * (moveJitterFreq || 1.5) * TAU) * moveJitterAmp;
+            uProg = THREE.MathUtils.clamp(uProg + j, 0, 1);
+        }
+
         // rainbow
         if (rainbow) {
             const h = (t * 0.08) % 1;
@@ -188,6 +310,22 @@ function SweepPass({
         mat.uniforms.uTrail.value = THREE.MathUtils.clamp(trailLength, 0, 1);
         mat.uniforms.uFill.value  = (fillMode === "fill") ? 1.0 : 0.0;
         mat.uniforms.uInvert.value = invert ? 1.0 : 0.0;
+
+        // time for dash/strobe/shimmer
+        mat.uniforms.uTime.value = t;
+        mat.uniforms.uDrawMode.value = (drawStyle === "dashed") ? 1 : (drawStyle === "strobe") ? 2 : 0;
+        mat.uniforms.uDashFreq.value = dashFreq;
+        mat.uniforms.uDashDuty.value = dashDuty;
+        mat.uniforms.uDashSpeed.value = dashSpeed;
+        mat.uniforms.uStrobeFreq.value = strobeFreq;
+        mat.uniforms.uStrobeDuty.value = strobeDuty;
+        mat.uniforms.uStrobeSpeed.value = strobeSpeed;
+        mat.uniforms.uTailFade.value = THREE.MathUtils.clamp(tailFade, 0, 1);
+        mat.uniforms.uTailFadePow.value = Math.max(0.1, tailFadePow);
+        mat.uniforms.uStartFade.value = THREE.MathUtils.clamp(startFade, 0, 1);
+        mat.uniforms.uStartFadeLen.value = Math.max(0.001, startFadeLen);
+        mat.uniforms.uShimmerAmp.value = THREE.MathUtils.clamp(shimmerAmp, 0, 1);
+        mat.uniforms.uShimmerFreq.value = Math.max(0.001, shimmerFreq);
         mat.uniforms.uGlobalFade.value = THREE.MathUtils.clamp(uFade, 0, 1);
 
         const boost = (selected ? 1.25 : 1.0) * (glow || 1.0);
@@ -331,6 +469,28 @@ export default function SweepLine(props) {
         headPulseFreq = 1.6,
         pulseAmp = 0.0,
         pulseFreq = 1.5,
+        // motion shaping
+        moveCurve = "linear",
+        moveSteps = 0,
+        moveJitterAmp = 0.0,
+        moveJitterFreq = 1.5,
+        // draw pattern
+        drawStyle = "solid",
+        dashFreq = 14.0,
+        dashDuty = 0.55,
+        dashSpeed = 0.55,
+        strobeFreq = 22.0,
+        strobeDuty = 0.28,
+        strobeSpeed = 1.2,
+        // fades & shimmer
+        tailFade = 0.0,
+        tailFadePow = 1.6,
+        startFade = 0.0,
+        startFadeLen = 0.12,
+        shimmerAmp = 0.0,
+        shimmerFreq = 1.0,
+        // base time offset (useful to chain multi-segment links)
+        timeOffset = 0,
         colors = null,
         // visibility & dir
         fillMode = "trail",
@@ -349,7 +509,7 @@ export default function SweepLine(props) {
     const list = Array.from({ length: Math.max(1, Math.floor(passes)) }, (_, i) => ({
         key: i,
         color: colors?.[i % (colors?.length || 1)] || color,
-        tOff: i * Math.max(0, passDelay),
+        tOff: (timeOffset || 0) + i * Math.max(0, passDelay),
     }));
 
     return (
@@ -385,6 +545,23 @@ export default function SweepLine(props) {
                     headPulseFreq={headPulseFreq}
                     pulseAmp={pulseAmp}
                     pulseFreq={pulseFreq}
+                    moveCurve={moveCurve}
+                    moveSteps={moveSteps}
+                    moveJitterAmp={moveJitterAmp}
+                    moveJitterFreq={moveJitterFreq}
+                    drawStyle={drawStyle}
+                    dashFreq={dashFreq}
+                    dashDuty={dashDuty}
+                    dashSpeed={dashSpeed}
+                    strobeFreq={strobeFreq}
+                    strobeDuty={strobeDuty}
+                    strobeSpeed={strobeSpeed}
+                    tailFade={tailFade}
+                    tailFadePow={tailFadePow}
+                    startFade={startFade}
+                    startFadeLen={startFadeLen}
+                    shimmerAmp={shimmerAmp}
+                    shimmerFreq={shimmerFreq}
                     fillMode={fillMode}
                     trailLength={trailLength}
                     baseVisible={baseVisible}

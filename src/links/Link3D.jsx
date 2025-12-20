@@ -16,6 +16,34 @@ function hash01(n) {
     return x - Math.floor(x);
 }
 
+function normalizeColorList(v) {
+    if (!v) return null;
+    if (Array.isArray(v)) {
+        const out = v
+            .map((x) => (typeof x === "string" ? x.trim() : ""))
+            .filter(Boolean)
+            .map((x) => (x.startsWith("#") ? x : `#${x}`));
+        return out.length ? out : null;
+    }
+    if (typeof v === "string") {
+        const out = v
+            .split(",")
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .map((x) => (x.startsWith("#") ? x : `#${x}`));
+        return out.length ? out : null;
+    }
+    return null;
+}
+
+function normalizeEndFx(v) {
+    if (v == null) return undefined;
+    if (typeof v === "boolean") return { enabled: v };
+    if (typeof v === "object") return v;
+    return undefined;
+}
+
+
 function midpoint(from, to, mode = "up", bend = 0.3) {
     const a = V0.set(from[0], from[1], from[2]);
     const b = V1.set(to[0], to[1], to[2]);
@@ -40,6 +68,7 @@ export default React.memo(function Link3D({
                                               link,
                                               from,
                                               to,
+                                              points,
                                               selected,
                                               onPointerDown,
                                               animate = true,
@@ -86,6 +115,65 @@ export default React.memo(function Link3D({
 
     const mergedStyle = byKind.style || style;
     const mergedColor = byKind.color || color;
+
+    const sweepConf = link?.sweep || {};
+    const sweepColors = normalizeColorList(sweepConf.colors);
+    const sweepEndFx = normalizeEndFx(sweepConf.endFx);
+    // Breakpoint path handling: allow a single smooth curve across all breakpoints.
+    // SceneInner can pass `points=[start, ...breakpoints, end]` so styles like sweep/epic/particles
+    // travel smoothly as ONE line (instead of per-segment resets).
+    const canUsePathCurve =
+        Array.isArray(points) &&
+        points.length >= 2 &&
+        (mergedStyle === "sweep" ||
+            mergedStyle === "particles" ||
+            mergedStyle === "wavy" ||
+            mergedStyle === "icons" ||
+            mergedStyle === "epic");
+
+    const pathKey = useMemo(() => {
+        if (!Array.isArray(points) || points.length < 2) return "";
+        // stable-ish string key so we don't rebuild the curve every render when points are unchanged
+        return points
+            .map((p) => {
+                const x = Number(p?.[0] || 0).toFixed(4);
+                const y = Number(p?.[1] || 0).toFixed(4);
+                const z = Number(p?.[2] || 0).toFixed(4);
+                return `${x},${y},${z}`;
+            })
+            .join("|");
+    }, [points]);
+
+    const pathCurve = useMemo(() => {
+        if (!canUsePathCurve || !pathKey) return null;
+
+        const pts = points.map(
+            (p) => new THREE.Vector3(Number(p?.[0] || 0), Number(p?.[1] || 0), Number(p?.[2] || 0))
+        );
+
+        const typRaw = sweepConf?.pathType ?? "centripetal";
+        const typ = String(typRaw).toLowerCase();
+
+        if (typ === "linear") {
+            const cp = new THREE.CurvePath();
+            for (let i = 0; i < pts.length - 1; i++) {
+                cp.add(new THREE.LineCurve3(pts[i], pts[i + 1]));
+            }
+            return cp;
+        }
+
+        const curveType =
+            typ === "chordal" ? "chordal" :
+                typ === "catmullrom" ? "catmullrom" :
+                    "centripetal";
+
+        const tensionRaw = sweepConf?.pathTension;
+        const tension = Number.isFinite(tensionRaw)
+            ? Math.min(1, Math.max(0, Number(tensionRaw)))
+            : 0.5;
+
+        return new THREE.CatmullRomCurve3(pts, false, curveType, tension);
+    }, [canUsePathCurve, pathKey, sweepConf?.pathType, sweepConf?.pathTension]);
     // Cable bundle config (style === "cable")
     const cableConf   = link?.cable || {};
     const cableCount  = Math.max(1, Math.min(32, Math.round(cableConf.count ?? 4)));
@@ -95,7 +183,22 @@ export default React.memo(function Link3D({
     const cableScram  = cableConf.scramble ?? 0;  // 0–1, messy / wavy
 
     // Base midpoint (parametric)
-    const baseMid = useMemo(() => midpoint(from, to, mode, bend), [from, to, mode, bend]);
+    // If the link provides an explicit control point (flowPos) and this is a single-segment link
+    // (i.e. no breakpoints), use it. This makes it easy to align many flows by copying/pasting
+    // X/Y/Z without adding breakpoints.
+    const baseMid = useMemo(() => {
+        const fp = link?.flowPos;
+        const canUseFlowPos =
+            segmentCount === 1 &&
+            Array.isArray(fp) &&
+            fp.length >= 3 &&
+            fp.every((v) => Number.isFinite(Number(v)));
+
+        if (canUseFlowPos) {
+            return new THREE.Vector3(Number(fp[0]), Number(fp[1]), Number(fp[2]));
+        }
+        return midpoint(from, to, mode, bend);
+    }, [from, to, mode, bend, link?.flowPos, segmentCount]);
     // Base midpoint (parametric)
     // Radial offsets for each cable strand in a plane orthogonal to the link
     // Radial offsets for each cable strand in a plane orthogonal to the link
@@ -222,6 +325,8 @@ export default React.memo(function Link3D({
     });
 
 
+    const curveForFx = pathCurve || bezierRef.current;
+
     if (!active) return null;
 
     const pointerProps = onPointerDown ? { onPointerDown } : {};
@@ -265,7 +370,7 @@ export default React.memo(function Link3D({
 
             {(mergedStyle === "particles" || mergedStyle === "wavy") && (
                 <FlowParticles
-                    curve={bezierRef.current}
+                    curve={curveForFx}
                     count={link.particles?.count ?? 24}
                     size={link.particles?.size ?? 0.06}
                     color={link.particles?.color ?? mergedColor}
@@ -283,7 +388,7 @@ export default React.memo(function Link3D({
 
             {mergedStyle === "icons" && (
                 <IconFlow
-                    curve={bezierRef.current}
+                    curve={curveForFx}
                     char={link.icon?.char ?? byKind.icon?.char ?? "▶"}
                     count={link.icon?.count ?? 4}
                     size={link.icon?.size ?? 0.14}
@@ -299,7 +404,7 @@ export default React.memo(function Link3D({
 
             {mergedStyle === "sweep" && (
                 <SweepLine
-                    curve={bezierRef.current}
+                    curve={curveForFx}
                     // base look
                     color={link.sweep?.color ?? mergedColor}
                     color2={link.sweep?.color2}
@@ -329,14 +434,14 @@ export default React.memo(function Link3D({
                     glow={link.sweep?.glow ?? 1.15}
                     passes={link.sweep?.passes ?? 1}
                     passDelay={link.sweep?.passDelay ?? 0.25}
-                    colors={link.sweep?.colors}
+                    colors={sweepColors}
                     headSize={link.sweep?.headSize ?? 1}
                     headPulseAmp={link.sweep?.headPulseAmp ?? 0.2}
                     headPulseFreq={link.sweep?.headPulseFreq ?? 1.6}
                     pulseAmp={link.sweep?.pulseAmp ?? 0.0}
                     pulseFreq={link.sweep?.pulseFreq ?? 1.5}
                     // end FX: angle, ease, softness, size, duration
-                    endFx={link.sweep?.endFx}
+                    endFx={sweepEndFx}
                     // shared flags
                     rainbow={(fx.rainbow ?? false) || (byKind.effects?.rainbow ?? false)}
                     selected={!!selected}
@@ -399,7 +504,7 @@ export default React.memo(function Link3D({
 
             {mergedStyle === "epic" && (
                 <EpicTube
-                    curve={bezierRef.current}
+                    curve={curveForFx}
                     thickness={link.tube?.thickness ?? 0.07}
                     glow={link.tube?.glow ?? 1.4}
                     color={link.tube?.color ?? mergedColor}
@@ -417,7 +522,7 @@ export default React.memo(function Link3D({
 
             {mergedStyle === "epic" && (
                 <EpicTube
-                    curve={bezierRef.current}
+                    curve={curveForFx}
                     thickness={link.tube?.thickness ?? 0.07}
                     glow={link.tube?.glow ?? 1.4}
                     color={link.tube?.color ?? mergedColor}

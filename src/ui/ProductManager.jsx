@@ -1,622 +1,745 @@
-import React, { useMemo, useRef, useState, useEffect } from "react";
+// src/ui/ProductManager.jsx
+// Epic 3-panel Product Catalogue (windowed modal):
+// - Left: products list + search
+// - Middle: editor + slideshow images (multi-drop, reorder, cover)
+// - Right: DIRECTORY TREE with ALL productPictures (folders + image files)
+//   -> drag one/multiple files onto Images panel to assign pictures.
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { v4 as uuid } from "uuid";
 import {
-    listProducts, upsertProduct, deleteProduct,
-    listCategories, ensureCategory, listMakes, ensureMake,
-    listModels, ensureModel, deleteCategory, deleteMake, deleteModel,
-    exportProductsBlob, importProductsFile
+    listProducts,
+    upsertProduct,
+    deleteProduct,
+    listCategories,
+    ensureCategory,
+    listMakes,
+    ensureMake,
+    listModels,
+    ensureModel,
+    exportProductsBlob,
+    importProductsFile,
+    mergeProductsFile,
 } from "../data/products/store";
-import { Btn, Input, Select } from "../ui/Controls.jsx";
 
-/* ==========================================================
-   Minimal icon set (no dependencies)
-   ========================================================== */
-const Icon = {
-    chevronRight: (p) => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" {...p}>
-            <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-    ),
-    chevronDown: (p) => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" {...p}>
-            <path d="M6 9l6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-    ),
-    plus: (p) => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" {...p}>
-            <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-        </svg>
-    ),
-    trash: (p) => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" {...p}>
-            <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m-1 0v14a2 2 0 01-2 2H9a2 2 0 01-2-2V6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-    ),
-    factory: (p) => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" {...p}>
-            <path d="M3 21V8l6 4V8l6 4V8l6 4v9H3Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
-            <path d="M7 21v-3M11 21v-3M15 21v-3M19 21v-3" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-        </svg>
-    ),
-    layers: (p) => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" {...p}>
-            <path d="M12 3l9 5-9 5-9-5 9-5Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
-            <path d="M21 13l-9 5-9-5M21 18l-9 5-9-5" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
-        </svg>
-    ),
-    upload: (p) => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" {...p}>
-            <path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-    ),
-    save: (p) => (
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" {...p}>
-            <path d="M17 3H7a2 2 0 00-2 2v14l7-3 7 3V5a2 2 0 00-2-2z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
-        </svg>
-    ),
-};
+import {
+    buildBundledProductPicturesIndex,
+    buildDiskProductPicturesIndex,
+    hasFs as hasFsPictures,
+    resolvePictureRef,
+} from "../data/products/productPicturesIndex";
 
-const IconButton = ({ title, onClick, children }) => (
-    <button
-        title={title}
-        aria-label={title}
-        onClick={(e) => { e.stopPropagation(); onClick?.(e); }}
+import { Btn, Input } from "./Controls.jsx";
+
+const DT_SINGLE = "application/x-nodeforge-picture-ref";
+const DT_MULTI = "application/x-nodeforge-picture-refs";
+const DT_IMG_INDEX = "application/x-nodeforge-image-index";
+
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+
+const Glass = ({ children, style }) => (
+    <div
         style={{
-            width: 34, height: 34, display: "grid", placeItems: "center",
-            borderRadius: 10, border: "1px solid rgba(255,255,255,0.16)",
-            background: "rgba(255,255,255,0.06)", color: "#fff", cursor: "pointer"
+            background: "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.03))",
+            border: "1px solid rgba(255,255,255,0.10)",
+            borderRadius: 16,
+            boxShadow: "0 18px 60px rgba(0,0,0,0.45)",
+            ...style,
         }}
     >
         {children}
-    </button>
-);
-
-/* ==========================================================
-   Inline Dialogs (no window.prompt/confirm)
-   ========================================================== */
-function DialogBase({ title, children, onCancel }) {
-    return (
-        <div
-            style={{ position: "fixed", inset: 0, zIndex: 1100, display: "grid", placeItems: "center" }}
-            onMouseDown={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-        >
-            <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.5)" }} />
-            <div style={{
-                position: "relative",
-                width: 520,
-                background: "linear-gradient(180deg, #0f1426, #0b1021)",
-                border: "1px solid rgba(255,255,255,0.14)", borderRadius: 16, color: "#fff",
-                boxShadow: "0 24px 80px rgba(0,0,0,0.55)", padding: 16, display: "grid", gap: 12
-            }}>
-                <div style={{ fontWeight: 900, letterSpacing: 0.3 }}>{title}</div>
-                {children}
-                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                    <Btn onClick={onCancel}>Cancel</Btn>
-                </div>
-            </div>
-        </div>
-    );
-}
-
-function NameDialog({ title, label = "Name", initial = "", onSubmit, onCancel }) {
-    const [val, setVal] = useState(initial);
-    return (
-        <DialogBase title={title} onCancel={onCancel}>
-            <label>
-                {label}
-                <Input autoFocus value={val} onChange={(e) => setVal(e.target.value)} />
-            </label>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                <Btn variant="primary" glow onClick={() => { if (!val.trim()) return; onSubmit(val.trim()); }}>Save</Btn>
-            </div>
-        </DialogBase>
-    );
-}
-
-function ConfirmDialog({ title, message, onConfirm, onCancel }) {
-    return (
-        <DialogBase title={title} onCancel={onCancel}>
-            <div style={{ opacity: 0.85 }}>{message}</div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                <Btn onClick={onCancel}>Cancel</Btn>
-                <Btn variant="primary" glow onClick={onConfirm}>Confirm</Btn>
-            </div>
-        </DialogBase>
-    );
-}
-
-/* ==========================================================
-   Small UI atoms
-   ========================================================== */
-const CountBadge = ({ n }) => (
-    <span style={{ fontSize: 11, opacity: 0.9, padding: "2px 6px", borderRadius: 999, background: "rgba(255,255,255,0.14)" }}>{n}</span>
-);
-
-const Thumb = ({ src, size = 72 }) => (
-    src ? (
-        <img alt="" src={src} style={{ width: size, height: size, objectFit: "cover", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)" }}/>
-    ) : (
-        <div style={{ width: size, height: size, borderRadius: 12, background: "rgba(255,255,255,0.06)", display: "grid", placeItems: "center", fontSize: 12, opacity: 0.8 }}>No image</div>
-    )
-);
-
-const Row = ({ leading, label, sublabel, right, onToggle, open }) => (
-    <div
-        onClick={onToggle}
-        style={{
-            display: "flex", alignItems: "center", gap: 10, padding: 12,
-            background: open ? "linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04))" : "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, cursor: "pointer"
-        }}
-    >
-    <span style={{ width: 28, height: 28, display: "grid", placeItems: "center",
-        borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)",
-        background: "rgba(255,255,255,0.06)", color: "#fff" }}>
-      {open ? <Icon.chevronDown/> : <Icon.chevronRight/>}
-    </span>
-        {leading}
-        <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</div>
-            {sublabel && <div style={{ fontSize: 12, opacity: 0.8 }}>{sublabel}</div>}
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }} onClick={(e) => e.stopPropagation()}>{right}</div>
     </div>
 );
 
-/* ==========================================================
-   FS helpers for saving images locally (Electron/Node)
-   ========================================================== */
-function hasFs() { try { return !!(window?.require?.("fs")); } catch { return false; } }
-async function saveImageFileToProject(file) {
-    if (!hasFs()) return null;
-    const fs = window.require("fs");
-    const path = window.require("path");
-    const base = process.cwd();
-    const dir = path.join(base, "data", "media", "products");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const namePart = (file.name || "").toLowerCase();
-    const typePart = (file.type || "").toLowerCase();
-    const extFromName = namePart.match(/\.[a-z0-9]+$/i)?.[0];
-    const mimeToExt = { "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif" };
-    const ext = extFromName || mimeToExt[typePart] || ".png";
-    const fname = `${uuid()}${ext}`;
-    const fpath = path.join(dir, fname);
-    const buf = await file.arrayBuffer();
-    const BufferCtor = window.require?.("buffer")?.Buffer || Buffer;
-    const nodeBuf = BufferCtor.from(new Uint8Array(buf));
-    fs.writeFileSync(fpath, nodeBuf);
-    const fileUrl = `file://${fpath.replace(/\\/g, "/")}`;
-    const rel = `data/media/products/${fname}`;
-    return { fileUrl, rel };
+function Title({ children }) {
+    return <div style={{ fontWeight: 950, fontSize: 13, opacity: 0.95, letterSpacing: 0.2 }}>{children}</div>;
 }
 
-/* ==========================================================
-   ProductManager (full rewrite w/ Rack U + inline dialogs + fs image save)
-   ========================================================== */
-export default function ProductManager({ open, onClose }) {
-    const [dbVersion, setDbVersion] = useState(0);
-    const [filter, setFilter] = useState("");
-    const [selId, setSelId] = useState(null);
-    const [dlg, setDlg] = useState(null); // { type: 'name' | 'confirm', ... }
-
-    // Expansion state (Category -> Make -> Model)
-    const [openCats, setOpenCats] = useState(new Set());
-    const [openMakes, setOpenMakes] = useState(new Map()); // cat -> Set(makes)
-    const [openModels, setOpenModels] = useState(new Map()); // `${cat}|||${make}` -> Set(models)
-
-    // Guard the global canvas drop handlers while the modal is open
-    useEffect(() => {
-        if (!open) return;
-        window.__UI_DROP_GUARD = true;
-        return () => { delete window.__UI_DROP_GUARD; };
-    }, [open]);
-
-    const categories = useMemo(() => listCategories(), [dbVersion, open]);
-    const allProducts = useMemo(() => listProducts(), [dbVersion]);
-    const selected = useMemo(() => allProducts.find(p => p.id === selId) || null, [selId, allProducts]);
-
-    const [draft, setDraft] = useState(null);
-    useEffect(() => {
-        setDraft(selected ? { ...selected } : null);
-    }, [selected]);
-
-
-    const subMakes = useMemo(() => listMakes(draft?.category || ""), [dbVersion, draft?.category, open]);
-    const subModels = useMemo(() => listModels(draft?.category || "", draft?.make || ""), [dbVersion, draft?.category, draft?.make, open]);
-
-    /* ---------- image picker & drop zone ---------- */
-    const dropRef = useRef(null);
+/* ------------------------------- Images Editor ------------------------------- */
+function ImagesEditor({ draft, setDraft, bundledIndex, diskIndex, markDirty }) {
+    const [activeIdx, setActiveIdx] = useState(0);
     const fileRef = useRef(null);
 
-    const handleFile = async (file) => {
-        if (!file) return;
-        // Try to save to project via fs; fallback to dataURL
-        const saved = await saveImageFileToProject(file).catch(() => null);
-        if (saved) {
-            setDraft((d) => ({ ...(d || { id: uuid() }), image: saved.fileUrl }));
-        } else {
-            const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); });
-            setDraft((d) => ({ ...(d || { id: uuid() }), image: data }));
-        }
+    const images = Array.isArray(draft?.images) ? draft.images : (draft?.image ? [draft.image] : []);
+    const idx = clamp(activeIdx, 0, Math.max(0, images.length - 1));
+    const active = images[idx] || "";
+
+    useEffect(() => setActiveIdx(0), [draft?.id]);
+
+    const setImages = (arr) => {
+        const cleaned = (arr || []).map((x) => String(x || "")).filter(Boolean);
+        setDraft((d) => ({ ...d, images: cleaned, image: cleaned[0] || "" }));
+        markDirty();
     };
-// Refresh lists every time the Product Manager is (re)opened
-    useEffect(() => {
-        if (open) setDbVersion(v => v + 1);
-    }, [open]);
+
+    const addRefs = (refs) => {
+        const incoming = (refs || []).map((x) => String(x || "")).filter(Boolean);
+        if (!incoming.length) return;
+        setImages([...(images || []), ...incoming]);
+    };
+
+    const removeAt = (i) => {
+        const next = images.slice();
+        next.splice(i, 1);
+        setImages(next);
+        setActiveIdx((x) => clamp(x, 0, Math.max(0, next.length - 1)));
+    };
+
+    const move = (from, to) => {
+        if (from === to) return;
+        const next = images.slice();
+        const [m] = next.splice(from, 1);
+        next.splice(to, 0, m);
+        setImages(next);
+        setActiveIdx((x) => (x === from ? to : x));
+    };
+
+    const onDrop = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        // From our tree
+        const multi = e.dataTransfer.getData(DT_MULTI);
+        const single = e.dataTransfer.getData(DT_SINGLE);
+        if (multi) { try { addRefs(JSON.parse(multi)); return; } catch {} }
+        if (single) { addRefs([single]); return; }
+
+        // From OS files
+        const files = Array.from(e.dataTransfer.files || []).filter((f) => f && (f.type || "").startsWith("image/"));
+        if (!files.length) return;
+
+        const canFs = !!(window?.require?.("fs"));
+        if (canFs) {
+            const fs = window.require("fs");
+            const path = window.require("path");
+            const base = process.cwd();
+            const dir = path.join(base, "data", "media", "products");
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+            for (const file of files) {
+                const ext = (file.name || "").match(/\.[a-z0-9]+$/i)?.[0] || ".png";
+                const fname = `${uuid()}${ext}`;
+                const abs = path.join(dir, fname);
+                const buf = await file.arrayBuffer();
+                const BufferCtor = window.require?.("buffer")?.Buffer || Buffer;
+                fs.writeFileSync(abs, BufferCtor.from(new Uint8Array(buf)));
+                addRefs([`@media/products/${fname}`]);
+            }
+            return;
+        }
+
+        const urls = await Promise.all(files.map((f) => new Promise((res) => {
+            const fr = new FileReader();
+            fr.onload = () => res(String(fr.result || ""));
+            fr.onerror = () => res("");
+            fr.readAsDataURL(f);
+        })));
+        addRefs(urls.filter(Boolean));
+    };
+
+    return (
+        <Glass style={{ padding: 12, display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <Title>Images (drop multiple)</Title>
+                <div style={{ display: "flex", gap: 8 }}>
+                    <Btn onClick={() => fileRef.current?.click?.()}>Add…</Btn>
+                    <Btn onClick={() => { setImages([]); setActiveIdx(0); }}>Clear</Btn>
+                    <input
+                        ref={fileRef}
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        style={{ display: "none" }}
+                        onChange={async (e) => {
+                            const files = Array.from(e.target.files || []).filter(Boolean);
+                            e.target.value = "";
+                            if (!files.length) return;
+                            const fake = { preventDefault(){}, stopPropagation(){}, dataTransfer: { files, getData(){ return ""; } } };
+                            await onDrop(fake);
+                        }}
+                    />
+                </div>
+            </div>
+
+            <div
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; }}
+                onDrop={onDrop}
+                style={{
+                    height: 220, borderRadius: 14,
+                    border: "1px dashed rgba(255,255,255,0.22)",
+                    background: "rgba(0,0,0,0.18)",
+                    display: "grid", placeItems: "center", position: "relative", overflow: "hidden",
+                }}
+            >
+                {active ? (
+                    <img alt="" src={resolvePictureRef(active, bundledIndex, diskIndex) || active} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                ) : (
+                    <div style={{ textAlign: "center", opacity: 0.85 }}>
+                        <div style={{ fontWeight: 900, marginBottom: 6 }}>Drop images here</div>
+                        <div style={{ fontSize: 12, opacity: 0.8 }}>Drag from the library tree or drop local files</div>
+                    </div>
+                )}
+
+                {images.length > 1 && (
+                    <div style={{ position: "absolute", inset: 10, display: "flex", justifyContent: "space-between", pointerEvents: "none" }}>
+                        <div style={{ pointerEvents: "auto" }}><Btn onClick={() => setActiveIdx((i) => clamp(i - 1, 0, images.length - 1))}>◀</Btn></div>
+                        <div style={{ pointerEvents: "auto" }}><Btn onClick={() => setActiveIdx((i) => clamp(i + 1, 0, images.length - 1))}>▶</Btn></div>
+                    </div>
+                )}
+            </div>
+
+            {images.length > 0 && (
+                <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 4 }}>
+                    {images.map((ref, i) => (
+                        <div
+                            key={`${ref}-${i}`}
+                            draggable
+                            onDragStart={(e) => { e.dataTransfer.setData(DT_IMG_INDEX, String(i)); e.dataTransfer.effectAllowed = "move"; }}
+                            onDragOver={(e) => { if (e.dataTransfer.types.includes(DT_IMG_INDEX)) e.preventDefault(); }}
+                            onDrop={(e) => {
+                                const from = Number(e.dataTransfer.getData(DT_IMG_INDEX));
+                                if (Number.isFinite(from)) move(from, i);
+                            }}
+                            onClick={() => setActiveIdx(i)}
+                            style={{
+                                width: 88, flex: "0 0 88px", borderRadius: 14, overflow: "hidden",
+                                border: i === idx ? "1px solid rgba(124,255,255,0.45)" : "1px solid rgba(255,255,255,0.10)",
+                                background: "rgba(255,255,255,0.04)",
+                                cursor: "pointer",
+                            }}
+                            title={ref}
+                        >
+                            <img alt="" src={resolvePictureRef(ref, bundledIndex, diskIndex) || ref} style={{ width: "100%", height: 64, objectFit: "cover", display: "block" }} />
+                            <div style={{ display: "flex", gap: 6, padding: 6, justifyContent: "space-between" }}>
+                                <Btn title="Set as cover" onClick={() => { if (i !== 0) { move(i, 0); setActiveIdx(0); } }}>⭐</Btn>
+                                <Btn title="Remove" onClick={() => removeAt(i)}>🗑</Btn>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </Glass>
+    );
+}
+
+/* ------------------------------- File Tree ------------------------------- */
+function TreeRow({ depth, active, children, onClick, onDoubleClick, draggable, onDragStart, title }) {
+    return (
+        <div
+            title={title}
+            onClick={onClick}
+            onDoubleClick={onDoubleClick}
+            draggable={draggable}
+            onDragStart={onDragStart}
+            style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "6px 8px",
+                paddingLeft: 8 + depth * 12,
+                borderRadius: 10,
+                cursor: "pointer",
+                userSelect: "none",
+                background: active ? "rgba(124,255,255,0.10)" : "transparent",
+                border: active ? "1px solid rgba(124,255,255,0.20)" : "1px solid transparent",
+            }}
+        >
+            {children}
+        </div>
+    );
+}
+
+function FolderFileTree({ root, search, selectedRefs, onToggleSelect, onAddToProduct }) {
+    const [open, setOpen] = useState(() => new Set([""]));
+
+    const toggleOpen = (path) => {
+        setOpen((prev) => {
+            const next = new Set(prev);
+            next.has(path) ? next.delete(path) : next.add(path);
+            return next;
+        });
+    };
+
+    const q = String(search || "").trim().toLowerCase();
+
+    // returns true if node should be shown
+    const matchesNode = (n, path) => {
+        if (!q) return true;
+        if ((path === "" ? "productpictures" : n.name || "").toLowerCase().includes(q)) return true;
+        for (const f of (n.files || [])) {
+            const s = `${f.name} ${f.rel}`.toLowerCase();
+            if (s.includes(q)) return true;
+        }
+        for (const k of Object.keys(n.dirs || {})) {
+            if (matchesNode(n.dirs[k], path ? `${path}/${k}` : k)) return true;
+        }
+        return false;
+    };
+
+    const render = (n, path, depth) => {
+        if (!matchesNode(n, path)) return null;
+
+        const dirs = Object.keys(n.dirs || {}).sort((a,b)=>a.localeCompare(b));
+        const files = (n.files || []).slice().sort((a,b)=> (a.name||"").localeCompare(b.name||""));
+        const isOpen = open.has(path);
+
+        const rows = [];
+
+        // folder row
+        rows.push(
+            <TreeRow
+                key={`dir:${path}`}
+                depth={depth}
+                active={false}
+                title={path || "productPictures"}
+                onClick={() => toggleOpen(path)}
+            >
+        <span style={{ width: 18, height: 18, display: "grid", placeItems: "center", borderRadius: 6, border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)" }}>
+          {dirs.length || files.length ? (isOpen ? "▾" : "▸") : "·"}
+        </span>
+                <span>📁</span>
+                <span style={{ fontSize: 12, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {path === "" ? "productPictures" : n.name}
+        </span>
+                <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.7 }}>
+          {files.length}
+        </span>
+            </TreeRow>
+        );
+
+        if (!isOpen) return rows;
+
+        // file leaves
+        for (const f of files) {
+            if (q) {
+                const s = `${f.name} ${f.rel}`.toLowerCase();
+                if (!s.includes(q)) continue;
+            }
+            const isSel = selectedRefs.has(f.ref);
+            rows.push(
+                <TreeRow
+                    key={`file:${f.ref}`}
+                    depth={depth + 1}
+                    active={isSel}
+                    title={f.rel}
+                    onClick={(e) => onToggleSelect(f.ref, e.ctrlKey || e.metaKey)}
+                    onDoubleClick={() => onAddToProduct(f.ref)}
+                    draggable
+                    onDragStart={(e) => {
+                        const refs = Array.from(selectedRefs);
+                        const payload = refs.includes(f.ref) ? refs : [f.ref];
+                        e.dataTransfer.setData(DT_MULTI, JSON.stringify(payload));
+                        e.dataTransfer.setData(DT_SINGLE, payload[0]);
+                        e.dataTransfer.effectAllowed = "copy";
+                    }}
+                >
+          <span style={{ width: 18, height: 18, display: "grid", placeItems: "center", borderRadius: 6, border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)" }}>
+            🖼️
+          </span>
+                    <span style={{ fontSize: 12, opacity: 0.9, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {f.name}
+          </span>
+                </TreeRow>
+            );
+        }
+
+        // child dirs
+        for (const k of dirs) {
+            const child = n.dirs[k];
+            const childPath = path ? `${path}/${k}` : k;
+            rows.push(render(child, childPath, depth + 1));
+        }
+
+        return rows;
+    };
+
+    return (
+        <div style={{ padding: 8 }}>
+            {render(root, "", 0)}
+        </div>
+    );
+}
+
+/* ------------------------------- Main ProductManager ------------------------------- */
+export default function ProductManager({ open, onClose }) {
+    const [dbTick, setDbTick] = useState(0);
+    const [search, setSearch] = useState("");
+    const [selectedId, setSelectedId] = useState(null);
+    const [draft, setDraft] = useState(null);
+
+    const [dirty, setDirty] = useState(false);
+    const [lastSavedAt, setLastSavedAt] = useState(null);
+    const saveTimer = useRef(0);
+
+    // Important: default to DISK mode in-app if fs is available
+    const [picMode, setPicMode] = useState(() => (hasFsPictures() ? "disk" : "bundled"));
+    const [diskRoot, setDiskRoot] = useState(() => "C:\\Users\\Fallore\\Desktop\\Mr. Smith\\Development\\mr3d\\src\\data\\products\\productPictures");
+    const [picSearch, setPicSearch] = useState("");
+    const [selectedPics, setSelectedPics] = useState(() => new Set());
+
+    const bundledIndex = useMemo(() => buildBundledProductPicturesIndex(), [dbTick]);
+    const diskIndex = useMemo(() => (picMode === "disk" ? buildDiskProductPicturesIndex(diskRoot) : null), [picMode, diskRoot, dbTick]);
+
+    const products = useMemo(() => listProducts(), [dbTick, open]);
+    const categories = useMemo(() => listCategories(), [dbTick, open]);
 
     useEffect(() => {
-        if (!dropRef.current) return;
-        const el = dropRef.current;
-        const over = (e) => { e.preventDefault(); e.stopPropagation(); el.dataset.hl = "1"; };
-        const leave = (e) => { e.preventDefault(); e.stopPropagation(); el.dataset.hl = ""; };
-        const drop = async (e) => {
-            e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation?.(); el.dataset.hl = "";
-            const file = e.dataTransfer?.files?.[0]; if (!file) return; if (!/^image\//.test(file.type)) return;
-            await handleFile(file);
-        };
-        el.addEventListener("dragover", over);
-        el.addEventListener("dragleave", leave);
-        el.addEventListener("drop", drop);
-        return () => { el.removeEventListener("dragover", over); el.removeEventListener("dragleave", leave); el.removeEventListener("drop", drop); };
-    }, []);
+        const p = products.find((x) => x.id === selectedId) || null;
+        setDraft(p ? { ...p } : null);
+        setDirty(false);
+    }, [selectedId, products]);
 
-    /* ---------- CRUD ---------- */
+    useEffect(() => {
+        if (!dirty || !draft) return;
+        if (saveTimer.current) window.clearTimeout(saveTimer.current);
+        saveTimer.current = window.setTimeout(() => {
+            upsertProduct(draft);
+            setDbTick((x) => x + 1);
+            setDirty(false);
+            setLastSavedAt(new Date());
+        }, 650);
+        return () => { if (saveTimer.current) window.clearTimeout(saveTimer.current); };
+    }, [dirty, draft]);
+
+    useEffect(() => {
+        const onKey = (e) => { if (e.key === "Escape") onClose?.(); };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [onClose]);
+
+    const filteredProducts = useMemo(() => {
+        const q = String(search || "").trim().toLowerCase();
+        if (!q) return products;
+        return products.filter((p) => `${p.name} ${p.category} ${p.make} ${p.model}`.toLowerCase().includes(q));
+    }, [products, search]);
+
+    const rootNode = (picMode === "disk" && diskIndex?.root) ? diskIndex.root : bundledIndex.root;
+
+    const markDirty = () => setDirty(true);
+
+    const patchDraft = (patch) => {
+        setDraft((d) => ({ ...(d || {}), ...(patch || {}) }));
+        setDirty(true);
+    };
+
     const startNew = () => {
         const id = uuid();
-        setSelId(id);
-        setDraft({ id, name: "", category: categories[0] || "AV", make: "Generic", model: "Default", rackU: 1, typeTags: [], dims: { w: 0, h: 0, l: 0 }, weight: 0, description: "", image: "" });
-    };
-    const save = () => {
-        if (!draft) return;
-        upsertProduct({ ...draft, name: String(draft.name || "").trim(), rackU: draft.rackU ? Number(draft.rackU) : null });
-        setDbVersion(v => v + 1);
-    };
-    const remove = () => {
-        if (!selected) return;
-        setDlg({ type: "confirm", title: "Delete product", message: `Delete "${selected.name || selected.id}"? This cannot be undone.`, onConfirm: () => {
-                deleteProduct(selected.id); setSelId(null); setDraft(null); setDbVersion(v => v + 1); setDlg(null);
-            }, onCancel: () => setDlg(null) });
+        const category = categories[0] || "AV";
+        const make = listMakes(category)[0] || "Generic";
+        const model = listModels(category, make)[0] || "Default";
+        const p = {
+            id,
+            name: "New Product",
+            category, make, model,
+            typeTags: [],
+            dims: { w: 0, h: 0, l: 0 },
+            weight: 0,
+            description: "",
+            image: "",
+            images: [],
+            rackU: null,
+        };
+        upsertProduct(p);
+        setDbTick((x) => x + 1);
+        setSelectedId(id);
     };
 
-    // Add entity dialogs
-    const addCategory = () => setDlg({ type: "name", title: "Add Category", label: "Category name", onSubmit: (val) => { ensureCategory(val); setDbVersion(v => v + 1); setDlg(null); } });
-    const addMake = (cat) => setDlg({ type: "name", title: `Add Make under ${cat}`, label: "Make name", onSubmit: (val) => { ensureMake(cat, val); setDbVersion(v => v + 1); setDlg(null); } });
-    const addModel = (cat, make) => setDlg({ type: "name", title: `Add Model under ${cat} / ${make}`, label: "Model name", onSubmit: (val) => { ensureModel(cat, make, val); setDbVersion(v => v + 1); setDlg(null); } });
+    const doExport = () => {
+        const blob = exportProductsBlob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `products-db-${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
 
-    // destructive: cascade delete dialogs
-    const removeCategoryCascade = (cat) => setDlg({ type: "confirm", title: "Delete category", message: `Delete category "${cat}" and ALL its products?`, onConfirm: () => { deleteCategory(cat); setDbVersion(v => v + 1); if (draft?.category === cat) { setSelId(null); setDraft(null); } setDlg(null); }, onCancel: () => setDlg(null) });
-    const removeMakeCascade = (cat, make) => setDlg({ type: "confirm", title: "Delete make", message: `Delete make "${make}" under ${cat} and ALL its products?`, onConfirm: () => { deleteMake(cat, make); setDbVersion(v => v + 1); if (draft?.category === cat && draft?.make === make) { setSelId(null); setDraft(null); } setDlg(null); }, onCancel: () => setDlg(null) });
-    const removeModelCascade = (cat, make, model) => setDlg({ type: "confirm", title: "Delete model", message: `Delete model "${model}" under ${cat} / ${make} and ALL its products?`, onConfirm: () => { deleteModel(cat, make, model); setDbVersion(v => v + 1); if (draft?.category === cat && draft?.make === make && draft?.model === model) { setSelId(null); setDraft(null); } setDlg(null); }, onCancel: () => setDlg(null) });
-
-    // filtering (auto-expand when filtering)
-    const f = filter.toLowerCase().trim();
-    const matches = (p) => !f || [p.name, p.category, p.make, p.model, p.description].some(x => (x || "").toLowerCase().includes(f));
-    useEffect(() => {
-        if (!f) return; // on filter, open everything
-        const all = new Set(listCategories());
-        setOpenCats(all);
-        const mk = new Map();
-        all.forEach(cat => mk.set(cat, new Set(listMakes(cat))));
-        setOpenMakes(mk);
-        const mdl = new Map();
-        all.forEach(cat => {
-            const makes = listMakes(cat);
-            makes.forEach(make => mdl.set(`${cat}|||${make}`, new Set(listModels(cat, make))));
+    const togglePicSelect = (ref, additive) => {
+        setSelectedPics((prev) => {
+            const next = additive ? new Set(prev) : new Set();
+            next.has(ref) ? next.delete(ref) : next.add(ref);
+            return next;
         });
-        setOpenModels(mdl);
-    }, [filter]);
+    };
 
-    // expansion toggles
-    const toggleCat = (cat) => setOpenCats(prev => { const n = new Set(prev); n.has(cat) ? n.delete(cat) : n.add(cat); return n; });
-    const toggleMake = (cat, make) => setOpenMakes(prev => { const n = new Map(prev); const s = new Set(n.get(cat) || []); s.has(make) ? s.delete(make) : s.add(make); n.set(cat, s); return n; });
-    const toggleModel = (cat, make, model) => setOpenModels(prev => { const key = `${cat}|||${make}`; const n = new Map(prev); const s = new Set(n.get(key) || []); s.has(model) ? s.delete(model) : s.add(model); n.set(key, s); return n; });
+    const addToProduct = (ref) => {
+        if (!draft) return;
+        setDraft((d) => {
+            const cur = Array.isArray(d?.images) ? d.images : (d?.image ? [d.image] : []);
+            const next = [...cur, ref];
+            return { ...d, images: next, image: next[0] || "" };
+        });
+        markDirty();
+    };
 
     if (!open) return null;
 
     return (
         <div
-            data-pm-root
-            style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.68)", display: "grid", placeItems: "center" }}
-            onPointerDown={(e) => e.stopPropagation()}
-            onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-            onDrop={(e) => { e.preventDefault(); e.stopPropagation(); }}
+            style={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 1050,
+                display: "grid",
+                placeItems: "center",
+                background: "rgba(0,0,0,0.55)",
+                backdropFilter: "blur(6px)",
+                color: "#fff",
+            }}
+            onMouseDown={(e) => { e.stopPropagation(); }}
+            onPointerDown={(e) => { e.stopPropagation(); }}
+            onClick={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
         >
-            <div style={{
-                width: 1440, maxWidth: "98vw", maxHeight: "92vh",
-                background: "linear-gradient(180deg, #0e1322 0%, #0b1020 100%)",
-                border: "1px solid rgba(255,255,255,0.14)", borderRadius: 20, overflow: "hidden", color: "#fff",
-                display: "grid", gridTemplateColumns: "500px 1fr", boxShadow: "0 36px 140px rgba(0,0,0,0.55)"
-            }}>
+            <div
+                style={{
+                    width: "min(1680px, 96vw)",
+                    height: "min(920px, 92vh)",
+                    borderRadius: 20,
+                    overflow: "hidden",
+                    background: "radial-gradient(1200px 800px at 20% 0%, #15203a, #0b1020)",
+                    border: "1px solid rgba(255,255,255,0.10)",
+                    boxShadow: "0 40px 120px rgba(0,0,0,0.75)",
+                    display: "grid",
+                    gridTemplateRows: "auto 1fr",
+                }}
+            >
                 {/* Header */}
-                <div style={{
-                    gridColumn: "1 / -1", display: "flex", justifyContent: "space-between", alignItems: "center",
-                    padding: 16, borderBottom: "1px solid rgba(255,255,255,0.12)",
-                    background: "linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.02))", backdropFilter: "blur(16px)"
-                }}>
-                    <div style={{ fontWeight: 900, letterSpacing: 0.4 }}>Product Management</div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                        <Btn onClick={() => {
-                            const blob = exportProductsBlob(); const url = URL.createObjectURL(blob);
-                            const a = document.createElement("a"); a.href = url; a.download = "products.db.json";
-                            document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-                        }}><Icon.upload style={{ marginRight: 6 }}/>Export</Btn>
-                        <label>
-                            <input type="file" accept=".json" style={{ display: "none" }} onChange={async (e) => {
-                                const f = e.target.files?.[0]; e.target.value = "";
-                                if (!f) return; try { await importProductsFile(f); setDbVersion(v => v + 1); }
-                                catch (err) { /* optional: show inline error */ }
-                            }}/>
-                            <Btn><Icon.upload style={{ transform: "rotate(180deg)", marginRight: 6 }}/>Import</Btn>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: 12, borderBottom: "1px solid rgba(255,255,255,0.10)" }}>
+                    <div style={{ fontWeight: 950, letterSpacing: 0.3 }}>Product Catalogue</div>
+                    <div style={{ opacity: 0.7, fontSize: 12 }}>
+                        {dirty ? "Unsaved changes…" : (lastSavedAt ? `Saved ${lastSavedAt.toLocaleTimeString()}` : "Ready")}
+                    </div>
+
+                    <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+                        <Btn onClick={startNew}>+ New</Btn>
+                        <Btn onClick={doExport}>Export</Btn>
+
+                        <label style={{ display: "inline-flex", cursor: "pointer" }}>
+                            <input
+                                type="file"
+                                accept="application/json"
+                                style={{ display: "none" }}
+                                onChange={(e) => {
+                                    const f = e.target.files?.[0];
+                                    e.target.value = "";
+                                    if (f) importProductsFile(f).then(() => { setDbTick((x) => x + 1); setSelectedId(null); });
+                                }}
+                            />
+                            <span style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)" }}>
+                Import (Replace)
+              </span>
                         </label>
+
+                        <label style={{ display: "inline-flex", cursor: "pointer" }}>
+                            <input
+                                type="file"
+                                accept="application/json"
+                                style={{ display: "none" }}
+                                onChange={(e) => {
+                                    const f = e.target.files?.[0];
+                                    e.target.value = "";
+                                    if (f) mergeProductsFile(f).then(() => setDbTick((x) => x + 1));
+                                }}
+                            />
+                            <span style={{ padding: "8px 10px", borderRadius: 10, border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)" }}>
+                Merge Import
+              </span>
+                        </label>
+
                         <Btn onClick={onClose}>Close</Btn>
                     </div>
                 </div>
 
-                {/* LEFT: Tree */}
-                <div style={{ overflowY: "auto", padding: 16, borderRight: "1px solid rgba(255,255,255,0.12)" }} className="glass-scroll">
-                    <div style={{ display: "grid", gap: 10 }}>
-                        <Input placeholder="Filter…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-                        <Btn variant="primary" glow onClick={startNew}><Icon.plus style={{ marginRight: 6 }}/>New Product</Btn>
-                    </div>
+                {/* 3-panel body */}
+                <div style={{ padding: 12, display: "grid", gap: 12, gridTemplateColumns: "420px 1fr 420px", minHeight: 0 }}>
+                    {/* Left */}
+                    <Glass style={{ padding: 12, display: "grid", gridTemplateRows: "auto auto 1fr", minHeight: 0 }}>
+                        <Title>Catalogue</Title>
+                        <div style={{ marginTop: 10 }}><Input placeholder="Search products…" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
 
-                    <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
-                        {categories.map((cat) => {
-                            const makes = listMakes(cat);
-                            const catProducts = listProducts(cat).filter(matches);
-                            if (f && !catProducts.length) return null;
-                            const catOpen = openCats.has(cat);
-
-                            return (
-                                <div key={cat} style={{ display: "grid", gap: 8 }}>
-                                    <Row
-                                        label={cat}
-                                        sublabel={`${catProducts.length} product${catProducts.length !== 1 ? "s" : ""}`}
-                                        onToggle={() => toggleCat(cat)}
-                                        open={catOpen}
-                                        right={
-                                            <>
-                                                <CountBadge n={catProducts.length} />
-                                                <IconButton title="Add make" onClick={() => addMake(cat)}><Icon.factory/></IconButton>
-                                                <IconButton title="Add product" onClick={() => { ensureCategory(cat); startNew(); setDraft(d => d ? { ...d, category: cat, make: "Generic", model: "Default" } : d); }}><Icon.plus/></IconButton>
-                                                <IconButton title="Delete category" onClick={() => removeCategoryCascade(cat)}><Icon.trash/></IconButton>
-                                            </>
-                                        }
-                                    />
-
-                                    {catOpen && (
-                                        <div style={{ display: "grid", gap: 8, marginLeft: 10, paddingLeft: 10, borderLeft: "1px dashed rgba(255,255,255,0.18)" }}>
-                                            {makes.map(make => {
-                                                const models = listModels(cat, make);
-                                                const makeProducts = listProducts(cat, make).filter(matches);
-                                                if (f && !makeProducts.length) return null;
-                                                const mkOpen = (openMakes.get(cat) || new Set()).has(make);
-                                                return (
-                                                    <div key={make} style={{ display: "grid", gap: 8 }}>
-                                                        <Row
-                                                            label={`${cat} / ${make}`}
-                                                            sublabel={`${makeProducts.length} item${makeProducts.length !== 1 ? "s" : ""}`}
-                                                            onToggle={() => toggleMake(cat, make)}
-                                                            open={mkOpen}
-                                                            right={
-                                                                <>
-                                                                    <CountBadge n={makeProducts.length} />
-                                                                    <IconButton title="Add model" onClick={() => addModel(cat, make)}><Icon.layers/></IconButton>
-                                                                    <IconButton title="Add product" onClick={() => { startNew(); setDraft(d => d ? { ...d, category: cat, make, model: "Default" } : d); }}><Icon.plus/></IconButton>
-                                                                    <IconButton title="Delete make" onClick={() => removeMakeCascade(cat, make)}><Icon.trash/></IconButton>
-                                                                </>
-                                                            }
-                                                        />
-
-                                                        {mkOpen && (
-                                                            <div style={{ display: "grid", gap: 8, marginLeft: 10, paddingLeft: 10, borderLeft: "1px dashed rgba(255,255,255,0.18)" }}>
-                                                                {models.map(model => {
-                                                                    const prods = listProducts(cat, make, model).filter(matches);
-                                                                    if (f && !prods.length) return null;
-                                                                    const key = `${cat}|||${make}`;
-                                                                    const mdOpen = (openModels.get(key) || new Set()).has(model);
-                                                                    return (
-                                                                        <div key={model} style={{ display: "grid", gap: 8 }}>
-                                                                            <Row
-                                                                                label={`${cat} / ${make} / ${model}`}
-                                                                                sublabel={`${prods.length} product${prods.length !== 1 ? "s" : ""}`}
-                                                                                onToggle={() => toggleModel(cat, make, model)}
-                                                                                open={mdOpen}
-                                                                                right={
-                                                                                    <>
-                                                                                        <CountBadge n={prods.length} />
-                                                                                        <IconButton title="Add product" onClick={() => { startNew(); setDraft(d => d ? { ...d, category: cat, make, model } : d); }}><Icon.plus/></IconButton>
-                                                                                        <IconButton title="Delete model" onClick={() => removeModelCascade(cat, make, model)}><Icon.trash/></IconButton>
-                                                                                    </>
-                                                                                }
-                                                                            />
-
-                                                                            {mdOpen && (
-                                                                                <div style={{ display: "grid", gap: 8, marginLeft: 12, paddingLeft: 12, borderLeft: "1px dashed rgba(255,255,255,0.18)" }}>
-                                                                                    {prods.map(p => (
-                                                                                        <div
-                                                                                            key={p.id}
-                                                                                            onClick={() => setSelId(p.id)}
-                                                                                            style={{
-                                                                                                display: "grid", gridTemplateColumns: "auto 1fr", gap: 12, alignItems: "center",
-                                                                                                padding: 10, border: "1px solid rgba(255,255,255,0.12)", borderRadius: 12,
-                                                                                                background: selId === p.id ? "rgba(0,225,255,0.12)" : "rgba(255,255,255,0.04)", cursor: "pointer"
-                                                                                            }}
-                                                                                        >
-                                                                                            <Thumb src={p.image} size={60} />
-                                                                                            <div style={{ minWidth: 0 }}>
-                                                                                                <div style={{ fontWeight: 800, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name || "(unnamed)"}</div>
-                                                                                                <div style={{ fontSize: 12, opacity: 0.85, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.category} › {p.make} › {p.model}{typeof p.rackU === "number" ? ` • ${p.rackU}U` : ""}</div>
-                                                                                            </div>
-                                                                                        </div>
-                                                                                    ))}
-                                                                                    {!prods.length && <div style={{ opacity: 0.7, padding: "4px 2px" }}>No products.</div>}
-                                                                                </div>
-                                                                            )}
-                                                                        </div>
-                                                                    );
-                                                                })}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                );
-                                            })}
+                        <div style={{ marginTop: 10, overflowY: "auto" }}>
+                            {filteredProducts.map((p) => {
+                                const cover = p.image || (Array.isArray(p.images) ? p.images[0] : "");
+                                const url = resolvePictureRef(cover, bundledIndex, diskIndex) || cover;
+                                const isSel = p.id === selectedId;
+                                return (
+                                    <div
+                                        key={p.id}
+                                        onClick={() => setSelectedId(p.id)}
+                                        style={{
+                                            display: "grid", gridTemplateColumns: "56px 1fr", gap: 10,
+                                            padding: 10, borderRadius: 14, cursor: "pointer",
+                                            border: isSel ? "1px solid rgba(124,255,255,0.30)" : "1px solid rgba(255,255,255,0.10)",
+                                            background: isSel ? "rgba(124,255,255,0.08)" : "rgba(255,255,255,0.04)",
+                                            marginBottom: 10,
+                                        }}
+                                    >
+                                        <div style={{ width: 56, height: 56, borderRadius: 12, overflow: "hidden", background: "rgba(0,0,0,0.2)" }}>
+                                            {url ? <img alt="" src={url} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : null}
                                         </div>
-                                    )}
-                                </div>
-                            );
-                        })}
-                        {!categories.length && <div style={{ opacity: 0.7 }}>No categories yet.</div>}
-                    </div>
-                </div>
+                                        <div style={{ minWidth: 0 }}>
+                                            <div style={{ fontWeight: 900, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name || "Untitled"}</div>
+                                            <div style={{ fontSize: 12, opacity: 0.78, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                                {p.category} / {p.make} / {p.model}
+                                            </div>
+                                            <div style={{ fontSize: 11, opacity: 0.65 }}>
+                                                {(Array.isArray(p.images) ? p.images.length : (p.image ? 1 : 0))} image(s)
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                            {!filteredProducts.length && <div style={{ opacity: 0.7, padding: 10 }}>No products.</div>}
+                        </div>
+                    </Glass>
 
-                {/* RIGHT: Editor */}
-                <div style={{ overflowY: "auto", padding: 16 }} className="glass-scroll">
-                    {!draft ? (
-                        <div style={{ opacity: 0.8 }}>Select a product or create a new one.</div>
-                    ) : (
-                        <div style={{ display: "grid", gap: 14 }}>
-                            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 16, alignItems: "start" }}>
-                                <div
-                                    ref={dropRef}
-                                    data-hl=""
-                                    onClick={() => fileRef.current?.click()}
-                                    onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                                    onDrop={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                                    style={{
-                                        width: 220, height: 220, borderRadius: 16, overflow: "hidden",
-                                        border: "2px dashed rgba(255,255,255,0.18)",
-                                        outline: dropRef.current?.dataset?.hl ? "2px solid #50e3c2" : "none",
-                                        display: "grid", placeItems: "center", background: "rgba(255,255,255,0.04)", cursor: "pointer"
-                                    }}
-                                    title="Drop or click to select image"
+                    {/* Middle */}
+                    <div style={{ display: "grid", gridTemplateRows: "auto 1fr", gap: 12, minHeight: 0 }}>
+                        {draft ? (
+                            <>
+                                <Glass style={{ padding: 12, display: "grid", gap: 10 }}>
+                                    <Title>Details</Title>
+
+                                    <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr" }}>
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Name</div>
+                                            <Input value={draft.name || ""} onChange={(e) => patchDraft({ name: e.target.value })} />
+                                        </label>
+
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Rack U (optional)</div>
+                                            <Input
+                                                type="number" min="1" max="5"
+                                                value={draft.rackU ?? ""}
+                                                onChange={(e) => {
+                                                    const v = e.target.value;
+                                                    patchDraft({ rackU: v === "" ? null : clamp(Number(v) || 1, 1, 5) });
+                                                }}
+                                            />
+                                        </label>
+                                    </div>
+
+                                    <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr 1fr" }}>
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Category</div>
+                                            <select
+                                                value={draft.category || "AV"}
+                                                onChange={(e) => { ensureCategory(e.target.value); patchDraft({ category: e.target.value }); }}
+                                                style={{ padding: 8, borderRadius: 10, background: "rgba(0,0,0,0.25)", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }}
+                                            >
+                                                {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+                                            </select>
+                                        </label>
+
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Make</div>
+                                            <Input value={draft.make || ""} onChange={(e) => { ensureMake(draft.category || "AV", e.target.value || "Generic"); patchDraft({ make: e.target.value }); }} />
+                                        </label>
+
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Model</div>
+                                            <Input value={draft.model || ""} onChange={(e) => { ensureModel(draft.category || "AV", draft.make || "Generic", e.target.value || "Default"); patchDraft({ model: e.target.value }); }} />
+                                        </label>
+                                    </div>
+
+                                    <div style={{ display: "grid", gap: 10, gridTemplateColumns: "1fr 1fr 1fr 1fr" }}>
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Width</div>
+                                            <Input type="number" value={draft?.dims?.w ?? 0} onChange={(e) => patchDraft({ dims: { ...(draft.dims || {}), w: Number(e.target.value) || 0 } })} />
+                                        </label>
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Height</div>
+                                            <Input type="number" value={draft?.dims?.h ?? 0} onChange={(e) => patchDraft({ dims: { ...(draft.dims || {}), h: Number(e.target.value) || 0 } })} />
+                                        </label>
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Length</div>
+                                            <Input type="number" value={draft?.dims?.l ?? 0} onChange={(e) => patchDraft({ dims: { ...(draft.dims || {}), l: Number(e.target.value) || 0 } })} />
+                                        </label>
+                                        <label style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.85 }}>Weight</div>
+                                            <Input type="number" value={draft.weight ?? 0} onChange={(e) => patchDraft({ weight: Number(e.target.value) || 0 })} />
+                                        </label>
+                                    </div>
+
+                                    <label style={{ display: "grid", gap: 6 }}>
+                                        <div style={{ fontSize: 12, opacity: 0.85 }}>Description</div>
+                                        <textarea
+                                            value={draft.description || ""}
+                                            onChange={(e) => patchDraft({ description: e.target.value })}
+                                            style={{
+                                                width: "100%", minHeight: 90, padding: 10, borderRadius: 12,
+                                                background: "rgba(0,0,0,0.20)", border: "1px solid rgba(255,255,255,0.10)", color: "#fff",
+                                                resize: "vertical",
+                                            }}
+                                        />
+                                    </label>
+
+                                    <div style={{ display: "flex", gap: 10, justifyContent: "space-between" }}>
+                                        <Btn onClick={() => { upsertProduct(draft); setDbTick((x) => x + 1); setDirty(false); setLastSavedAt(new Date()); }}>Save now</Btn>
+                                        <Btn onClick={() => { if (!window.confirm("Delete this product?")) return; deleteProduct(draft.id); setDbTick((x) => x + 1); setSelectedId(null); }}>Delete</Btn>
+                                    </div>
+                                </Glass>
+
+                                <ImagesEditor draft={draft} setDraft={setDraft} bundledIndex={bundledIndex} diskIndex={diskIndex} markDirty={markDirty} />
+                            </>
+                        ) : (
+                            <Glass style={{ padding: 16, display: "grid", placeItems: "center", minHeight: 0 }}>
+                                <div style={{ opacity: 0.8 }}>Select a product to edit.</div>
+                            </Glass>
+                        )}
+                    </div>
+
+                    {/* Right */}
+                    <Glass style={{ padding: 12, display: "grid", gridTemplateRows: "auto auto auto 1fr auto", minHeight: 0 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                            <Title>Product Pictures</Title>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                <select
+                                    value={picMode}
+                                    onChange={(e) => { setPicMode(e.target.value); setSelectedPics(new Set()); }}
+                                    style={{ padding: 8, borderRadius: 10, background: "rgba(0,0,0,0.25)", color: "#fff", border: "1px solid rgba(255,255,255,0.12)" }}
                                 >
-                                    {draft.image ? (
-                                        <img alt="" src={draft.image} style={{ width: "100%", height: "100%", objectFit: "cover" }}/>
-                                    ) : (
-                                        <div style={{ textAlign: "center", opacity: 0.8 }}>
-                                            Drop image or click to upload
-                                            <div style={{ fontSize: 11, opacity: 0.7 }}>PNG / JPG / WEBP</div>
-                                        </div>
-                                    )}
-                                    <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={async (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (!f) return; await handleFile(f); }} />
-                                </div>
-
-                                <div style={{ display: "grid", gap: 10 }}>
-                                    <label>
-                                        Name
-                                        <Input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
-                                    </label>
-
-                                    {/* Reassignment controls */}
-                                    <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10 }}>
-                                        <label>
-                                            Category
-                                            <Select value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value, make: "", model: "" })}>
-                                                {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                                            </Select>
-                                        </label>
-                                        <IconButton title="Add category" onClick={addCategory}><Icon.plus/></IconButton>
-                                    </div>
-
-                                    <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10 }}>
-                                        <label>
-                                            Make
-                                            <Select value={draft.make || ""} onChange={(e) => setDraft({ ...draft, make: e.target.value, model: "" })}>
-                                                <option value="">(select)</option>
-                                                {subMakes.map(m => <option key={m} value={m}>{m}</option>)}
-                                            </Select>
-                                        </label>
-                                        <IconButton title="Add make" onClick={() => addMake(draft.category)}><Icon.factory/></IconButton>
-                                    </div>
-
-                                    <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10 }}>
-                                        <label>
-                                            Model
-                                            <Select value={draft.model || ""} onChange={(e) => setDraft({ ...draft, model: e.target.value })}>
-                                                <option value="">(select)</option>
-                                                {subModels.map(m => <option key={m} value={m}>{m}</option>)}
-                                            </Select>
-                                        </label>
-                                        <IconButton title="Add model" onClick={() => addModel(draft.category, draft.make)}><Icon.layers/></IconButton>
-                                    </div>
-
-                                    {/* Rack U selector */}
-                                    <label>
-                                        Rack U
-                                        <Select value={String(draft.rackU ?? "")} onChange={(e) => setDraft({ ...draft, rackU: e.target.value ? Number(e.target.value) : null })}>
-                                            <option value="">(not set)</option>
-                                            <option value="1">1U</option>
-                                            <option value="2">2U</option>
-                                            <option value="3">3U</option>
-                                            <option value="4">4U</option>
-                                            <option value="5">5U</option>
-                                        </Select>
-                                    </label>
-
-                                    {/* Type tags */}
-                                    <div>
-                                        <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 4 }}>Type tags (AV, Lighting, …)</div>
-                                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                                            {(draft.typeTags || []).map(t => (
-                                                <span key={t} style={{ fontSize: 11, background: "rgba(255,255,255,0.1)", padding: "3px 6px", borderRadius: 6, display: "inline-flex", gap: 6, alignItems: "center" }}>
-                          {t}
-                                                    <a style={{ cursor: "pointer", opacity: 0.8 }} onClick={() => setDraft(d => ({ ...d, typeTags: (d.typeTags || []).filter(x => x !== t) }))}>✕</a>
-                        </span>
-                                            ))}
-                                            <IconButton title="Add tag" onClick={() => { const v = prompt("Add type tag:"); if (!v) return; setDraft(d => ({ ...d, typeTags: Array.from(new Set([...(d.typeTags || []), v])) })); }}><Icon.plus/></IconButton>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Dims / weight */}
-                            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 }}>
-                                <label style={{ fontSize: 12 }}>
-                                    Width
-                                    <Input type="number" step="0.01" value={draft.dims?.w ?? 0} onChange={(e) => setDraft({ ...draft, dims: { ...(draft.dims || {}), w: Number(e.target.value || 0) } })} style={{ height: 32, padding: "4px 8px", fontSize: 13 }} />
-                                </label>
-                                <label style={{ fontSize: 12 }}>
-                                    Height
-                                    <Input type="number" step="0.01" value={draft.dims?.h ?? 0} onChange={(e) => setDraft({ ...draft, dims: { ...(draft.dims || {}), h: Number(e.target.value || 0) } })} style={{ height: 32, padding: "4px 8px", fontSize: 13 }} />
-                                </label>
-                                <label style={{ fontSize: 12 }}>
-                                    Length
-                                    <Input type="number" step="0.01" value={draft.dims?.l ?? 0} onChange={(e) => setDraft({ ...draft, dims: { ...(draft.dims || {}), l: Number(e.target.value || 0) } })} style={{ height: 32, padding: "4px 8px", fontSize: 13 }} />
-                                </label>
-                                <label style={{ fontSize: 12 }}>
-                                    Weight
-                                    <Input type="number" step="0.01" value={draft.weight ?? 0} onChange={(e) => setDraft({ ...draft, weight: Number(e.target.value || 0) })} style={{ height: 32, padding: "4px 8px", fontSize: 13 }} />
-                                </label>
-                            </div>
-
-                            <label> Description
-                                <textarea
-                                    value={draft.description || ""}
-                                    onChange={(e) => setDraft({ ...draft, description: e.target.value })}
-                                    style={{ width: "100%", minHeight: 140, resize: "vertical", background: "#121a2d", color: "#fff", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, padding: 10, fontFamily: "inherit", fontSize: 14 }}
-                                />
-                            </label>
-
-                            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 6 }}>
-                                <div style={{ display: "flex", gap: 8 }}>
-                                    <Btn onClick={save} variant="primary" glow><Icon.save style={{ marginRight: 6 }}/>Save</Btn>
-                                    {selected && <Btn onClick={remove}><Icon.trash style={{ marginRight: 6 }}/>Delete</Btn>}
-                                </div>
-                                <div style={{ opacity: 0.8, fontSize: 12 }}>DB: localStorage <code>epic3d.products.v2</code> (or <code>data/products.db.json</code> in Electron).</div>
+                                    <option value="disk" disabled={!hasFsPictures()}>Disk</option>
+                                    <option value="bundled">Bundled</option>
+                                </select>
+                                <Btn onClick={() => setDbTick((x) => x + 1)}>Refresh</Btn>
                             </div>
                         </div>
-                    )}
+
+                        <div style={{ marginTop: 6, fontSize: 11, opacity: 0.7 }}>
+                            {picMode === "disk"
+                                ? `Disk: ${diskIndex?.count ?? 0} images`
+                                : `Bundled: ${bundledIndex?.count ?? 0} images`}
+                            {(picMode === "bundled" && bundledIndex?.error) ? ` • ${bundledIndex.error}` : ""}
+                        </div>
+
+                        {picMode === "disk" && (
+                            <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                                <div style={{ fontSize: 12, opacity: 0.85 }}>Root folder</div>
+                                <Input value={diskRoot} onChange={(e) => setDiskRoot(e.target.value)} />
+                            </div>
+                        )}
+
+                        <div style={{ display: "grid", gap: 10, marginTop: 10, minHeight: 0 }}>
+                            <Input placeholder="Search folders/files…" value={picSearch} onChange={(e) => setPicSearch(e.target.value)} />
+
+                            <div style={{ overflowY: "auto", borderRadius: 14, border: "1px solid rgba(255,255,255,0.10)", minHeight: 0 }}>
+                                <FolderFileTree
+                                    root={rootNode}
+                                    search={picSearch}
+                                    selectedRefs={selectedPics}
+                                    onToggleSelect={(ref, add) => togglePicSelect(ref, add)}
+                                    onAddToProduct={(ref) => addToProduct(ref)}
+                                />
+                            </div>
+                        </div>
+
+                        <div style={{ fontSize: 11, opacity: 0.7 }}>
+                            Tip: Ctrl/Cmd select multiple and drag into the Images panel. Double-click a file to add instantly.
+                        </div>
+                    </Glass>
                 </div>
             </div>
-
-            {/* Inline dialogs */}
-            {dlg?.type === "name" && (
-                <NameDialog title={dlg.title} label={dlg.label} onSubmit={dlg.onSubmit} onCancel={() => setDlg(null)} />
-            )}
-            {dlg?.type === "confirm" && (
-                <ConfirmDialog title={dlg.title} message={dlg.message} onConfirm={dlg.onConfirm} onCancel={dlg.onCancel} />
-            )}
         </div>
     );
 }

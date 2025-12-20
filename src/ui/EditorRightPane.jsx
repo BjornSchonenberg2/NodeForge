@@ -58,8 +58,10 @@ export default function EditorRightPane({
                                             setRoomOpacity,
                                             setLinks,
                                             selectedBreakpoint,
-                                        setSelectedBreakpoint,
+                                            setSelectedBreakpoint,
                                             setLinkFromId,   // 🔹 NEW
+                                            multiLinkMode,
+                                            setMultiLinkMode,
                                             levelFromNodeId,       // 👈 NEW
                                             setLevelFromNodeId,    // 👈 NEW
                                         }) {
@@ -263,8 +265,8 @@ export default function EditorRightPane({
                         mode={mode}
                         setMode={setMode}
                         requestDelete={requestDelete}
-                           selectedBreakpoint={selectedBreakpoint}
-                           setSelectedBreakpoint={setSelectedBreakpoint}
+                        selectedBreakpoint={selectedBreakpoint}
+                        setSelectedBreakpoint={setSelectedBreakpoint}
                         setLinkFromId={setLinkFromId}   // 🔹 NEW
                         levelFromNodeId={levelFromNodeId}         // 👈 NEW
                         setLevelFromNodeId={setLevelFromNodeId}   // 👈 NEW
@@ -325,13 +327,81 @@ function NodeInspector({
                            mode,
                            setMode,
                            requestDelete,
-    selectedBreakpoint,
-        setSelectedBreakpoint,
+                           selectedBreakpoint,
+                           setSelectedBreakpoint,
                            setLinkFromId,   // 🔹 NEW
+                           multiLinkMode,
+                           setMultiLinkMode,
                            levelFromNodeId,        // 👈 NEW
                            setLevelFromNodeId,     // 👈 NEW
                        }) {
     if (!n) return null;
+
+    const [openMasterId, setOpenMasterId] = useState(null);
+
+    // "Master links" = incoming links where this node is the target.
+    // This lets you edit flows "vice versa" without hunting for the source node.
+    const incomingToThis = Array.isArray(links) ? links.filter((l) => l?.to === n.id) : [];
+
+    const masterGroups = (() => {
+        const byFrom = new Map();
+        for (const l of incomingToThis) {
+            const fromId = l?.from;
+            if (!fromId) continue;
+            const arr = byFrom.get(fromId) || [];
+            arr.push(l);
+            byFrom.set(fromId, arr);
+        }
+
+        const groups = [];
+        for (const [fromId, ls] of byFrom.entries()) {
+            const fromNode = nodes?.find((x) => x.id === fromId) || { id: fromId, label: fromId };
+            const allowedIds = new Set((ls || []).map((x) => x.id).filter(Boolean));
+
+            // Prevent edits from this embedded editor affecting other links from the master node.
+            const setLinksScoped = (updater) => {
+                setLinks((prev) => {
+                    const next = typeof updater === "function" ? updater(prev) : updater;
+                    if (!Array.isArray(next)) return prev;
+
+                    const nextById = new Map(next.map((x) => [x.id, x]));
+                    const out = [];
+
+                    for (const x of prev) {
+                        const id = x?.id;
+                        const isAllowed = !!id && allowedIds.has(id);
+
+                        if (!isAllowed) {
+                            out.push(x);
+                            continue;
+                        }
+
+                        // allow delete within scope
+                        if (!nextById.has(id)) continue;
+
+                        out.push(nextById.get(id));
+                    }
+                    return out;
+                });
+            };
+
+            // Render only the links that go from master -> this node
+            const scopedLinks = (ls || []).slice();
+
+            groups.push({
+                fromId,
+                fromNode,
+                fromLabel: fromNode?.label || fromId,
+                links: scopedLinks,
+                setLinksScoped,
+            });
+        }
+
+        // stable order
+        groups.sort((a, b) => (a.fromLabel || "").localeCompare(b.fromLabel || ""));
+        return groups;
+    })();
+
 
     return (
         <Panel
@@ -348,6 +418,95 @@ function NodeInspector({
                         }
                     />
                 </label>
+
+
+                <div
+                    style={{
+                        display: "flex",
+                        justifyContent: "flex-start",
+                        gap: 8,
+                        flexWrap: "wrap",
+                        marginTop: 0,
+                        marginBottom: 8,
+                    }}
+                >
+                    {/* Link toggle, starting from this node */}
+                    <Btn
+                        onClick={() => {
+                            if (mode === "link") {
+                                // Turn link mode OFF
+                                setMode("select");
+                                setLinkFromId?.(null);
+                                setMultiLinkMode?.(false);
+                            } else {
+                                // Turn link mode ON and start from this node
+                                setMode("link");
+                                setLinkFromId?.(n.id);
+                            }
+                            // Link button implies single-link mode
+                            setMultiLinkMode?.(false);
+                            // Whenever we toggle link mode, cancel leveling
+                            setLevelFromNodeId?.(null);
+                        }}
+                        glow={mode === "link"}
+                    >
+                        {mode === "link" ? "Link: ON" : "Link: OFF"}
+                    </Btn>
+
+                    <Btn
+                        onClick={() => {
+                            const next = !(multiLinkMode && mode === "link");
+                            // Turn multi-link ON: enter link mode from this node
+                            if (next) {
+                                setMode("link");
+                                setLinkFromId?.(n.id);
+                            } else {
+                                // Turn multi-link OFF: exit link mode
+                                setMode("select");
+                                setLinkFromId?.(null);
+                            }
+                            setMultiLinkMode?.(next);
+                            // Cancel leveling when using linking
+                            setLevelFromNodeId?.(null);
+                        }}
+                        glow={!!multiLinkMode && mode === "link"}
+                    >
+                        {multiLinkMode && mode === "link" ? "Multi Link: ON" : "Multi Link"}
+                    </Btn>
+
+
+                    {/* 🔹 NEW: Level Target button */}
+                    <Btn
+                        onClick={() => {
+                            // Always be in normal select mode for leveling
+                            setMode("select");
+                            setLinkFromId?.(null);
+
+                            // Toggle: clicking again on same node cancels
+                            setLevelFromNodeId?.((current) =>
+                                current === n.id ? null : n.id,
+                            );
+                        }}
+                        glow={levelFromNodeId === n.id}
+                    >
+                        {levelFromNodeId === n.id
+                            ? "Level Target (pick…)"
+                            : "Level Target"}
+                    </Btn>
+
+                    {/* Delete node */}
+                    <Btn
+                        onClick={() =>
+                            requestDelete({
+                                type: "node",
+                                id: n.id,
+                            })
+                        }
+                    >
+                        Delete
+                    </Btn>
+                </div>
+
 
                 <label
                     style={{ display: "flex", alignItems: "center", gap: 8 }}
@@ -1661,66 +1820,125 @@ function NodeInspector({
                     setSelectedBreakpoint={setSelectedBreakpoint}
                 />
 
+                {/* Master Links (incoming flows) */}
                 <div
                     style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        gap: 8,
-                        flexWrap: "wrap",
-                        marginTop: 8,
+                        marginTop: 10,
+                        padding: 10,
+                        borderRadius: 14,
+                        background: "rgba(2,6,23,0.32)",
+                        border: "1px solid rgba(148,163,184,0.18)",
                     }}
                 >
-                    {/* Link toggle, starting from this node */}
-                    <Btn
-                        onClick={() => {
-                            if (mode === "link") {
-                                // Turn link mode OFF
-                                setMode("select");
-                                setLinkFromId?.(null);
-                            } else {
-                                // Turn link mode ON and start from this node
-                                setMode("link");
-                                setLinkFromId?.(n.id);
-                            }
-                            // Whenever we toggle link mode, cancel leveling
-                            setLevelFromNodeId?.(null);
+                    <div
+                        style={{
+                            display: "flex",
+                            alignItems: "baseline",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            marginBottom: 8,
                         }}
-                        glow={mode === "link"}
                     >
-                        {mode === "link" ? "Link: ON" : "Link: OFF"}
-                    </Btn>
+                        <div
+                            style={{
+                                fontWeight: 800,
+                                fontSize: 12,
+                                letterSpacing: "0.14em",
+                                textTransform: "uppercase",
+                                opacity: 0.9,
+                            }}
+                        >
+                            Master Links
+                        </div>
+                        <div style={{ fontSize: 12, opacity: 0.7 }}>
+                            Incoming flows to this node
+                        </div>
+                    </div>
 
-                    {/* 🔹 NEW: Level Target button */}
-                    <Btn
-                        onClick={() => {
-                            // Always be in normal select mode for leveling
-                            setMode("select");
-                            setLinkFromId?.(null);
+                    {masterGroups.length === 0 ? (
+                        <div style={{ fontSize: 13, opacity: 0.75 }}>
+                            No incoming links.
+                        </div>
+                    ) : (
+                        <div style={{ display: "grid", gap: 8 }}>
+                            {masterGroups.map((g) => (
+                                <div
+                                    key={g.fromId}
+                                    style={{
+                                        borderRadius: 12,
+                                        border: "1px solid rgba(148,163,184,0.16)",
+                                        background: "rgba(15,23,42,0.28)",
+                                        overflow: "hidden",
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            justifyContent: "space-between",
+                                            gap: 10,
+                                            padding: "8px 10px",
+                                        }}
+                                    >
+                                        <div style={{ minWidth: 0 }}>
+                                            <div
+                                                style={{
+                                                    fontWeight: 750,
+                                                    fontSize: 13,
+                                                    whiteSpace: "nowrap",
+                                                    overflow: "hidden",
+                                                    textOverflow: "ellipsis",
+                                                }}
+                                            >
+                                                {g.fromLabel}
+                                            </div>
+                                            <div style={{ fontSize: 12, opacity: 0.72 }}>
+                                                {g.links.length} link{g.links.length === 1 ? "" : "s"} →{" "}
+                                                {n.label || n.id}
+                                            </div>
+                                        </div>
 
-                            // Toggle: clicking again on same node cancels
-                            setLevelFromNodeId?.((current) =>
-                                current === n.id ? null : n.id,
-                            );
-                        }}
-                        glow={levelFromNodeId === n.id}
-                    >
-                        {levelFromNodeId === n.id
-                            ? "Level Target (pick…)"
-                            : "Level Target"}
-                    </Btn>
+                                        <Btn
+                                            onClick={() =>
+                                                setOpenMasterId((cur) =>
+                                                    cur === g.fromId ? null : g.fromId,
+                                                )
+                                            }
+                                            glow={openMasterId === g.fromId}
+                                        >
+                                            {openMasterId === g.fromId ? "Hide" : "Edit"}
+                                        </Btn>
+                                    </div>
 
-                    {/* Delete node */}
-                    <Btn
-                        onClick={() =>
-                            requestDelete({
-                                type: "node",
-                                id: n.id,
-                            })
-                        }
-                    >
-                        Delete
-                    </Btn>
+                                    {openMasterId === g.fromId && (
+                                        <div
+                                            style={{
+                                                padding: 10,
+                                                borderTop: "1px solid rgba(148,163,184,0.14)",
+                                            }}
+                                        >
+                                            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 8 }}>
+                                                Editing flows from <b>{g.fromLabel}</b> to{" "}
+                                                <b>{n.label || n.id}</b>
+                                            </div>
+
+                                            <OutgoingLinksEditor
+                                                node={g.fromNode}
+                                                nodes={nodes}
+                                                links={g.links}
+                                                setLinks={g.setLinksScoped}
+                                                selectedBreakpoint={selectedBreakpoint}
+                                                setSelectedBreakpoint={setSelectedBreakpoint}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
+
+
 
             </div>
         </Panel>

@@ -83,17 +83,17 @@ const RoomBox = memo(
         const labelY = halfH + 0.12;
 
         const color = room.color || "#1b2a44";
-         const surfaceMat = useMemo(() => new THREE.MeshStandardMaterial({
-               color,
-              transparent: opacity < 1,     // only mark transparent if we actually are
-              opacity,
-               roughness: 0.8,
-               metalness: 0.05,
-               side: THREE.DoubleSide,
-               depthWrite: true,             // <-- crucial so lit pixels “stick”
-               depthTest: true,
-               blending: THREE.NormalBlending
-         }), [color, opacity]);
+        const surfaceMat = useMemo(() => new THREE.MeshStandardMaterial({
+            color,
+            transparent: opacity < 1,     // only mark transparent if we actually are
+            opacity,
+            roughness: 0.8,
+            metalness: 0.05,
+            side: THREE.DoubleSide,
+            depthWrite: true,             // <-- crucial so lit pixels “stick”
+            depthTest: true,
+            blending: THREE.NormalBlending
+        }), [color, opacity]);
 
         // ---- CORE FIX: block raycasting on *everything* during gizmo drag ----
 
@@ -281,6 +281,8 @@ const RoomBox = memo(
                 position={center}
                 rotation={rotation}
                 onPointerDown={(e) => {
+                    const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                    if (!isLeft) return;
                     // 1) block rooms during active drag
                     if (effectiveDragging) return;
 
@@ -373,7 +375,7 @@ const RoomBox = memo(
                     );
                 })()}
 
-            <Floor />
+                <Floor />
                 <Ceiling />
                 <WallNorth />
                 <WallSouth />
@@ -392,6 +394,8 @@ const RoomBox = memo(
                                 key={key}
                                 position={pos}
                                 onPointerDown={(e) => {
+                                    const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                    if (!isLeft) return;
                                     e.stopPropagation();
                                     console.log("[RoomBox] magnet clicked", {
                                         roomId: room.id,
@@ -438,6 +442,8 @@ const RoomBox = memo(
                                 <mesh
                                     position={[-0.35, 0, 0]}
                                     onPointerDown={(e) => {
+                                        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                        if (!isLeft) return;
                                         e.stopPropagation();
                                         if (dragging) return;
                                         onRoomDelete && onRoomDelete(room.id);
@@ -466,6 +472,8 @@ const RoomBox = memo(
                                 <mesh
                                     position={[0.35, 0, 0]}
                                     onPointerDown={(e) => {
+                                        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                        if (!isLeft) return;
                                         e.stopPropagation();
                                         if (dragging) return;
                                         setResizeMode((v) => !v);
@@ -498,6 +506,8 @@ const RoomBox = memo(
                                 <mesh
                                     position={[0, 0.02, halfD + 0.12]}
                                     onPointerDown={(e) => {
+                                        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                        if (!isLeft) return;
                                         e.stopPropagation();
                                         if (dragging) return;
                                         onRoomAnchorClick(room.id, "up");
@@ -516,6 +526,8 @@ const RoomBox = memo(
                                 <mesh
                                     position={[0, 0.02, -halfD - 0.12]}
                                     onPointerDown={(e) => {
+                                        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                        if (!isLeft) return;
                                         e.stopPropagation();
                                         if (dragging) return;
                                         onRoomAnchorClick(room.id, "down");
@@ -534,6 +546,8 @@ const RoomBox = memo(
                                 <mesh
                                     position={[halfW + 0.12, 0.02, 0]}
                                     onPointerDown={(e) => {
+                                        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                        if (!isLeft) return;
                                         e.stopPropagation();
                                         if (dragging) return;
                                         onRoomAnchorClick(room.id, "right");
@@ -552,6 +566,8 @@ const RoomBox = memo(
                                 <mesh
                                     position={[-halfW - 0.12, 0.02, 0]}
                                     onPointerDown={(e) => {
+                                        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                        if (!isLeft) return;
                                         e.stopPropagation();
                                         if (dragging) return;
                                         onRoomAnchorClick(room.id, "left");
@@ -575,6 +591,8 @@ const RoomBox = memo(
                                 <mesh
                                     position={[halfW * 0.6, 2.01, 0]}
                                     onPointerDown={(e) => {
+                                        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                        if (!isLeft) return;
                                         e.stopPropagation();
                                         if (dragging) return;
                                         onRoomResize(room.id, "right");
@@ -593,6 +611,8 @@ const RoomBox = memo(
                                 <mesh
                                     position={[-halfW * 0.6, 2.01, 0]}
                                     onPointerDown={(e) => {
+                                        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                        if (!isLeft) return;
                                         e.stopPropagation();
                                         if (dragging) return;
                                         onRoomResize(room.id, "left");

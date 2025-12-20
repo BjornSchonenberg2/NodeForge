@@ -111,6 +111,8 @@ function EditorLeftPane({
                             setAnimate,
                             labelsOn,
                             setLabelsOn,
+                            hudButtonsVisible = true,
+                            setHudButtonsVisible,
                         }) {
 
     const [paneWidth, setPaneWidth] = useState(() => {
@@ -540,6 +542,9 @@ function EditorLeftPane({
                             </Btn>
                             <Btn onClick={() => setLabelsOn((v) => !v)}>
                                 {labelsOn ? "Labels: On" : "Labels: Off"}
+                            </Btn>
+                            <Btn onClick={() => setHudButtonsVisible && setHudButtonsVisible((v) => !v)}>
+                                {hudButtonsVisible ? "HUD Actions: Shown" : "HUD Actions: Hidden"}
                             </Btn>
                         </div>
                         <div

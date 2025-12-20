@@ -1,5 +1,30 @@
 // src/ui/RackListView.jsx
 import React from "react";
+import { buildBundledProductPicturesIndex, buildDiskProductPicturesIndex, hasFs as hasPicsFs, resolvePictureRef } from "../data/products/productPicturesIndex.js";
+
+
+// Build picture indices once per module (resolve @pp/ and @media refs in rack UI)
+const __BUNDLED_PICS_INDEX = buildBundledProductPicturesIndex();
+let __DISK_PICS_INDEX = null;
+let __DISK_PICS_ROOT = null;
+function __getDiskPicsIndex() {
+    try {
+        if (!hasPicsFs()) return null;
+        const root =
+            localStorage.getItem("epic3d.productPictures.diskRoot.v1") ||
+            localStorage.getItem("epic3d.productPicturesRoot.v1") ||
+            "";
+        if (!root) return null;
+        if (root !== __DISK_PICS_ROOT) {
+            __DISK_PICS_ROOT = root;
+            __DISK_PICS_INDEX = buildDiskProductPicturesIndex(root);
+        }
+        return __DISK_PICS_INDEX;
+    } catch {
+        return null;
+    }
+}
+
 
 /**
  * Props
@@ -108,8 +133,11 @@ export default function RackListView({
                     .filter((v) => v != null)
                     .join(" × ");
 
+                const coverRef = p?.image || (Array.isArray(p?.images) ? p.images[0] : "");
+                const imgUrl = coverRef ? resolvePictureRef(coverRef, __BUNDLED_PICS_INDEX, __getDiskPicsIndex()) : "";
+
                 const grid =
-                    showPhotos && p?.image
+                    showPhotos && imgUrl
                         ? `${canDrag ? "28px " : ""}${thumbSize}px 1fr auto`
                         : `${canDrag ? "28px " : ""}1fr auto`;
 
@@ -146,9 +174,9 @@ export default function RackListView({
                             </div>
                         )}
 
-                        {showPhotos && p?.image && (
+                        {showPhotos && imgUrl && (
                             <img
-                                src={p.image}
+                                src={imgUrl}
                                 alt={name}
                                 style={{
                                     width: thumbSize,

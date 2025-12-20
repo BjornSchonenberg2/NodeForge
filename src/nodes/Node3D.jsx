@@ -8,9 +8,34 @@ import GeometryForShape from "../geometry/GeometryForShape.jsx";
 import LightBounds from "../lights/LightBounds.jsx";
 import { clusterColor } from "../utils/clusters.js";
 import { getProductById, getRackById } from "../data/products/store.js";
+import { buildBundledProductPicturesIndex, buildDiskProductPicturesIndex, hasFs as hasPicsFs, resolvePictureRef } from "../data/products/productPicturesIndex.js";
 import NodeTextBox from "./NodeTextBox.jsx";
 
 /* -------------------------------- helpers -------------------------------- */
+
+
+// Build picture indices once per module (fast to resolve @pp/... refs in 3D)
+const __BUNDLED_PICS_INDEX = buildBundledProductPicturesIndex();
+let __DISK_PICS_INDEX = null;
+let __DISK_PICS_ROOT = null;
+function __getDiskPicsIndex() {
+    try {
+        if (!hasPicsFs()) return null;
+        const root =
+            localStorage.getItem("epic3d.productPictures.diskRoot.v1") ||
+            localStorage.getItem("epic3d.productPicturesRoot.v1") ||
+            "";
+        if (!root) return null;
+        if (root !== __DISK_PICS_ROOT) {
+            __DISK_PICS_ROOT = root;
+            __DISK_PICS_INDEX = buildDiskProductPicturesIndex(root);
+        }
+        return __DISK_PICS_INDEX;
+    } catch {
+        return null;
+    }
+}
+
 
 function dirFromYawPitch(yawDeg = 0, pitchDeg = -30) {
     const yaw = (yawDeg * Math.PI) / 180;
@@ -56,6 +81,7 @@ const Node3D = memo(
     forwardRef(function Node3D(
         {
             node,
+            productsVersion = 0,
             selected = false,
             onPointerDown,
             dragging = false,
@@ -110,7 +136,7 @@ const Node3D = memo(
         const product = React.useMemo(() => {
             const pid = productRef?.id;
             return pid ? getProductById(pid) : (productRef || null);
-        }, [productRef?.id, productRef]);
+        }, [productRef?.id, productRef, productsVersion]);
 
 
 
@@ -126,35 +152,35 @@ const Node3D = memo(
             if (represent?.kind !== "rack") return null;
             if (represent?.rackId) return getRackById(represent.rackId);
             return represent?.rack || null; // inline unsaved rack
-        }, [represent?.kind, represent?.rackId, represent?.rack]);
+        }, [represent?.kind, represent?.rackId, represent?.rack, productsVersion]);
 
 // label text (now safe to reference product)
-         const labelText = node?.label || node?.name || node?.id;
-         const labelFull = useMemo(() => {
-               const pn = product?.name?.trim();
-              const rn = rack?.name?.trim();
-               let base = labelText || "";
-               if (represent?.enabled) {
-                     if (represent.kind === "product" && pn) base = base ? `${base} — ${pn}` : pn;
-                     if (represent.kind === "rack" && rn)    base = base ? `${base} — Rack: ${rn}` : `Rack: ${rn}`;
-                   }
-               return base || labelText;
-             }, [labelText, product?.name, rack?.name, represent?.enabled, represent?.kind]);
+        const labelText = node?.label || node?.name || node?.id;
+        const labelFull = useMemo(() => {
+            const pn = product?.name?.trim();
+            const rn = rack?.name?.trim();
+            let base = labelText || "";
+            if (represent?.enabled) {
+                if (represent.kind === "product" && pn) base = base ? `${base} — ${pn}` : pn;
+                if (represent.kind === "rack" && rn)    base = base ? `${base} — Rack: ${rn}` : `Rack: ${rn}`;
+            }
+            return base || labelText;
+        }, [labelText, product?.name, rack?.name, represent?.enabled, represent?.kind]);
 
 
 
         const productScale = Number(localStorage.getItem("epic3d.productScale.v1") || "1");
-         const showDimsGlobal = localStorage.getItem("epic3d.showDimsGlobal.v1") === "1";
-         const photoDefault = localStorage.getItem("epic3d.photoDefault.v1") !== "0";
-         const productUnits = localStorage.getItem("epic3d.productUnits.v1") || "cm";
+        const showDimsGlobal = localStorage.getItem("epic3d.showDimsGlobal.v1") === "1";
+        const photoDefault = localStorage.getItem("epic3d.photoDefault.v1") !== "0";
+        const productUnits = localStorage.getItem("epic3d.productUnits.v1") || "cm";
         const alwaysShow3DInfo = localStorage.getItem("epic3d.alwaysShow3DInfo.v1") === "1";
 
-         const toMeters = React.useCallback((v) => {
-               const n = Number(v || 0);
-               if (productUnits === "mm") return n / 1000;
-               if (productUnits === "cm") return n / 100;
-               return n; // meters
-             }, [productUnits]);
+        const toMeters = React.useCallback((v) => {
+            const n = Number(v || 0);
+            if (productUnits === "mm") return n / 1000;
+            if (productUnits === "cm") return n / 100;
+            return n; // meters
+        }, [productUnits]);
 
         const shapeToRender = useMemo(() => {
             if (represent?.enabled && represent?.kind === "rack" && rack && useDimsForRack) {
@@ -219,17 +245,17 @@ const Node3D = memo(
         );
 
 
-                    const targetLux = Number(light?.targetLux ?? 120); // tweak per light if you like
+        const targetLux = Number(light?.targetLux ?? 120); // tweak per light if you like
         const effectiveIntensity = useMemo(() => {
 
-                  if (light?.autoIntensity === false) return intensity;
-              const d = Math.max(0.001, Number(distance || 0));
-                 const coneFactor = Math.max(0.35, Math.cos(Math.min(Math.max(angle, 0.05), 1.2)));
-                  const I = targetLux * d * d;
-                  const decayAdjust = Math.max(0.5, Number(decay || 2));
-                 const blend = 0.75; // 75% auto, 25% user
-              return (1 - blend) * intensity + blend * (I * coneFactor / decayAdjust);
-            }, [light?.autoIntensity, intensity, targetLux, distance, angle, decay]);
+            if (light?.autoIntensity === false) return intensity;
+            const d = Math.max(0.001, Number(distance || 0));
+            const coneFactor = Math.max(0.35, Math.cos(Math.min(Math.max(angle, 0.05), 1.2)));
+            const I = targetLux * d * d;
+            const decayAdjust = Math.max(0.5, Number(decay || 2));
+            const blend = 0.75; // 75% auto, 25% user
+            return (1 - blend) * intensity + blend * (I * coneFactor / decayAdjust);
+        }, [light?.autoIntensity, intensity, targetLux, distance, angle, decay]);
 
 
         const hasLight = !!(
@@ -271,20 +297,20 @@ const Node3D = memo(
         // pretty raw dim labels from product
         const dimText = useMemo(() => {
 
-              if (represent?.enabled && represent?.kind === "rack" && rack) {
-                    const w = Number(rack.width || 0);
-                   const h = Number(rack.height || 0);
-                    const l = Number(rack.length || 0);
-                    const unit = localStorage.getItem("epic3d.productUnits.v1") || "cm";
-                   return { w: `${w}${unit}`, h: `${h}${unit}`, l: `${l}${unit}` };
-                 }
-              if (!product || !productRef?.useDims) return null;
-              const w = Number(product.width ?? product?.dims?.w) || 0;
-              const h = Number(product.height ?? product?.dims?.h) || 0;
-              const l = Number(product.length ?? product?.dims?.l) || 0;
+            if (represent?.enabled && represent?.kind === "rack" && rack) {
+                const w = Number(rack.width || 0);
+                const h = Number(rack.height || 0);
+                const l = Number(rack.length || 0);
+                const unit = localStorage.getItem("epic3d.productUnits.v1") || "cm";
+                return { w: `${w}${unit}`, h: `${h}${unit}`, l: `${l}${unit}` };
+            }
+            if (!product || !productRef?.useDims) return null;
+            const w = Number(product.width ?? product?.dims?.w) || 0;
+            const h = Number(product.height ?? product?.dims?.h) || 0;
+            const l = Number(product.length ?? product?.dims?.l) || 0;
 
-              const unit = localStorage.getItem("epic3d.productUnits.v1") || "cm";
-              return { w: `${w}${unit}`, h: `${h}${unit}`, l: `${l}${unit}` };
+            const unit = localStorage.getItem("epic3d.productUnits.v1") || "cm";
+            return { w: `${w}${unit}`, h: `${h}${unit}`, l: `${l}${unit}` };
         }, [product, productRef?.useDims, represent?.enabled, represent?.kind, rack]);
 // same UI knobs the HUD uses
         const unit = localStorage.getItem("epic3d.productUnits.v1") || "cm";
@@ -301,7 +327,15 @@ const Node3D = memo(
             }),
         } : null;
 
-        const showPhoto = (productRef?.showPhoto ?? photoDefault) && !!product?.image;
+        // Resolve representative thumbnail (supports data URLs, @pp/ bundled refs, @media disk refs)
+        const diskPicsIndex = React.useMemo(() => __getDiskPicsIndex(), [productsVersion]);
+        const coverRef = (product?.image || (Array.isArray(product?.images) ? product.images[0] : "")) || "";
+        const coverUrl = React.useMemo(
+            () => (coverRef ? resolvePictureRef(coverRef, __BUNDLED_PICS_INDEX, diskPicsIndex) : ""),
+            [coverRef, diskPicsIndex]
+        );
+
+        const showPhoto = (productRef?.showPhoto ?? photoDefault) && !!coverUrl;
 
 // near labelSizeLocal / labelColorLocal
         const labelSizeLocal  = (node?.labelScale ?? 1) * (labelSize ?? 0.24);
@@ -390,8 +424,8 @@ const Node3D = memo(
                                 <spotLight
                                     ref={lightRef}
                                     color={color}
-                                         intensity={effectiveIntensity}
-                                         distance={Math.max(0.01, distance)}
+                                    intensity={effectiveIntensity}
+                                    distance={Math.max(0.01, distance)}
                                     decay={decay}
                                     angle={angle}
                                     penumbra={penumbra}
@@ -427,13 +461,13 @@ const Node3D = memo(
                             <Billboard follow position={[0, yOffset, 0]}>
                                 <group>
                                     <Text
-                                      fontSize={labelSizeLocal}
-  color={labelColorLocal}
+                                        fontSize={labelSizeLocal}
+                                        color={labelColorLocal}
                                         maxWidth={labelMaxWidth}
                                         anchorX="center"
                                         anchorY="bottom"
-                                      outlineWidth={labelOutlineWidth}
-                                      outlineColor={labelOutlineColor}
+                                        outlineWidth={labelOutlineWidth}
+                                        outlineColor={labelOutlineColor}
                                         depthTest={false}
                                         depthWrite={false}
                                         renderOrder={9999}
@@ -459,18 +493,18 @@ const Node3D = memo(
                                                     backdropFilter: "blur(4px)",
                                                 }}
                                             >
-                                                 <img
-                                                   src={product.image}
-                                                   alt={product.name || "product"}
-                                                   style={{
-                                                     width: 120,   // larger for readability
-                                                     height: 80,
-                                                     objectFit: "cover",
-                                                     borderRadius: 8,
-                                                     imageRendering: "auto"
-                                                   }}
-                                                   draggable={false}
-                                                 />
+                                                <img
+                                                    src={coverUrl}
+                                                    alt={product.name || "product"}
+                                                    style={{
+                                                        width: 120,   // larger for readability
+                                                        height: 80,
+                                                        objectFit: "cover",
+                                                        borderRadius: 8,
+                                                        imageRendering: "auto"
+                                                    }}
+                                                    draggable={false}
+                                                />
                                             </div>
                                         </Html>
                                     )}
@@ -484,8 +518,8 @@ const Node3D = memo(
                                     <Text
                                         key={`f${i}`}
                                         position={[0, 0, -i * label3DStep]}
-                                      fontSize={labelSizeLocal}
-  color={labelColorLocal}
+                                        fontSize={labelSizeLocal}
+                                        color={labelColorLocal}
                                         maxWidth={labelMaxWidth}
                                         anchorX="center"
                                         anchorY="bottom"
@@ -503,8 +537,8 @@ const Node3D = memo(
                                         <Text
                                             key={`b${i}`}
                                             position={[0, 0, -i * label3DStep]}
-                                          fontSize={labelSizeLocal}
-  color={labelColorLocal}
+                                            fontSize={labelSizeLocal}
+                                            color={labelColorLocal}
                                             maxWidth={labelMaxWidth}
                                             anchorX="center"
                                             anchorY="bottom"
@@ -525,8 +559,8 @@ const Node3D = memo(
                             <>
                                 <group position={[0, yOffset, 0]} rotation={[0, 0, 0]}>
                                     <Text
-                                      fontSize={labelSizeLocal}
-  color={labelColorLocal}
+                                        fontSize={labelSizeLocal}
+                                        color={labelColorLocal}
                                         maxWidth={labelMaxWidth}
                                         anchorX="center"
                                         anchorY="bottom"
@@ -541,8 +575,8 @@ const Node3D = memo(
                                 </group>
                                 <group position={[0, yOffset, 0]} rotation={[0, Math.PI, 0]}>
                                     <Text
-                                      fontSize={labelSizeLocal}
-  color={labelColorLocal}
+                                        fontSize={labelSizeLocal}
+                                        color={labelColorLocal}
                                         maxWidth={labelMaxWidth}
                                         anchorX="center"
                                         anchorY="bottom"
@@ -642,52 +676,52 @@ const Node3D = memo(
                         position={[0, yOffset + labelSize * 0.9 + infoYOffset, 0]}
                         pointerEvents="none"
                     >                        <div
-                            style={{
-                                minWidth: 260,
-                                maxWidth: 380,
-                                background: "linear-gradient(180deg, rgba(0,0,0,0.75), rgba(0,0,0,0.55))",
-                                border: "1px solid rgba(255,255,255,0.15)",
-                                borderRadius: 12,
-                                padding: 10,
-                                boxShadow: "0 10px 28px rgba(0,0,0,0.55)",
-                                color: "#e9f3ff",
-                                fontSize: infoFont
-                            }}
-                        >
-                            {represent.kind === "product" && product && (
-                                <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 10 }}>
-                                    {product.image && (
-                                        <img
-                                            src={product.image}
-                                            alt={product.name}
-                                            style={{ width: 100, height: 70, objectFit: "cover", borderRadius: 8 }}
-                                            draggable={false}
-                                        />
-                                    )}
-                                    <div>
-                                        <div style={{ fontWeight: 900, marginBottom: 2 }}>{product.name}</div>
-                                        <div style={{ opacity: 0.8 }}>
-                                            {[product.category, product.make, product.model].filter(Boolean).join(" › ")}
-                                        </div>
-                                        <div style={{ marginTop: 6, opacity: 0.9 }}>
-                                            <strong>W×H×L:</strong>{" "}
-                                            {(product.width ?? product?.dims?.w) ?? 0} × {(product.height ?? product?.dims?.h) ?? 0} × {(product.length ?? product?.dims?.l) ?? 0} {localStorage.getItem("epic3d.productUnits.v1") || "cm"}
-                                        </div>
+                        style={{
+                            minWidth: 260,
+                            maxWidth: 380,
+                            background: "linear-gradient(180deg, rgba(0,0,0,0.75), rgba(0,0,0,0.55))",
+                            border: "1px solid rgba(255,255,255,0.15)",
+                            borderRadius: 12,
+                            padding: 10,
+                            boxShadow: "0 10px 28px rgba(0,0,0,0.55)",
+                            color: "#e9f3ff",
+                            fontSize: infoFont
+                        }}
+                    >
+                        {represent.kind === "product" && product && (
+                            <div style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 10 }}>
+                                {coverUrl && (
+                                    <img
+                                        src={coverUrl}
+                                        alt={product.name}
+                                        style={{ width: 100, height: 70, objectFit: "cover", borderRadius: 8 }}
+                                        draggable={false}
+                                    />
+                                )}
+                                <div>
+                                    <div style={{ fontWeight: 900, marginBottom: 2 }}>{product.name}</div>
+                                    <div style={{ opacity: 0.8 }}>
+                                        {[product.category, product.make, product.model].filter(Boolean).join(" › ")}
+                                    </div>
+                                    <div style={{ marginTop: 6, opacity: 0.9 }}>
+                                        <strong>W×H×L:</strong>{" "}
+                                        {(product.width ?? product?.dims?.w) ?? 0} × {(product.height ?? product?.dims?.h) ?? 0} × {(product.length ?? product?.dims?.l) ?? 0} {localStorage.getItem("epic3d.productUnits.v1") || "cm"}
                                     </div>
                                 </div>
-                            )}
+                            </div>
+                        )}
 
-                            {represent.kind === "rack" && rackResolved && (
-                                <RackListView
-                                    rack={rackResolved}
-                                    unit={unit}
-                                    ui={ui}
-                                    editable={false}
-                                />
-                            )}
+                        {represent.kind === "rack" && rackResolved && (
+                            <RackListView
+                                rack={rackResolved}
+                                unit={unit}
+                                ui={ui}
+                                editable={false}
+                            />
+                        )}
 
 
-                        </div>
+                    </div>
                     </Html>
                 )}
 

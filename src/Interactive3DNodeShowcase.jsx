@@ -52,7 +52,294 @@ import {
 const FLOORPLAN_BASE_SIZE = 10; // world units (meters-ish) when scale=1
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 
-function FloorplanPicturePlane({ src, scale = 1, rotX = 0, rotY = 0, rotZ = 0, y = 0.01 }) {
+// --- UI helpers for smooth numeric editing (prevents focus loss on each tick) ---
+function useDraftNumber(commitFn, initialValue) {
+    const [draft, setDraft] = React.useState(() => String(initialValue ?? ""));
+    const [editing, setEditing] = React.useState(false);
+
+    React.useEffect(() => {
+        // When not actively editing, keep draft synced to external value.
+        if (!editing) setDraft(String(initialValue ?? ""));
+    }, [initialValue, editing]);
+
+    const commitDraft = React.useCallback(() => {
+        const s = String(draft ?? "").trim();
+        if (!s) {
+            // empty input: revert
+            setDraft(String(initialValue ?? ""));
+            return;
+        }
+        const n = Number.parseFloat(s);
+        if (!Number.isFinite(n)) {
+            // revert to last known good value
+            setDraft(String(initialValue ?? ""));
+            return;
+        }
+        commitFn(n);
+    }, [commitFn, draft, initialValue]);
+
+    const onChange = React.useCallback((e) => {
+        setDraft(e?.target?.value ?? "");
+    }, []);
+
+    const onBlur = React.useCallback(() => {
+        setEditing(false);
+        commitDraft();
+    }, [commitDraft]);
+
+    const onFocus = React.useCallback(() => setEditing(true), []);
+
+    const onKeyDown = React.useCallback(
+        (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                // commit happens on blur
+                e.currentTarget.blur();
+            } else if (e.key === "Escape") {
+                e.preventDefault();
+                setDraft(String(initialValue ?? ""));
+                e.currentTarget.blur();
+            }
+        },
+        [initialValue],
+    );
+
+    return { draft, onChange, onBlur, onFocus, onKeyDown };
+}
+
+// --- UI helpers for smooth text editing (prevents focus loss on each tick) ---
+function useDraftText(commitFn, initialValue) {
+    const [draft, setDraft] = React.useState(() => String(initialValue ?? ""));
+    const [editing, setEditing] = React.useState(false);
+
+    React.useEffect(() => {
+        if (!editing) setDraft(String(initialValue ?? ""));
+    }, [initialValue, editing]);
+
+    const commitDraft = React.useCallback(() => {
+        commitFn(String(draft ?? ""));
+    }, [commitFn, draft]);
+
+    const onChange = React.useCallback((e) => {
+        setDraft(e?.target?.value ?? "");
+    }, []);
+
+    const onBlur = React.useCallback(() => {
+        setEditing(false);
+        commitDraft();
+    }, [commitDraft]);
+
+    const onFocus = React.useCallback(() => setEditing(true), []);
+
+    const onKeyDown = React.useCallback((e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            e.currentTarget.blur();
+        } else if (e.key === "Escape") {
+            e.preventDefault();
+            setDraft(String(initialValue ?? ""));
+            e.currentTarget.blur();
+        }
+    }, [initialValue]);
+
+    return { draft, onChange, onBlur, onFocus, onKeyDown };
+}
+
+function SmoothTextInput({ value, onCommit, style, title, placeholder, ...rest }) {
+    const { draft, onChange, onBlur, onFocus, onKeyDown } = useDraftText(onCommit, value);
+    return (
+        <input
+            type="text"
+            {...rest}
+            value={draft}
+            placeholder={placeholder}
+            onChange={onChange}
+            onBlur={onBlur}
+            onFocus={onFocus}
+            onKeyDown={(e) => { e.stopPropagation(); onKeyDown(e); }}
+            onPointerDownCapture={(e) => e.stopPropagation()}
+            onPointerMoveCapture={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerMove={(e) => e.stopPropagation()}
+            style={{
+                boxSizing: "border-box",
+                minWidth: 0,
+                height: 32,
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.05)",
+                padding: "0 10px",
+                color: "#fff",
+                fontSize: 12,
+                width: "100%",
+                ...(style || {}),
+            }}
+            title={title}
+        />
+    );
+}
+
+function SmoothRange({ min, max, step, value, onChange, title }) {
+    return (
+        <input
+            type="range"
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            title={title}
+            onInput={(e) => {
+                const v = Number(e.target.value);
+                if (Number.isFinite(v)) onChange(v);
+            }}
+            onChange={(e) => {
+                // Safari sometimes only fires onChange on release; keep both.
+                const v = Number(e.target.value);
+                if (Number.isFinite(v)) onChange(v);
+            }}
+            // Prevent canvas selection / drag handlers from stealing the pointer or focus.
+            onPointerDownCapture={(e) => e.stopPropagation()}
+            onPointerMoveCapture={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerMove={(e) => e.stopPropagation()}
+            style={{ width: "100%" }}
+        />
+    );
+}
+
+function SmoothNumberInput({ value, min, max, step, onCommit, style, title, ...rest }) {
+    const { draft, onChange, onBlur, onFocus, onKeyDown } = useDraftNumber(onCommit, value);
+    return (
+        <input
+            type="number"
+            {...rest}
+            value={draft}
+            min={min}
+            max={max}
+            step={step}
+            onChange={onChange}
+            onBlur={onBlur}
+            onFocus={onFocus}
+            onKeyDown={(e) => { e.stopPropagation(); onKeyDown(e); }}
+            // Prevent canvas selection / drag handlers from stealing the pointer or focus.
+            onPointerDownCapture={(e) => e.stopPropagation()}
+            onPointerMoveCapture={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerMove={(e) => e.stopPropagation()}
+            style={{
+                boxSizing: "border-box",
+                minWidth: 0,
+                height: 32,
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background: "rgba(255,255,255,0.05)",
+                padding: "0 10px",
+                color: "#fff",
+                fontSize: 12,
+                width: "100%",
+                ...(style || {}),
+            }}
+            title={title}
+        />
+    );
+}
+
+function useDraftNumberNullable(commitFn, initialValue) {
+    const isEmpty = initialValue === '' || initialValue === null || initialValue === undefined;
+    const [draft, setDraft] = React.useState(() => (isEmpty ? '' : String(initialValue)));
+    const [editing, setEditing] = React.useState(false);
+
+    React.useEffect(() => {
+        if (!editing) {
+            const emptyNow = initialValue === '' || initialValue === null || initialValue === undefined;
+            setDraft(emptyNow ? '' : String(initialValue));
+        }
+    }, [initialValue, editing]);
+
+    const commitDraft = React.useCallback(() => {
+        const s = String(draft ?? '').trim();
+        if (s === '') {
+            commitFn('');
+            return;
+        }
+        const n = Number.parseFloat(s);
+        if (!Number.isFinite(n)) {
+            // revert
+            const emptyNow = initialValue === '' || initialValue === null || initialValue === undefined;
+            setDraft(emptyNow ? '' : String(initialValue));
+            return;
+        }
+        commitFn(n);
+    }, [commitFn, draft, initialValue]);
+
+    const onChange = React.useCallback((e) => {
+        setDraft(e?.target?.value ?? '');
+    }, []);
+
+    const onBlur = React.useCallback(() => {
+        setEditing(false);
+        commitDraft();
+    }, [commitDraft]);
+
+    const onFocus = React.useCallback(() => setEditing(true), []);
+
+    const onKeyDown = React.useCallback((e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            e.currentTarget.blur();
+        } else if (e.key === 'Escape') {
+            e.preventDefault();
+            const emptyNow = initialValue === '' || initialValue === null || initialValue === undefined;
+            setDraft(emptyNow ? '' : String(initialValue));
+            e.currentTarget.blur();
+        }
+    }, [initialValue]);
+
+    return { draft, onChange, onBlur, onFocus, onKeyDown };
+}
+
+function SmoothNumberInputNullable({ value, min, max, step, onCommit, style, title, ...rest }) {
+    const { draft, onChange, onBlur, onFocus, onKeyDown } = useDraftNumberNullable(onCommit, value);
+    return (
+        <input
+            type="number"
+            {...rest}
+            value={draft}
+            min={min}
+            max={max}
+            step={step}
+            onChange={onChange}
+            onBlur={onBlur}
+            onFocus={onFocus}
+            onKeyDown={(e) => { e.stopPropagation(); onKeyDown(e); }}
+            onPointerDownCapture={(e) => e.stopPropagation()}
+            onPointerMoveCapture={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerMove={(e) => e.stopPropagation()}
+            style={{
+                boxSizing: 'border-box',
+                minWidth: 0,
+                height: 32,
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.12)',
+                background: 'rgba(255,255,255,0.05)',
+                padding: '0 10px',
+                color: '#fff',
+                fontSize: 12,
+                width: '100%',
+                ...(style || {}),
+            }}
+            title={title}
+        />
+    );
+}
+
+
+
+const FloorplanPicturePlane = React.forwardRef(function FloorplanPicturePlane(
+    { id, src, scale = 1, opacity = 1, rotX = 0, rotY = 0, rotZ = 0, x = 0, y = 0.01, z = 0, order = 0, onAspect },
+    ref,
+) {
     const tex = useTexture(src);
 
     useEffect(() => {
@@ -75,7 +362,13 @@ function FloorplanPicturePlane({ src, scale = 1, rotX = 0, rotY = 0, rotZ = 0, y
         return h / w;
     }, [tex]);
 
-    const s = clamp(Number(scale) || 1, 0.05, 50);
+    useEffect(() => {
+        if (!onAspect || !id) return;
+        if (!Number.isFinite(aspect) || aspect <= 0) return;
+        onAspect(id, aspect);
+    }, [onAspect, id, aspect]);
+
+    const s = clamp(Number(scale) || 1, 0.01, 500);
     const w = FLOORPLAN_BASE_SIZE * s;
     const h = w * aspect;
 
@@ -84,11 +377,15 @@ function FloorplanPicturePlane({ src, scale = 1, rotX = 0, rotY = 0, rotZ = 0, y
     const rx = THREE.MathUtils.degToRad(Number(rotX) || 0);
     const ry = THREE.MathUtils.degToRad(Number(rotY) || 0);
     const rz = THREE.MathUtils.degToRad(Number(rotZ) || 0);
-
+    const o = (() => {
+        const op = Number(opacity);
+        return Number.isFinite(op) ? clamp(op, 0, 1) : 1;
+    })();
     return (
         <mesh
+            ref={ref}
             rotation={[-Math.PI / 2 + rx, ry, rz]}
-            position={[0, y, 0]}
+            position={[Number(x) || 0, Number(y) || 0, Number(z) || 0]}
             raycast={() => null} // do NOT block scene interactions
         >
             <planeGeometry args={[w, h]} />
@@ -96,14 +393,18 @@ function FloorplanPicturePlane({ src, scale = 1, rotX = 0, rotY = 0, rotZ = 0, y
                 map={tex}
                 side={THREE.DoubleSide}
                 transparent
-                opacity={1}
+                opacity={o}
+                depthWrite={o >= 0.999}
                 toneMapped={false}
+                polygonOffset
+                polygonOffsetFactor={-1}
+                polygonOffsetUnits={-(Number(order) || 0) - 1}
             />
         </mesh>
     );
-}
+});
 
-function FloorplanPictures({ pictures }) {
+function FloorplanPictures({ pictures, pictureRefs, onAspect }) {
     const visible = useMemo(
         () =>
             (Array.isArray(pictures) ? pictures : [])
@@ -116,21 +417,2860 @@ function FloorplanPictures({ pictures }) {
 
     return (
         <group>
-            {visible.map((p, i) => (
-                <FloorplanPicturePlane
-                    key={p.id || `${p.name || "pic"}-${i}`}
-                    src={p.src}
-                    scale={p.scale ?? 1}
-                    rotX={p.rotX ?? 0}
-                    rotY={p.rotY ?? 0}
-                    rotZ={p.rotZ ?? 0}
-                    // tiny stacking so multiple pictures don't z-fight
-                    y={0.01 + i * 0.002}
-                />
-            ))}
+            {visible.map((p, i) => {
+                if (p?.id && pictureRefs?.current) {
+                    pictureRefs.current[p.id] ||= React.createRef();
+                }
+                return (
+                    <FloorplanPicturePlane
+                        key={p.id || `${p.name || "pic"}-${i}`}
+                        ref={p?.id && pictureRefs?.current ? pictureRefs.current[p.id] : undefined}
+                        id={p.id}
+                        src={p.src}
+                        scale={p.scale ?? 1}
+                        rotX={p.rotX ?? 0}
+                        rotY={p.rotY ?? 0}
+                        rotZ={p.rotZ ?? 0}
+                        x={p.x ?? 0}
+                        y={p.y ?? 0.01}
+                        z={p.z ?? 0}
+                        order={i}
+                        opacity={p.opacity ?? 1}
+                        onAspect={onAspect}
+                    />
+                );
+            })}
         </group>
     );
 }
+
+/* Top bar */
+/* ---------------- TopBar (2 rows, evenly spaced, accessible) ---------------- */
+/* ---------------- TopBar (header + 2 rows + HUD layout) ---------------- */
+const TopBar = React.memo(function TopBar({ ctx, shadowsOn, setShadowsOn, uiStart, uiStop }) {
+    const H = 26; // compact height
+    const uid = () => uuid();
+    const {
+        // Header / counts / logo
+        projectName,
+        setProjectName,
+        rooms,
+        nodes,
+        links,
+        logoHot,
+        setLogoHot,
+        logoFlash,
+        goToSelectedViewFromLogo,
+
+        // Project / file
+        prodMode,
+        setProdMode,
+        fileRef,
+        importPackage,
+        onModelFiles,
+        exportZip,
+        openMergeDialog,
+        modelBlob,
+
+        // Undo / redo
+        undo,
+        redo,
+        canUndo,
+        canRedo,
+
+        // Views
+        cameraSnapshotRef,
+        cameraPresets,
+        setCameraPresets,
+        cameraPresetId,
+        setCameraPresetId,
+
+        // Model / products
+        currentModelId,
+        setCurrentModelId,
+        modelVisible,
+        setModelVisible,
+        setProductsOpen,
+        modelScale,
+        setModelScale,
+        productScale,
+        setProductScale,
+        productUnits,
+        setProductUnits,
+
+        // Quick scene config
+        wireOpacity,
+        setWireOpacity,
+        wireDetail,
+        setWireDetail,
+        roomOpacity,
+        setRoomOpacity,
+        bg,
+        setBg,
+
+        // Scene toggles
+        wireframe,
+        setWireframe,
+        showLights,
+        setShowLights,
+        showLightBounds,
+        setShowLightBounds,
+        showGround,
+        setShowGround,
+        animate,
+        setAnimate,
+        labelsOn,
+        setLabelsOn,
+
+        // Reveal FX
+        wireStroke,
+        setWireStroke,
+        revealOpen,
+        setRevealOpen,
+        roomOperatorMode,
+        toggleRoomOperatorMode,
+
+        // Transform / selection
+        moveMode,
+        setMoveMode,
+        selectionMode,
+        setSelectionMode,
+        transformMode,
+        setTransformMode,
+        selected,
+        setSelected,
+        multiSel,
+        setMultiSel,
+        setSelectedBreakpoint,
+        setLinkFromId,
+        setMode,
+
+        // Snapping
+        snapRoomsEnabled,
+        setSnapRoomsEnabled,
+        snapRoomsDistance,
+        setSnapRoomsDistance,
+
+        // Globals
+        showDimsGlobal,
+        setShowDimsGlobal,
+        photoDefault,
+        setPhotoDefault,
+        alwaysShow3DInfo,
+        setAlwaysShow3DInfo,
+
+        // Pictures
+        picturesOpen,
+        setPicturesOpen,
+        importedPictures,
+        setImportedPictures,
+        picturesInputRef,
+        importPicturesFromFiles,
+        setPictureVisible,
+        setPictureSolid,
+        setPictureScale,
+        setPictureOpacity,
+        setPicturePosition,
+        setPictureRotation,
+        deletePicture,
+        pictureValuesClipboardRef,
+        setPictureClipboardTick,
+    } = ctx || {};
+
+    // Picture overlay manager popover
+    const picturesMenuRef = useRef(null);
+    const picturesBtnRef = useRef(null);
+
+    // Keep menu open while interacting; close only when clicking outside (or Esc).
+    useEffect(() => {
+        if (!picturesOpen) return;
+        if (typeof document === "undefined") return;
+
+        const onPointerDown = (e) => {
+            const menuEl = picturesMenuRef.current;
+            const btnEl = picturesBtnRef.current;
+
+            // Robust "inside" detection (works with range-input thumbs / shadow DOM)
+            const path = typeof e.composedPath === "function" ? e.composedPath() : [];
+            const target = e.target;
+
+            const insideMenu =
+                !!menuEl && (menuEl.contains(target) || path.includes(menuEl));
+            const insideBtn =
+                !!btnEl && (btnEl.contains(target) || path.includes(btnEl));
+
+            if (insideMenu || insideBtn) return;
+
+            setPicturesOpen(false);
+        };
+
+        const onKeyDown = (e) => {
+            if (e.key === "Escape") setPicturesOpen(false);
+        };
+
+        // Capture keeps it reliable even if the canvas or other layers stop bubbling.
+        document.addEventListener("pointerdown", onPointerDown, true);
+        document.addEventListener("keydown", onKeyDown, true);
+        return () => {
+            document.removeEventListener("pointerdown", onPointerDown, true);
+            document.removeEventListener("keydown", onKeyDown, true);
+        };
+    }, [picturesOpen]);
+
+    // Small local HUD layout UI state that drives HudButtonsLayer via window events
+    const [hudEdit, setHudEdit] = useState(false);
+    const [hudSnap, setHudSnap] = useState(8);
+    const [hudMagnet, setHudMagnet] = useState(8);
+    const sendHudConfig = useCallback((patch) => {
+        if (typeof window === "undefined") return;
+        window.dispatchEvent(
+            new CustomEvent("EPIC3D_HUD_CONFIG", { detail: patch })
+        );
+    }, []);
+    const sendCameraView = useCallback((view) => {
+        if (typeof window === "undefined") return;
+        window.dispatchEvent(
+            new CustomEvent("EPIC3D_CAMERA_VIEW", { detail: { view } })
+        );
+    }, []);
+
+    useEffect(() => {
+        // Keep HudButtonsLayer cfg in sync with the top-bar HUD controls
+        sendHudConfig({
+            edit: hudEdit,
+            snap: hudSnap,
+            magnet: hudMagnet,
+        });
+    }, [hudEdit, hudSnap, hudMagnet, sendHudConfig]);
+
+
+
+    useEffect(() => {
+        // Keep HudButtonsLayer cfg in sync with the top-bar HUD controls
+        sendHudConfig({
+            edit: hudEdit,
+            snap: hudSnap,
+            magnet: hudMagnet,
+        });
+    }, [hudEdit, hudSnap, hudMagnet, sendHudConfig]);
+
+    const labelStyle = {
+        fontSize: 10,
+        letterSpacing: 0.5,
+        textTransform: "uppercase",
+        color: "rgba(226,238,255,0.8)",
+        whiteSpace: "nowrap",
+    };
+
+    const rowStyle = {
+        display: "grid",
+        gridTemplateColumns: "auto auto auto 1fr",            gap: 10,
+        alignItems: "center",
+        justifyContent: "start",
+        padding: 6,
+        borderRadius: 10,
+        background: "rgba(8,13,24,0.96)",
+        backdropFilter: "blur(8px)",
+        boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
+        border: "1px solid rgba(148,163,184,0.55)",
+        position: "relative",
+    };
+
+    const row2Style = {
+        ...rowStyle,
+        gridTemplateColumns: "auto auto auto 1fr",            alignItems: "center",
+        position: "relative",
+    };
+
+    const Section = ({ title, children }) => (
+        <div
+            style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                minWidth: 0,
+                flexWrap: "nowrap",
+                whiteSpace: "nowrap",
+            }}
+        >
+            <span style={labelStyle}>{title}</span>
+            {children}
+        </div>
+    );
+
+    const Toggle = ({ label, on, onClick, title, style }) => (
+        <Btn
+            onClick={onClick}
+            title={title}
+            variant={on ? "primary" : "ghost"}
+            style={{
+                height: H,
+                padding: "0 8px",
+                borderRadius: 8,
+                fontSize: 11,
+                minWidth: 48,
+                ...style,
+            }}
+        >
+            {label}
+        </Btn>
+    );
+
+    return (
+        <div
+            onPointerDown={(e) => {
+                e.stopPropagation();
+                uiStart();
+            }}
+            onPointerUp={uiStop}
+            onPointerCancel={uiStop}
+            onPointerLeave={uiStop}
+            style={{
+                position: "absolute",
+                top: 8,
+                left: 8,
+                right: 8,
+                zIndex: 2147483647,
+                pointerEvents: "auto",
+                display: "grid",
+                gridAutoRows: "min-content",
+                rowGap: 6,
+            }}
+        >
+            {/* HEADER — logo + title + totals */}
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "6px 10px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(148,163,184,0.6)",
+                    background:
+                        "linear-gradient(130deg, rgba(15,23,42,0.98), rgba(56,189,248,0.25))",
+                    boxShadow: "0 10px 24px rgba(0,0,0,0.6)",
+                }}
+            >
+                {/* Left: logo + text */}
+                <div
+                    style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 10,
+                        minWidth: 0,
+                    }}
+                >
+                    {typeof logoImg !== "undefined" && (
+                        <button
+                            type="button"
+                            title="Go to selected View"
+                            aria-label="Go to selected View"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                goToSelectedViewFromLogo();
+                            }}
+                            onPointerDownCapture={(e) => e.stopPropagation()}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onMouseEnter={() => setLogoHot(true)}
+                            onMouseLeave={() => setLogoHot(false)}
+                            onFocus={() => setLogoHot(true)}
+                            onBlur={() => setLogoHot(false)}
+                            style={{
+                                display: "inline-flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                padding: 0,
+                                margin: 0,
+                                border: "none",
+                                background: "transparent",
+                                borderRadius: 8,
+                                cursor: "pointer",
+                            }}
+                        >
+                            <img
+                                src={logoImg}
+                                alt="Logo"
+                                style={{
+                                    width: 35,
+                                    height: 35,
+                                    borderRadius: 6,
+                                    objectFit: "contain",
+                                    boxShadow:
+                                        logoHot || logoFlash
+                                            ? "0 0 0 1px rgba(70,220,255,0.55), 0 0 18px rgba(70,220,255,0.65)"
+                                            : "0 0 0 1px rgba(15,23,42,0.9)",
+                                    filter:
+                                        logoHot || logoFlash
+                                            ? "brightness(1.18) saturate(1.2)"
+                                            : "none",
+                                    transform: logoHot
+                                        ? "scale(1.04)"
+                                        : logoFlash
+                                            ? "scale(1.03)"
+                                            : "scale(1)",
+                                    transition:
+                                        "box-shadow 260ms ease, filter 260ms ease, transform 260ms ease",
+                                }}
+                            />
+                        </button>
+                    )}
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 2,
+                            overflow: "hidden",
+                        }}
+                    >
+                        <div
+                            style={{
+                                fontSize: 10,
+                                letterSpacing: "0.22em",
+                                textTransform: "uppercase",
+                                color: "rgba(226,241,255,0.9)",
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                            }}
+                        >
+                            Node Forge 1.5
+                        </div>
+                        <div
+                            style={{
+                                fontSize: 12,
+                                color: "#e5e7eb",
+                                opacity: 0.9,
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                            }}
+                        >
+                            {projectName || "Untitled project"}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Right: totals */}
+                <div
+                    style={{
+                        display: "flex",
+                        alignItems: "baseline",
+                        gap: 14,
+                        fontSize: 11,
+                        color: "rgba(226,232,240,0.9)",
+                        flexShrink: 0,
+                    }}
+                >
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                        <span style={{ opacity: 0.7 }}>Rooms</span>
+                        <span style={{ fontWeight: 600 }}>{rooms.length}</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                        <span style={{ opacity: 0.7 }}>Nodes</span>
+                        <span style={{ fontWeight: 600 }}>{nodes.length}</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                        <span style={{ opacity: 0.7 }}>Links</span>
+                        <span style={{ fontWeight: 600 }}>{links.length}</span>
+                    </div>
+                </div>
+            </div>
+
+            {/* ROW 1 — Project / File · Views · Model & Products */}
+            <div style={rowStyle}>
+                {/* Project / File */}
+                <Section title="Project / File">
+
+                    <SmoothTextInput
+                        style={{
+                            width: 140,
+                            height: H,
+                        }}
+                        value={projectName}
+                        onCommit={setProjectName}
+                        title="Project name"
+                        placeholder="Project"
+                    />
+                    <Toggle
+                        label={prodMode ? "Prod" : "UI"}
+                        on={prodMode}
+                        onClick={() => setProdMode((v) => !v)}
+                        title="Toggle production / presentation mode"
+                        style={{ minWidth: 52 }}
+                    />
+                    <Btn
+                        onClick={() => fileRef.current?.click()}
+                        style={{ height: H, padding: "0 8px", minWidth: 52 }}
+                        title="Import .zip/.json/.glb/.gltf"
+                    >
+                        Import
+                    </Btn>
+                    <input
+                        ref={fileRef}
+                        type="file"
+                        accept=".zip,.json,.glb,.gltf"
+                        style={{
+                            position: "absolute",
+                            left: -9999,
+                            width: 1,
+                            height: 1,
+                            opacity: 0,
+                        }}
+                        onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (!f) return;
+                            /\.(zip|json)$/i.test(f.name)
+                                ? importPackage(f)
+                                : onModelFiles(f);
+                            e.target.value = "";
+                        }}
+                    />
+                    <Btn
+                        onClick={exportZip}
+                        style={{ height: H, padding: "0 8px", minWidth: 52 }}
+                        title="Export project (.zip)"
+                        variant={
+                            !!(nodes?.length || modelBlob) ? "primary" : "ghost"
+                        }
+                    >
+                        Export
+                    </Btn>
+                    <Btn
+                        onClick={openMergeDialog}
+                        style={{ height: H, padding: "0 8px", minWidth: 58 }}
+                        title="Merge another backup into this project"
+                        variant={"ghost"}
+                    >
+                        Merge
+                    </Btn>
+                    <span ref={picturesBtnRef} style={{ display: "inline-flex" }}>
+                        <Btn
+                            onClick={() => setPicturesOpen((v) => !v)}
+                            style={{ height: H, padding: "0 8px", minWidth: 78 }}
+                            title="Import / show / scale reference pictures"
+                            variant={
+                                picturesOpen || (importedPictures && importedPictures.length)
+                                    ? "primary"
+                                    : "ghost"
+                            }
+                        >
+                            Pictures{importedPictures?.length ? ` (${importedPictures.length})` : ""}
+                        </Btn>
+                    </span>
+                    <span
+                        aria-hidden="true"
+                        style={{
+                            width: 1,
+                            height: H,
+                            background: "rgba(148,163,184,0.35)",
+                            margin: "0 6px",
+                            display: "inline-block",
+                        }}
+                    />
+                    <IconBtn
+                        label="↶"
+                        title="Undo (Ctrl+Z)"
+                        onClick={undo}
+                        disabled={!canUndo}
+                    />
+                    <IconBtn
+                        label="↷"
+                        title="Redo (Ctrl+Y)"
+                        onClick={redo}
+                        disabled={!canRedo}
+                    />
+                </Section>
+
+                {/* Views / Camera presets */}
+                <Section title="Views">
+                    <Btn
+                        onClick={() => {
+                            const snap = cameraSnapshotRef.current?.();
+                            if (!snap) return;
+                            const name =
+                                window.prompt(
+                                    "Name this view:",
+                                    `View ${
+                                        (cameraPresets?.length || 0) + 1
+                                    }`,
+                                ) || "View";
+                            const id = uid();
+                            setCameraPresets((prev) => [
+                                ...prev,
+                                { id, name, ...snap },
+                            ]);
+                            setCameraPresetId(id);
+                        }}
+                        style={{ height: H, padding: "0 8px", minWidth: 52 }}
+                        title="Save current camera as view"
+                    >
+                        Save
+                    </Btn>
+                    <Select
+                        value={cameraPresetId}
+                        onChange={(e) => setCameraPresetId(e.target.value)}
+                        style={{
+                            minWidth: 140,
+                            maxWidth: 190,
+                            height: H,
+                        }}
+                        title="Select a saved view"
+                    >
+                        <option value="">Default</option>
+                        {cameraPresets.map((p) => (
+                            <option key={p.id} value={p.id}>
+                                {p.name}
+                            </option>
+                        ))}
+                    </Select>
+                    <Btn
+                        onClick={() => {
+                            if (!cameraPresetId) return;
+                            setCameraPresets((prev) =>
+                                prev.filter((p) => p.id !== cameraPresetId),
+                            );
+                            setCameraPresetId("");
+                        }}
+                        style={{ height: H, padding: "0 6px", minWidth: 44 }}
+                        title="Delete selected view"
+                        variant={cameraPresetId ? "primary" : "ghost"}
+                    >
+                        Del
+                    </Btn>
+                    <div
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                            marginLeft: 8,
+                        }}
+                    >
+                        <IconBtn
+                            label="⟳"
+                            title="Reset view"
+                            onClick={() => sendCameraView("reset")}
+                        />
+                        <IconBtn
+                            label="F"
+                            title="Front (Alt+W)"
+                            onClick={() => sendCameraView("front")}
+                        />
+                        <IconBtn
+                            label="B"
+                            title="Back (Alt+S)"
+                            onClick={() => sendCameraView("back")}
+                        />
+                        <IconBtn
+                            label="L"
+                            title="Left (Alt+A)"
+                            onClick={() => sendCameraView("left")}
+                        />
+                        <IconBtn
+                            label="R"
+                            title="Right (Alt+D)"
+                            onClick={() => sendCameraView("right")}
+                        />
+                        <IconBtn
+                            label="⊤"
+                            title="Top (Alt+Q)"
+                            onClick={() => sendCameraView("top")}
+                        />
+                        <IconBtn
+                            label="⊥"
+                            title="Bottom (Alt+E)"
+                            onClick={() => sendCameraView("bottom")}
+                        />
+                    </div>
+                </Section>
+
+                {/* Model & Products */}
+                <Section title="Model / Products">
+                    <Select
+                        style={{
+                            flex: 1,
+                            minWidth: 120,
+                            maxWidth: 180,
+                            height: H,
+                        }}
+                        value={currentModelId}
+                        onChange={(e) => setCurrentModelId(e.target.value)}
+                        title="Static model"
+                    >
+                        <option value="">(none)</option>
+                        {STATIC_MODELS.map((m) => (
+                            <option key={m.id} value={m.id}>
+                                {m.name}
+                            </option>
+                        ))}
+                    </Select>
+                    <Toggle
+                        label={modelVisible ? "Hide" : "Show"}
+                        on={modelVisible}
+                        onClick={() => setModelVisible((v) => !v)}
+                        title={modelVisible ? "Hide model" : "Show model"}
+                        style={{ minWidth: 60 }}
+                    />
+                    <Btn
+                        onClick={() => setProductsOpen(true)}
+                        style={{ height: H, padding: "0 8px", minWidth: 80 }}
+                        title="Open product manager"
+                    >
+                        Products
+                    </Btn>
+
+                    {/* 🔁 NEW: Model scale in top bar */}
+                    <SmoothNumberInput
+                        value={modelScale}
+                        step="0.1"
+                        min="0.1"
+                        max="5"
+                        onCommit={(v) => setModelScale(clamp(v, 0.1, 500))}
+                        title="Model scale"
+                        style={{ width: 64, height: H, textAlign: "center" }}
+                    />
+
+                    {/* Existing: Product scale */}
+                    <SmoothNumberInput
+                        value={productScale}
+                        step="0.1"
+                        min="0.1"
+                        max="5"
+                        onCommit={(v) => setProductScale(clamp(v, 0.1, 5))}
+                        title="Product scale"
+                        style={{ width: 64, height: H, textAlign: "center" }}
+                    />
+                    <Select
+                        value={productUnits}
+                        onChange={(e) => setProductUnits(e.target.value)}
+                        style={{ width: 64, height: H }}
+                        title="Units"
+                    >
+                        <option value="cm">cm</option>
+                        <option value="mm">mm</option>
+                        <option value="m">m</option>
+                        <option value="in">in</option>
+                        <option value="ft">ft</option>
+                    </Select>
+                </Section>
+
+
+                {/* QUICK SCENE SLIDERS */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 12, opacity: 0.8 }}>SCENE Configs</span>
+
+                    {/* Wireframe opacity */}
+                    <span style={{ fontSize: 11, color: "#b6c8e6" }}>Wire</span>
+                    <div style={{ width: 120 }}>
+                        <Slider
+                            value={wireOpacity}
+                            min={0}
+                            max={1}
+                            step={0.02}
+                            onChange={setWireOpacity}
+                        />
+                    </div>
+
+                    {/* 🔁 NEW: Wireframe quality */}
+                    <span style={{ fontSize: 11, color: "#b6c8e6" }}>Quality</span>
+                    <Select
+                        value={wireDetail}
+                        onChange={(e) => setWireDetail(e.target.value)}
+                        style={{ width: 80, height: H }}
+                        title="Wireframe quality"
+                    >
+                        <option value="ultra">Wire: Ultra (full mesh)</option>
+                        <option value="high">Wire: High</option>
+                        <option value="med">Wire: Medium</option>
+                        <option value="low">Wire: Low</option>
+                        <option value="bbox">Wire: BBox only</option>
+                    </Select>
+
+                    {/* Room opacity */}
+                    <span style={{ fontSize: 11, color: "#b6c8e6" }}>Room</span>
+                    <div style={{ width: 120 }}>
+                        <Slider
+                            value={roomOpacity}
+                            min={0}
+                            max={1}
+                            step={0.02}
+                            onChange={setRoomOpacity}
+                        />
+                    </div>
+
+                    {/* Background color */}
+                    <span style={{ fontSize: 11, color: "#b6c8e6" }}>BG</span>
+                    <Input
+                        type="color"
+                        value={bg}
+                        onChange={(e) => setBg(e.target.value)}
+                        style={{ width: 36, height: H, padding: 0 }}
+                        title="Background color"
+                    />
+                </div>
+
+                {/* Pictures popover (hangs under row 1) */}
+                {picturesOpen && (
+                    <div
+                        ref={picturesMenuRef}
+                        style={{
+                            position: "absolute",
+                            top: "400%",
+                            left: 10,
+                            marginTop: 6,
+                            zIndex: 2147483647,
+                        }}
+                        onPointerDownCapture={(e) => e.stopPropagation()}
+                        onPointerMoveCapture={(e) => e.stopPropagation()}
+                        onPointerDown={(e) => e.stopPropagation()}
+                    >
+                        <Panel title="Imported pictures">
+                            <div style={{ display: "grid", gap: 10, minWidth: 520, maxWidth: 820 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                    <Btn
+                                        variant="primary"
+                                        onClick={() => picturesInputRef.current?.click()}
+                                        style={{ height: 28, padding: "0 10px" }}
+                                        title="Add one or more images"
+                                    >
+                                        Add…
+                                    </Btn>
+                                    <Btn
+                                        variant="ghost"
+                                        onClick={() => setImportedPictures([])}
+                                        disabled={!importedPictures?.length}
+                                        style={{ height: 28, padding: "0 10px" }}
+                                        title="Remove all imported pictures"
+                                    >
+                                        Clear all
+                                    </Btn>
+                                    <span style={{ fontSize: 11, opacity: 0.75 }}>
+                                        Tip: pictures are flat ground planes. Enable <b>Solid</b> to use them as decks (nodes/rooms can't go below). Use <b>Move</b> to drag via gizmo.
+                                    </span>
+
+                                    <input
+                                        ref={picturesInputRef}
+                                        type="file"
+                                        accept="image/*"
+                                        multiple
+                                        style={{
+                                            position: "absolute",
+                                            left: -9999,
+                                            width: 1,
+                                            height: 1,
+                                            opacity: 0,
+                                        }}
+                                        onChange={async (e) => {
+                                            const files = e.target.files;
+                                            if (!files || !files.length) return;
+                                            await importPicturesFromFiles(files);
+                                            e.target.value = "";
+                                        }}
+                                    />
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: "grid",
+                                        gap: 10,
+                                        maxHeight: 360,
+                                        overflow: "auto",
+                                        paddingRight: 6,
+                                    }}
+                                >
+                                    {!importedPictures?.length ? (
+                                        <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                            No pictures imported yet.
+                                        </div>
+                                    ) : (
+                                        importedPictures
+                                            .slice()
+                                            .reverse()
+                                            .map((p) => {
+                                                const hasClipboard = !!pictureValuesClipboardRef.current;
+                                                const snapNodeId =
+                                                    (selected?.type === "node" && selected.id) ||
+                                                    (Array.isArray(multiSel) ? multiSel.find((it) => it?.type === "node")?.id : null);
+                                                const snapRoomId =
+                                                    (selected?.type === "room" && selected.id) ||
+                                                    (Array.isArray(multiSel) ? multiSel.find((it) => it?.type === "room")?.id : null);
+                                                const snapNode = snapNodeId ? nodes.find((n) => n.id === snapNodeId) : null;
+                                                const snapRoom = snapRoomId ? rooms.find((r) => r.id === snapRoomId) : null;
+
+                                                return (
+                                                    <div
+                                                        key={p.id}
+                                                        style={{
+                                                            display: "grid",
+                                                            gridTemplateColumns: "120px 1fr 420px 180px",
+                                                            alignItems: "start",
+                                                            gap: 10,
+                                                            padding: "8px 10px",
+                                                            borderRadius: 10,
+                                                            border: "1px solid rgba(148,163,184,0.35)",
+                                                            background: "rgba(10,16,30,0.55)",
+                                                        }}
+                                                    >
+                                                        <div style={{ display: "grid", gap: 6 }}>
+                                                            <Checkbox
+                                                                checked={!!p.visible}
+                                                                onChange={(v) => setPictureVisible(p.id, v)}
+                                                                label="Show"
+                                                                style={{ fontSize: 11 }}
+                                                            />
+                                                            <Checkbox
+                                                                checked={!!p.solid}
+                                                                onChange={(v) => setPictureSolid(p.id, v)}
+                                                                label="Solid"
+                                                                style={{ fontSize: 11 }}
+                                                                title="When enabled (and Show is on), nodes/rooms can't go below this picture plane"
+                                                            />
+                                                        </div>
+
+                                                        <div
+                                                            title={p.name}
+                                                            style={{
+                                                                overflow: "hidden",
+                                                                textOverflow: "ellipsis",
+                                                                whiteSpace: "nowrap",
+                                                                fontSize: 12,
+                                                                opacity: 0.92,
+                                                            }}
+                                                        >
+                                                            {p.name || "(unnamed)"}
+                                                        </div>
+
+                                                        <div style={{ display: "grid", gap: 8 }}>
+                                                            {/* Scale */}
+                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Scale</span>
+                                                                <div style={{ flex: 1, minWidth: 120 }}>
+                                                                    <SmoothRange
+                                                                        min={0.01}
+                                                                        max={500}
+                                                                        step={0.25}
+                                                                        value={Number(p.scale) || 1}
+                                                                        onChange={(v) => setPictureScale(p.id, v)}
+                                                                        title="Scale"
+                                                                    />
+                                                                </div>
+                                                                <SmoothNumberInput
+                                                                    value={Number(p.scale) || 1}
+                                                                    step="0.1"
+                                                                    min="0.01"
+                                                                    max="500"
+                                                                    onCommit={(v) => setPictureScale(p.id, v)}
+                                                                    style={{ width: 78, height: 28, textAlign: "center" }}
+                                                                    title="Scale"
+                                                                />
+                                                            </div>
+                                                            {/* Opacity */}
+                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Opacity</span>
+                                                                <div style={{ flex: 1, minWidth: 120 }}>
+                                                                    <SmoothRange
+                                                                        min={0}
+                                                                        max={1}
+                                                                        step={0.01}
+                                                                        value={(() => { const op = Number(p.opacity); return Number.isFinite(op) ? clamp(op, 0, 1) : 1; })()}
+                                                                        onChange={(v) => setPictureOpacity(p.id, v)}
+                                                                        title="Opacity"
+                                                                    />
+                                                                </div>
+                                                                <SmoothNumberInput
+                                                                    value={(() => { const op = Number(p.opacity); return Number.isFinite(op) ? clamp(op, 0, 1) : 1; })()}
+                                                                    step="0.01"
+                                                                    min="0"
+                                                                    max="1"
+                                                                    onCommit={(v) => setPictureOpacity(p.id, v)}
+                                                                    style={{ width: 78, height: 28, textAlign: "center" }}
+                                                                    title="Opacity"
+                                                                />
+                                                            </div>
+                                                            {/* Position XYZ */}
+                                                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Pos</span>
+                                                                <span style={{ fontSize: 11, opacity: 0.7 }}>X</span>
+                                                                <SmoothNumberInput
+                                                                    value={Number(p.x) || 0}
+                                                                    step="0.05"
+                                                                    min="-5000"
+                                                                    max="5000"
+                                                                    onCommit={(v) => setPicturePosition(p.id, { x: v })}
+                                                                    style={{ width: 74, height: 28, textAlign: "center" }}
+                                                                    title="X"
+                                                                />
+                                                                <span style={{ fontSize: 11, opacity: 0.7 }}>Y</span>
+                                                                <SmoothNumberInput
+                                                                    value={Number(p.y) || 0}
+                                                                    step="0.01"
+                                                                    min="-500"
+                                                                    max="500"
+                                                                    onCommit={(v) => setPicturePosition(p.id, { y: v })}
+                                                                    style={{ width: 74, height: 28, textAlign: "center" }}
+                                                                    title="Y"
+                                                                />
+                                                                <span style={{ fontSize: 11, opacity: 0.7 }}>Z</span>
+                                                                <SmoothNumberInput
+                                                                    value={Number(p.z) || 0}
+                                                                    step="0.05"
+                                                                    min="-5000"
+                                                                    max="5000"
+                                                                    onCommit={(v) => setPicturePosition(p.id, { z: v })}
+                                                                    style={{ width: 74, height: 28, textAlign: "center" }}
+                                                                    title="Z"
+                                                                />
+                                                            </div>
+
+                                                            {/* Quick rotate (degrees on Y / yaw) */}
+                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Rotate</span>
+                                                                <div style={{ flex: 1, minWidth: 120 }}>
+                                                                    <SmoothRange
+                                                                        min={-180}
+                                                                        max={180}
+                                                                        step={1}
+                                                                        value={Number(p.rotY) || 0}
+                                                                        onChange={(v) => setPictureRotation(p.id, { rotY: v })}
+                                                                        title="Rotate Y (deg)"
+                                                                    />
+                                                                </div>
+                                                                <SmoothNumberInput
+                                                                    value={Number(p.rotY) || 0}
+                                                                    step="1"
+                                                                    min="-360"
+                                                                    max="360"
+                                                                    onCommit={(v) => setPictureRotation(p.id, { rotY: v })}
+                                                                    style={{ width: 78, height: 28, textAlign: "center" }}
+                                                                    title="Rotation (deg)"
+                                                                />
+                                                            </div>
+
+                                                            {/* Advanced XYZ rotation (degrees) */}
+                                                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>XYZ</span>
+                                                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                                                    <span style={{ fontSize: 11, opacity: 0.7 }}>X</span>
+                                                                    <SmoothNumberInput
+                                                                        value={Number(p.rotX) || 0}
+                                                                        step="1"
+                                                                        min="-360"
+                                                                        max="360"
+                                                                        onCommit={(v) => setPictureRotation(p.id, { rotX: v })}
+                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
+                                                                        title="Rotate X (deg)"
+                                                                    />
+                                                                    <span style={{ fontSize: 11, opacity: 0.7 }}>Y</span>
+                                                                    <SmoothNumberInput
+                                                                        value={Number(p.rotY) || 0}
+                                                                        step="1"
+                                                                        min="-360"
+                                                                        max="360"
+                                                                        onCommit={(v) => setPictureRotation(p.id, { rotY: v })}
+                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
+                                                                        title="Rotate Y (deg)"
+                                                                    />
+                                                                    <span style={{ fontSize: 11, opacity: 0.7 }}>Z</span>
+                                                                    <SmoothNumberInput
+                                                                        value={Number(p.rotZ) || 0}
+                                                                        step="1"
+                                                                        min="-360"
+                                                                        max="360"
+                                                                        onCommit={(v) => setPictureRotation(p.id, { rotZ: v })}
+                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
+                                                                        title="Rotate Z (deg)"
+                                                                    />
+                                                                </div>
+                                                                <span style={{ fontSize: 10, opacity: 0.55 }}>(X/Z tilt the plane)</span>
+                                                            </div>
+                                                        </div>
+
+                                                        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 6 }}>
+                                                            <Btn
+                                                                variant="primary"
+                                                                onClick={() => {
+                                                                    // ensure it exists in scene for gizmo
+                                                                    setPictureVisible(p.id, true);
+                                                                    setSelected({ type: "picture", id: p.id });
+                                                                    setMultiSel([]);
+                                                                    setMode("select");
+                                                                    setMoveMode(true);
+                                                                    setTransformMode("translate");
+                                                                }}
+                                                                style={{ height: 28, padding: "0 10px" }}
+                                                                title="Move this picture with gizmo"
+                                                            >
+                                                                Move
+                                                            </Btn>
+
+                                                            <Btn
+                                                                variant="ghost"
+                                                                onClick={() => deletePicture(p.id)}
+                                                                style={{ height: 28, padding: "0 10px" }}
+                                                                title="Delete"
+                                                            >
+                                                                Del
+                                                            </Btn>
+
+                                                            <Btn
+                                                                variant="ghost"
+                                                                disabled={!snapNode}
+                                                                onClick={() => {
+                                                                    if (!snapNode?.position) return;
+                                                                    setPicturePosition(p.id, { x: snapNode.position[0], z: snapNode.position[2] });
+                                                                    const yaw = Number(snapNode?.rotation?.[1]) || 0;
+                                                                    setPictureRotation(p.id, { rotY: THREE.MathUtils.radToDeg(yaw) });
+                                                                }}
+                                                                style={{ height: 28, padding: "0 10px" }}
+                                                                title="Snap this picture to selected node"
+                                                            >
+                                                                Snap N
+                                                            </Btn>
+
+                                                            <Btn
+                                                                variant="ghost"
+                                                                disabled={!snapRoom}
+                                                                onClick={() => {
+                                                                    if (!snapRoom?.center) return;
+                                                                    setPicturePosition(p.id, { x: snapRoom.center[0], z: snapRoom.center[2] });
+                                                                    const yaw = Number(snapRoom?.rotation?.[1]) || 0;
+                                                                    setPictureRotation(p.id, { rotY: THREE.MathUtils.radToDeg(yaw) });
+                                                                }}
+                                                                style={{ height: 28, padding: "0 10px" }}
+                                                                title="Snap this picture to selected room"
+                                                            >
+                                                                Snap R
+                                                            </Btn>
+
+                                                            <Btn
+                                                                variant="ghost"
+                                                                onClick={() => {
+                                                                    pictureValuesClipboardRef.current = {
+                                                                        scale: Number(p.scale) || 1,
+                                                                        opacity: (() => { const op = Number(p.opacity); return Number.isFinite(op) ? clamp(op, 0, 1) : 1; })(),
+                                                                        x: Number(p.x) || 0,
+                                                                        y: Number(p.y) || 0,
+                                                                        z: Number(p.z) || 0,
+                                                                        rotX: Number(p.rotX) || 0,
+                                                                        rotY: Number(p.rotY) || 0,
+                                                                        rotZ: Number(p.rotZ) || 0,
+                                                                        solid: !!p.solid,
+                                                                    };
+                                                                    setPictureClipboardTick((t) => t + 1);
+                                                                }}
+                                                                style={{ height: 28, padding: "0 10px" }}
+                                                                title="Copy scale/pos/rot/solid"
+                                                            >
+                                                                Copy
+                                                            </Btn>
+
+                                                            <Btn
+                                                                variant="ghost"
+                                                                disabled={!hasClipboard}
+                                                                onClick={() => {
+                                                                    const clip = pictureValuesClipboardRef.current;
+                                                                    if (!clip) return;
+                                                                    setImportedPictures((prev) =>
+                                                                        (Array.isArray(prev) ? prev : []).map((pp) =>
+                                                                            pp.id === p.id
+                                                                                ? {
+                                                                                    ...pp,
+                                                                                    scale: Number(clip.scale) || 1,
+                                                                                    x: Number(clip.x) || 0,
+                                                                                    y: Number(clip.y) || 0,
+                                                                                    z: Number(clip.z) || 0,
+                                                                                    rotX: Number(clip.rotX) || 0,
+                                                                                    rotY: Number(clip.rotY) || 0,
+                                                                                    rotZ: Number(clip.rotZ) || 0,
+                                                                                    solid: !!clip.solid,
+                                                                                }
+                                                                                : pp,
+                                                                        ),
+                                                                    );
+                                                                }}
+                                                                style={{ height: 28, padding: "0 10px" }}
+                                                                title="Paste copied values onto this picture"
+                                                            >
+                                                                Paste
+                                                            </Btn>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })
+                                    )}
+                                </div>
+                            </div>
+                        </Panel>
+                    </div>
+                )}
+
+
+
+
+            </div>
+
+            {/* ROW 2 — Scene · HUD Layout · Reveal FX · Transform / Info */}
+            <div style={row2Style}>
+                {/* Scene toggles */}
+                <Section title="Scene">
+                    <Toggle
+                        label="Wire"
+                        on={wireframe}
+                        onClick={() => setWireframe((v) => !v)}
+                        title={`Wireframe: ${wireframe ? "On" : "Off"}`}
+                    />
+                    <Toggle
+                        label="Lights"
+                        on={showLights}
+                        onClick={() => setShowLights((v) => !v)}
+                        title={`Lights: ${showLights ? "On" : "Off"}`}
+                    />
+                    <Toggle
+                        label="Bounds"
+                        on={showLightBounds}
+                        onClick={() => setShowLightBounds((v) => !v)}
+                        title={`Light bounds: ${
+                            showLightBounds ? "On" : "Off"
+                        }`}
+                    />
+                    <Toggle
+                        label="Ground"
+                        on={showGround}
+                        onClick={() => setShowGround((v) => !v)}
+                        title={`Ground grid: ${showGround ? "On" : "Off"}`}
+                    />
+                    <Toggle
+                        label="Shadows"
+                        on={shadowsOn}
+                        onClick={() => setShadowsOn((v) => !v)}
+                        title={`Shadows: ${shadowsOn ? "On" : "Off"}`}
+                    />
+                    <Toggle
+                        label="Anim"
+                        on={animate}
+                        onClick={() => setAnimate((v) => !v)}
+                        title={`Animation: ${animate ? "On" : "Off"}`}
+                    />
+                    <Toggle
+                        label="Labels"
+                        on={labelsOn}
+                        onClick={() => setLabelsOn((v) => !v)}
+                        title={`Labels: ${labelsOn ? "On" : "Off"}`}
+                    />
+
+                </Section>
+                {/* HUD Layout – in the middle of row 2 */}
+                <Section title="HUD Layout">
+                    <Toggle
+                        label={hudEdit ? "Edit ON" : "Edit OFF"}
+                        on={hudEdit}
+                        onClick={() => setHudEdit((v) => !v)}
+                        title="Toggle HUD grid layout edit mode"
+                        style={{ minWidth: 80 }}
+                    />
+                    <label
+                        style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 4,
+                            fontSize: 11,
+                        }}
+                    >
+                        <span style={{ opacity: 0.8 }}>Snap</span>
+                        <SmoothNumberInput
+                            value={hudSnap}
+                            min={1}
+                            max={32}
+                            step={1}
+                            onCommit={(v) => setHudSnap(Math.max(1, Math.min(32, Number.isFinite(v) ? v : 1)))}
+                            style={{ width: 56, height: H, textAlign: "center" }}
+                            title="HUD snap grid size"
+                        />
+                    </label>
+                    <label
+                        style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 4,
+                            fontSize: 11,
+                        }}
+                    >
+                        <span style={{ opacity: 0.8 }}>Magnet</span>
+                        <SmoothNumberInput
+                            value={hudMagnet}
+                            min={0}
+                            max={64}
+                            step={1}
+                            onCommit={(v) => setHudMagnet(Math.max(0, Math.min(64, Number.isFinite(v) ? v : 0)))}
+                            style={{ width: 56, height: H, textAlign: "center" }}
+                            title="HUD magnet strength"
+                        />
+                    </label>
+                    <Btn
+                        onClick={() => {
+                            if (typeof window !== "undefined") {
+                                window.dispatchEvent(
+                                    new CustomEvent(
+                                        "EPIC3D_HUD_RESET_LAYOUT",
+                                    ),
+                                );
+                            }
+                        }}
+                        style={{
+                            height: H,
+                            padding: "0 10px",
+                            borderRadius: 999,
+                            minWidth: 90,
+                        }}
+                        title="Reset all HUD buttons into a neat row"
+                        variant="ghost"
+                    >
+                        Reset layout
+                    </Btn>
+                </Section>
+
+                {/* Reveal FX */}
+                <Section title="Reveal FX">
+                    <Toggle
+                        label="FX"
+                        on={wireStroke.enabled}
+                        onClick={() =>
+                            setWireStroke((s) => ({
+                                ...s,
+                                enabled: !s.enabled,
+                            }))
+                        }
+                        title="Toggle reveal wireframe sweep"
+                        style={{ minWidth: 44 }}
+                    />
+                    <Select
+                        value={wireStroke.mode}
+                        onChange={(e) =>
+                            setWireStroke((s) => ({
+                                ...s,
+                                mode: e.target.value,
+                            }))
+                        }
+                        style={{ width: 110, height: H }}
+                        title="Sweep direction"
+                    >
+                        <option value="lr">Left → Right</option>
+                        <option value="rl">Right → Left</option>
+                        <option value="tb">Top → Bottom</option>
+                        <option value="bt">Bottom → Top</option>
+                    </Select>
+                    <Btn
+                        onClick={() => setRevealOpen((o) => !o)}
+                        style={{ height: H, padding: "0 8px", minWidth: 60 }}
+                        title="Fine-tune reveal stroke"
+                        variant={revealOpen ? "primary" : "ghost"}
+                    >
+                        Settings
+                    </Btn>
+                    <Btn
+                        variant={roomOperatorMode ? "primary" : "ghost"}
+                        glow={roomOperatorMode}
+                        onClick={toggleRoomOperatorMode}
+                        style={{ height: H, minWidth: 130 }}
+                        title={
+                            roomOperatorMode
+                                ? "Exit Room Operator mode"
+                                : "Enter top-down Room Operator mode"
+                        }
+                    >
+                        {roomOperatorMode ? "Exit Room Operator" : "Room Operator"}
+                    </Btn>
+                </Section>
+
+                {/* Transform & Global */}
+                {/* Transform & Global */}
+                <Section title="Transform / Info">
+                    <Toggle
+                        label="Move"
+                        on={moveMode}
+                        onClick={() => {
+                            setMoveMode((v) => {
+                                const next = !v;
+
+                                // Turning Move OFF should unlock box selection again.
+                                // Clear selection so the next drag starts a fresh selection.
+                                if (!next) {
+                                    setSelected(null);
+                                    setMultiSel([]);
+                                    setSelectedBreakpoint(null);
+                                }
+
+                                return next;
+                            });
+                        }}
+                        title={`Move mode: ${moveMode ? "On" : "Off"}`}
+                    />
+                    <Select
+                        disabled={!moveMode}
+                        value={transformMode}
+                        onChange={(e) => setTransformMode(e.target.value)}
+                        style={{
+                            width: 120,
+                            height: H,
+                            opacity: moveMode ? 1 : 0.5,
+                        }}
+                        title="Transform gizmo"
+                    >
+                        <option value="translate">Move</option>
+                        <option value="rotate">Rotate</option>
+                        <option value="scale">Scale</option>
+                    </Select>
+
+                    {/* Selection modes + Move selected */}
+                    <div
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            flexWrap: "nowrap",
+                            marginLeft: 8,
+                        }}
+                    >
+                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                            Selection
+                        </span>
+                        <Btn
+                            size="xs"
+                            variant={
+                                selectionMode === "single"
+                                    ? "primary"
+                                    : "ghost"
+                            }
+                            onClick={() => {
+                                setSelectionMode("single");
+                                setMoveMode(true);
+                                setTransformMode("translate");
+                            }}
+                        >
+                            Single
+                        </Btn>
+
+
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 10, flexWrap: "nowrap" }}>
+                            <Checkbox
+                                checked={snapRoomsEnabled}
+                                onChange={setSnapRoomsEnabled}
+                                label="Snap rooms"
+                            />
+                            <span style={{ fontSize: 11, opacity: 0.75 }}>Strength</span>
+                            <SmoothNumberInput
+                                value={snapRoomsDistance}
+                                step="0.05"
+                                min="0.01"
+                                onCommit={(v) => setSnapRoomsDistance(Math.max(0.01, Number.isFinite(v) ? v : 0.5))}
+                                style={{ width: 72, height: H, textAlign: "center" }}
+                                title="Snap distance threshold (world units)"
+                                disabled={!snapRoomsEnabled}
+                            />
+                        </div>
+                        <Btn
+                            size="xs"
+                            variant={
+                                selectionMode === "multi"
+                                    ? "primary"
+                                    : "ghost"
+                            }
+                            onClick={() => {
+                                setSelectionMode("multi");
+                                setMoveMode(true);
+                                setTransformMode("translate");
+                            }}
+                        >
+                            Multi
+                        </Btn>
+                        <Btn
+                            size="xs"
+                            variant={
+                                selectionMode === "box"
+                                    ? "primary"
+                                    : "ghost"
+                            }
+                            onClick={() => {
+                                setSelectionMode("box");
+                                setMoveMode(false);          // allow drawing the first marquee
+                                setTransformMode("translate");
+                                // optional, but usually feels best:
+                                setSelected(null);
+                                setMultiSel([]);
+                                setSelectedBreakpoint(null);
+                                setLinkFromId(null);
+                                setMode("select");
+                            }}
+                        >
+                            Box
+                        </Btn>
+
+                        <Btn
+                            size="xs"
+                            variant={
+                                selected || (multiSel && multiSel.length)
+                                    ? "primary"
+                                    : "ghost"
+                            }
+                            disabled={
+                                !selected &&
+                                (!multiSel || !multiSel.length)
+                            }
+                            onClick={() => {
+                                const all =
+                                    multiSel && multiSel.length
+                                        ? multiSel
+                                        : selected
+                                            ? [selected]
+                                            : [];
+                                if (!all.length) return;
+
+                                // Ensure gizmo is active and we have an anchor
+                                setMoveMode(true);
+                                const main =
+                                    selected ||
+                                    all[all.length - 1] ||
+                                    null;
+                                if (main) setSelected(main);
+                            }}
+                        >
+                            Move selected
+                            {multiSel && multiSel.length > 1
+                                ? ` (${multiSel.length})`
+                                : ""}
+                        </Btn>
+                    </div>
+
+                    {/* Global product display toggles */}
+                    <Checkbox
+                        checked={showDimsGlobal}
+                        onChange={setShowDimsGlobal}
+                        label="Show dimensions"
+                        style={{ fontSize: 11 }}
+                    />
+                    <Checkbox
+                        checked={photoDefault}
+                        onChange={setPhotoDefault}
+                        label="Product photos default"
+                        style={{ fontSize: 11 }}
+                    />
+                    <Checkbox
+                        checked={alwaysShow3DInfo}
+                        onChange={setAlwaysShow3DInfo}
+                        label="3D info"
+                        style={{ fontSize: 11 }}
+                    />
+                </Section>
+
+
+
+
+                {/* Reveal FX settings popover (still hangs under row 2, not a 3rd row) */}
+                {revealOpen && (
+                    <div
+                        style={{
+                            position: "absolute",
+                            top: "100%",
+                            right: "40%",
+                            marginTop: 6,
+                            zIndex: 2147483647,
+                        }}
+                        onMouseLeave={() => setRevealOpen(false)}
+                    >
+                        <Panel title="Reveal FX stroke">
+                            <div
+                                style={{
+                                    display: "grid",
+                                    gridTemplateColumns:
+                                        "140px minmax(180px, 1fr)",
+                                    gap: 8,
+                                    minWidth: 380,
+                                }}
+                            >
+                                <label>Duration (s)</label>
+                                <Slider
+                                    min={0.2}
+                                    max={4}
+                                    step={0.05}
+                                    value={wireStroke.duration}
+                                    onChange={(v) =>
+                                        setWireStroke((s) => ({
+                                            ...s,
+                                            duration: v,
+                                        }))
+                                    }
+                                />
+                                <label>Line feather</label>
+                                <Slider
+                                    min={0}
+                                    max={0.3}
+                                    step={0.01}
+                                    value={wireStroke.feather}
+                                    onChange={(v) =>
+                                        setWireStroke((s) => ({
+                                            ...s,
+                                            feather: v,
+                                        }))
+                                    }
+                                />
+                                <label>Surface feather</label>
+                                <Slider
+                                    min={0}
+                                    max={0.3}
+                                    step={0.01}
+                                    value={wireStroke.surfaceFeather}
+                                    onChange={(v) =>
+                                        setWireStroke((s) => ({
+                                            ...s,
+                                            surfaceFeather: v,
+                                        }))
+                                    }
+                                />
+                            </div>
+                        </Panel>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+});
+
+
+
+// ---------------- ActionsPanel (stable, collapsible, smooth inputs) ----------------
+const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
+    const {
+        actions = [],
+        setActions,
+        nodes = [],
+        cameraPresets = [],
+        runAction,
+        keepLeftScroll,
+    } = ctx || {};
+
+    const preserve = useCallback((fn) => {
+        if (typeof keepLeftScroll === 'function') return keepLeftScroll(fn);
+        return fn?.();
+    }, [keepLeftScroll]);
+
+    const [working, setWorking] = useState({ label: '' });
+    const [justAddedId, setJustAddedId] = useState(null);
+    const [justAddedLabel, setJustAddedLabel] = useState('');
+    const [openMap, setOpenMap] = useState(() => ({}));
+
+    const stepTypeOptions = useMemo(() => ([
+        { value: 'toggleLight', label: 'Toggle Light' },
+        { value: 'toggleGlow', label: 'Toggle Glow' },
+        { value: 'setSignalStyle', label: 'Set Signal Style' },
+        { value: 'textBox', label: 'Text Box' },
+        { value: 'textBoxFade', label: 'Text Box Fade (manual)' },
+        { value: 'setWireframe', label: 'Wireframe On/Off (Global)' },
+        { value: 'cameraMove', label: 'Camera Move / Track' },
+        { value: 'hudFade', label: 'HUD: Fade Button' },
+        { value: 'setTextBox', label: 'Text Box On/Off (Node)' },
+    ]), []);
+
+    const patchAction = useCallback((id, patch) =>
+            preserve(() => setActions(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a))),
+        [preserve, setActions]
+    );
+
+    const deleteAction = useCallback((id) =>
+            preserve(() => setActions(prev => prev.filter(a => a.id !== id))),
+        [preserve, setActions]
+    );
+
+    const duplicateAction = useCallback((id) =>
+            preserve(() => setActions(prev => prev.map(a => {
+                if (a.id !== id) return a;
+                const copy = JSON.parse(JSON.stringify(a));
+                copy.id = uuid();
+                copy.label = `${a.label || 'Action'} Copy`;
+                return copy;
+            }))),
+        [preserve, setActions]
+    );
+
+    const addAction = useCallback((e) => {
+        e?.preventDefault?.();
+        const newId = uuid();
+        const newLabel = (working?.label || '').trim() || `Action ${actions.length + 1}`;
+
+        preserve(() =>
+            setActions(prev => [
+                ...prev,
+                { id: newId, label: newLabel, showOnHUD: true, steps: [] },
+            ])
+        );
+
+        setWorking(w => ({ ...(w || {}), label: '' }));
+        setJustAddedId(newId);
+        setJustAddedLabel(newLabel);
+        setOpenMap(m => ({ ...(m || {}), [newId]: true }));
+
+        setTimeout(() => {
+            setJustAddedId((current) => (current === newId ? null : current));
+        }, 1000);
+    }, [actions.length, preserve, setActions, working]);
+
+    const toggleOpen = useCallback((id) => {
+        setOpenMap(m => ({ ...(m || {}), [id]: !(m?.[id] ?? false) }));
+    }, []);
+
+    const addStep = useCallback((actId, tpl) =>
+            preserve(() =>
+                setActions(prev => prev.map(a =>
+                    a.id === actId
+                        ? { ...a, steps: [...a.steps, (tpl || { type: 'toggleLight', nodeId: null, delay: 0 })] }
+                        : a
+                ))
+            ),
+        [preserve, setActions]
+    );
+
+    const addChildStep = useCallback((actId, parentIdx, tpl) =>
+            preserve(() =>
+                setActions(prev => prev.map(a => {
+                    if (a.id !== actId) return a;
+                    const steps = a.steps.map((s, i) => {
+                        if (i !== parentIdx) return s;
+                        const children = Array.isArray(s.children) ? [...s.children] : [];
+                        children.push(tpl || { type: 'toggleLight', nodeId: null, delay: 0 });
+                        return { ...s, children };
+                    });
+                    return { ...a, steps };
+                }))
+            ),
+        [preserve, setActions]
+    );
+
+    const patchChildStep = useCallback((actId, parentIdx, childIdx, patch) =>
+            preserve(() =>
+                setActions(prev => prev.map(a => {
+                    if (a.id !== actId) return a;
+                    const steps = a.steps.map((s, i) => {
+                        if (i !== parentIdx) return s;
+                        const children = (s.children || []).map((c, j) => j === childIdx ? { ...c, ...patch } : c);
+                        return { ...s, children };
+                    });
+                    return { ...a, steps };
+                }))
+            ),
+        [preserve, setActions]
+    );
+
+    const delChildStep = useCallback((actId, parentIdx, childIdx) =>
+            preserve(() =>
+                setActions(prev => prev.map(a => {
+                    if (a.id !== actId) return a;
+                    const steps = a.steps.map((s, i) => {
+                        if (i !== parentIdx) return s;
+                        const children = (s.children || []).filter((_, j) => j !== childIdx);
+                        return { ...s, children };
+                    });
+                    return { ...a, steps };
+                }))
+            ),
+        [preserve, setActions]
+    );
+
+    const moveChildStep = useCallback((actId, parentIdx, childIdx, dir) =>
+            preserve(() =>
+                setActions(prev => prev.map(a => {
+                    if (a.id !== actId) return a;
+                    const steps = a.steps.map((s, i) => {
+                        if (i !== parentIdx) return s;
+                        const children = [...(s.children || [])];
+                        const j = childIdx + dir;
+                        if (j < 0 || j >= children.length) return s;
+                        [children[childIdx], children[j]] = [children[j], children[childIdx]];
+                        return { ...s, children };
+                    });
+                    return { ...a, steps };
+                }))
+            ),
+        [preserve, setActions]
+    );
+
+    const patchStep = useCallback((actId, idx, patch) =>
+            preserve(() =>
+                setActions(prev => prev.map(a => {
+                    if (a.id !== actId) return a;
+                    const steps = a.steps.map((s, i) => i == idx ? { ...s, ...patch } : s);
+                    return { ...a, steps };
+                }))
+            ),
+        [preserve, setActions]
+    );
+
+    const delStep = useCallback((actId, idx) =>
+            preserve(() =>
+                setActions(prev => prev.map(a =>
+                    a.id === actId
+                        ? { ...a, steps: a.steps.filter((_, i) => i !== idx) }
+                        : a
+                ))
+            ),
+        [preserve, setActions]
+    );
+
+    const moveStep = useCallback((actId, idx, dir) =>
+            preserve(() =>
+                setActions(prev => prev.map(a => {
+                    if (a.id !== actId) return a;
+                    const steps = [...a.steps];
+                    const j = idx + dir;
+                    if (j < 0 || j >= steps.length) return a;
+                    [steps[idx], steps[j]] = [steps[j], steps[idx]];
+                    return { ...a, steps };
+                }))
+            ),
+        [preserve, setActions]
+    );
+
+    const stopToggle = useCallback((e) => {
+        e?.preventDefault?.();
+        e?.stopPropagation?.();
+    }, []);
+
+    return (
+        <Panel title="Actions / On-screen Buttons">
+            <div style={{ display: 'grid', gap: 10 }}
+                 onPointerDownCapture={(e) => e.stopPropagation()}
+                 onPointerMoveCapture={(e) => e.stopPropagation()}
+            >
+                {/* Create */}
+                <div
+                    style={{
+                        border: '1px solid rgba(255,255,255,0.12)',
+                        borderRadius: 14,
+                        padding: 10,
+                        background: 'rgba(255,255,255,0.03)',
+                    }}
+                >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}
+                    >
+                        <div style={{ fontSize: 12, opacity: 0.9, fontWeight: 600 }}>Create button</div>
+                        <div style={{ fontSize: 11, opacity: 0.65 }}>Buttons can run multiple steps.</div>
+                    </div>
+                    <form
+                        onSubmit={addAction}
+                        style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'end' }}
+                    >
+                        <label style={{ minWidth: 0 }}
+                        >
+                            <div style={{ fontSize: 11, opacity: 0.8 }}>Name</div>
+                            <Input
+                                value={working.label}
+                                onChange={(e) => setWorking((w) => ({ ...(w || {}), label: e.target.value }))}
+                                placeholder="New action name…"
+                            />
+                        </label>
+                        <Btn type="submit" variant="primary" glow>+ Add</Btn>
+                    </form>
+                    {justAddedLabel && (
+                        <div style={{ fontSize: 11, opacity: 0.85, color: '#a6d4ff', marginTop: 8 }}>
+                            Added “{justAddedLabel}”
+                        </div>
+                    )}
+                </div>
+
+                {/* List */}
+                <div style={{ display: 'grid', gap: 8 }}
+                >
+                    {actions.length === 0 && (
+                        <div style={{ opacity: 0.7, fontSize: 12 }}>No actions yet. Create one above.</div>
+                    )}
+
+                    {actions.map((a) => {
+                        const isOpen = (openMap?.[a.id] ?? false) === true;
+                        const highlight = a.id === justAddedId;
+                        return (
+                            <div
+                                key={a.id}
+                                style={{
+                                    border: '1px solid rgba(255,255,255,0.14)',
+                                    borderRadius: 14,
+                                    padding: 10,
+                                    background: highlight ? 'rgba(80,160,255,0.08)' : 'rgba(255,255,255,0.02)',
+                                    boxShadow: highlight ? '0 0 0 1px rgba(120,190,255,0.35) inset' : 'none',
+                                }}
+                            >
+                                {/* Header */}
+                                <div
+                                    style={{
+                                        display: 'grid',
+                                        gridTemplateColumns: '1fr auto',
+                                        gap: 10,
+                                        alignItems: 'center',
+                                        cursor: 'pointer',
+                                    }}
+                                    onClick={() => toggleOpen(a.id)}
+                                >
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}
+                                    >
+                                        <div style={{ width: 18, textAlign: 'center', opacity: 0.8 }}
+                                        >
+                                            {isOpen ? '▾' : '▸'}
+                                        </div>
+
+                                        <div style={{ flex: 1, minWidth: 0 }}
+                                             onClick={stopToggle}
+                                             onPointerDownCapture={(e) => e.stopPropagation()}
+                                        >
+                                            <div style={{ fontSize: 11, opacity: 0.75, marginBottom: 4 }}>Button label</div>
+                                            <SmoothTextInput
+                                                value={a.label || ''}
+                                                onCommit={(txt) => patchAction(a.id, { label: txt })}
+                                            />
+                                        </div>
+
+                                        <div
+                                            style={{ display: 'flex', alignItems: 'center', gap: 10 }}
+                                            onClick={stopToggle}
+                                            onPointerDownCapture={(e) => e.stopPropagation()}
+                                        >
+                                            <Checkbox
+                                                checked={(a.showOnHUD ?? true) === true}
+                                                onChange={(v) => patchAction(a.id, { showOnHUD: v })}
+                                                label="HUD"
+                                            />
+                                            <div
+                                                style={{
+                                                    fontSize: 11,
+                                                    opacity: 0.75,
+                                                    padding: '4px 8px',
+                                                    borderRadius: 999,
+                                                    border: '1px solid rgba(255,255,255,0.12)',
+                                                    background: 'rgba(255,255,255,0.03)',
+                                                    whiteSpace: 'nowrap',
+                                                }}
+                                            >
+                                                {a.steps?.length || 0} step{(a.steps?.length || 0) === 1 ? '' : 's'}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div
+                                        style={{ display: 'flex', gap: 6, alignItems: 'center' }}
+                                        onClick={stopToggle}
+                                        onPointerDownCapture={(e) => e.stopPropagation()}
+                                    >
+                                        <Btn onClick={(e) => { e.preventDefault(); runAction?.(a); }}>Run</Btn>
+                                        <Btn onClick={(e) => { e.preventDefault(); toggleOpen(a.id); }}
+                                             style={{ opacity: 0.9 }}
+                                        >
+                                            {isOpen ? 'Hide' : 'Edit'}
+                                        </Btn>
+                                    </div>
+                                </div>
+
+                                {/* Body */}
+                                {isOpen && (
+                                    <div
+                                        style={{
+                                            marginTop: 10,
+                                            paddingTop: 10,
+                                            borderTop: '1px solid rgba(255,255,255,0.10)',
+                                            display: 'grid',
+                                            gap: 10,
+                                        }}
+                                        onClick={stopToggle}
+                                    >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}
+                                        >
+                                            <div style={{ fontSize: 12, opacity: 0.9, fontWeight: 600 }}>Steps</div>
+                                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}
+                                            >
+                                                <Btn onClick={(e) => { e.preventDefault(); duplicateAction(a.id); }}>Duplicate</Btn>
+                                                <Btn onClick={(e) => { e.preventDefault(); deleteAction(a.id); }}>Delete</Btn>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ display: 'grid', gap: 8 }}
+                                        >
+                                            {(a.steps?.length || 0) === 0 && (
+                                                <div style={{ opacity: 0.7, fontSize: 12 }}>No steps yet.</div>
+                                            )}
+
+                                            {(a.steps || []).map((s, i) => {
+                                                const isCamera = s.type === 'cameraMove';
+                                                const isWire = s.type === 'setWireframe';
+                                                const isHudFade = s.type === 'hudFade';
+                                                const isTextBox = s.type === 'setTextBox';
+
+                                                return (
+                                                    <div
+                                                        key={i}
+                                                        style={{
+                                                            padding: 8,
+                                                            borderRadius: 12,
+                                                            background: 'rgba(255,255,255,0.02)',
+                                                            border: '1px solid rgba(255,255,255,0.08)',
+                                                        }}
+                                                    >
+                                                        <div
+                                                            style={{
+                                                                display: 'grid',
+                                                                gridTemplateColumns: '1.2fr 1.5fr 1.7fr auto',
+                                                                gap: 8,
+                                                                alignItems: 'end',
+                                                            }}
+                                                        >
+                                                            <label>
+                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Type</div>
+                                                                <Select
+                                                                    value={s.type}
+                                                                    onChange={(e) => {
+                                                                        const type = e.target.value;
+                                                                        const patch = { type };
+                                                                        if (type === 'cameraMove') {
+                                                                            patch.nodeId = null;
+                                                                            patch.fromPresetId = s.fromPresetId || '';
+                                                                            patch.toPresetId = s.toPresetId || '';
+                                                                            patch.delay = s.delay ?? 0;
+                                                                            patch.duration = s.duration ?? 1.5;
+                                                                        } else if (type === 'setWireframe') {
+                                                                            patch.nodeId = null;
+                                                                            patch.value = s.value || 'on';
+                                                                            patch.delay = s.delay ?? 0;
+                                                                            patch.duration = undefined;
+                                                                            patch.fromPresetId = undefined;
+                                                                            patch.toPresetId = undefined;
+                                                                        } else if (type === 'setTextBox') {
+                                                                            patch.value = s.value || 'on';
+                                                                        }
+                                                                        patchStep(a.id, i, patch);
+                                                                    }}
+                                                                >
+                                                                    {stepTypeOptions.map((opt) => (
+                                                                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                                                    ))}
+                                                                </Select>
+                                                            </label>
+
+                                                            {isCamera ? (
+                                                                <label>
+                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>From View</div>
+                                                                    <Select
+                                                                        value={s.fromPresetId || ''}
+                                                                        onChange={(e) => patchStep(a.id, i, { fromPresetId: e.target.value || '' })}
+                                                                    >
+                                                                        <option value=''> (current) </option>
+                                                                        {cameraPresets.map((p) => (
+                                                                            <option key={p.id} value={p.id}>{p.name}</option>
+                                                                        ))}
+                                                                    </Select>
+                                                                </label>
+                                                            ) : isWire ? (
+                                                                <label>
+                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target</div>
+                                                                    <div style={{
+                                                                        fontSize: 12,
+                                                                        opacity: 0.8,
+                                                                        padding: '7px 10px',
+                                                                        borderRadius: 10,
+                                                                        border: '1px solid rgba(255,255,255,0.12)',
+                                                                        background: 'rgba(255,255,255,0.04)',
+                                                                    }}>Global: Wireframe</div>
+                                                                </label>
+                                                            ) : isHudFade ? (
+                                                                <label>
+                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Button</div>
+                                                                    <Select
+                                                                        value={s.hudTargetId || ''}
+                                                                        onChange={(e) => patchStep(a.id, i, { hudTargetId: e.target.value || '' })}
+                                                                    >
+                                                                        <option value=''> (none) </option>
+                                                                        {actions
+                                                                            .filter((act) => (act.showOnHUD ?? true) === true)
+                                                                            .map((act) => (
+                                                                                <option key={act.id} value={act.id}>{act.label || '(unnamed button)'}</option>
+                                                                            ))}
+                                                                    </Select>
+                                                                </label>
+                                                            ) : (
+                                                                <label>
+                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Node</div>
+                                                                    <Select
+                                                                        value={s.nodeId || ''}
+                                                                        onChange={(e) => patchStep(a.id, i, { nodeId: e.target.value || null })}
+                                                                    >
+                                                                        <option value=''> (none) </option>
+                                                                        {nodes.map((n) => (
+                                                                            <option key={n.id} value={n.id}>{n.label}</option>
+                                                                        ))}
+                                                                    </Select>
+                                                                </label>
+                                                            )}
+
+                                                            {isCamera ? (
+                                                                <div style={{ display: 'grid', gap: 6 }}
+                                                                >
+                                                                    <label>
+                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>To View</div>
+                                                                        <Select
+                                                                            value={s.toPresetId || ''}
+                                                                            onChange={(e) => patchStep(a.id, i, { toPresetId: e.target.value || '' })}
+                                                                        >
+                                                                            <option value=''> (pick a view) </option>
+                                                                            {cameraPresets.map((p) => (
+                                                                                <option key={p.id} value={p.id}>{p.name}</option>
+                                                                            ))}
+                                                                        </Select>
+                                                                    </label>
+                                                                    <div style={{ display: 'flex', gap: 6 }}
+                                                                    >
+                                                                        <label style={{ flex: 1 }}>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Delay (s)</div>
+                                                                            <SmoothNumberInput
+                                                                                step={0.1}
+                                                                                value={s.delay ?? 0}
+                                                                                onCommit={(v) => patchStep(a.id, i, { delay: v })}
+                                                                            />
+                                                                        </label>
+                                                                        <label style={{ flex: 1 }}>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Duration (s)</div>
+                                                                            <SmoothNumberInput
+                                                                                step={0.1}
+                                                                                value={s.duration ?? 1.5}
+                                                                                onCommit={(v) => patchStep(a.id, i, { duration: v })}
+                                                                            />
+                                                                        </label>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div style={{ display: 'grid', gap: 6 }}
+                                                                >
+                                                                    <label>
+                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Delay (s)</div>
+                                                                        <SmoothNumberInput
+                                                                            step={0.1}
+                                                                            value={s.delay ?? 0}
+                                                                            onCommit={(v) => patchStep(a.id, i, { delay: v })}
+                                                                        />
+                                                                    </label>
+
+                                                                    {s.type === 'setSignalStyle' && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Value</div>
+                                                                            <Select
+                                                                                value={s.value || 'waves'}
+                                                                                onChange={(e) => patchStep(a.id, i, { value: e.target.value })}
+                                                                            >
+                                                                                <option value='waves'>waves</option>
+                                                                                <option value='rays'>rays</option>
+                                                                                <option value='none'>none</option>
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+
+                                                                    {s.type === 'hudFade' && (
+                                                                        <div style={{ display: 'flex', gap: 6 }}
+                                                                        >
+                                                                            <label style={{ flex: 1 }}>
+                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Fade</div>
+                                                                                <Select
+                                                                                    value={s.hudMode || 'out'}
+                                                                                    onChange={(e) => patchStep(a.id, i, { hudMode: e.target.value || 'out' })}
+                                                                                >
+                                                                                    <option value='in'>Fade In</option>
+                                                                                    <option value='out'>Fade Out</option>
+                                                                                </Select>
+                                                                            </label>
+                                                                            <label style={{ flex: 1 }}>
+                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Duration (s)</div>
+                                                                                <SmoothNumberInput
+                                                                                    step={0.1}
+                                                                                    value={s.hudDuration ?? 0.35}
+                                                                                    onCommit={(v) => patchStep(a.id, i, { hudDuration: v })}
+                                                                                />
+                                                                            </label>
+                                                                        </div>
+                                                                    )}
+
+                                                                    {s.type === 'textBox' && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Text Box Action</div>
+                                                                            <Select
+                                                                                value={s.mode || 'toggle'}
+                                                                                onChange={(e) => patchStep(a.id, i, { mode: e.target.value })}
+                                                                            >
+                                                                                <option value='toggle'>Toggle on/off</option>
+                                                                                <option value='on'>Force ON</option>
+                                                                                <option value='off'>Force OFF</option>
+                                                                                <option value='fade'>Timed fade (use node timers)</option>
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+
+                                                                    {s.type === 'textBoxFade' && (
+                                                                        <>
+                                                                            <label>
+                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Fade Type</div>
+                                                                                <Select
+                                                                                    value={s.fadeMode || 'in'}
+                                                                                    onChange={(e) => patchStep(a.id, i, { fadeMode: e.target.value })}
+                                                                                >
+                                                                                    <option value='in'>Fade In (stay visible)</option>
+                                                                                    <option value='out'>Fade Out (hide)</option>
+                                                                                    <option value='show'>Show instantly</option>
+                                                                                    <option value='hide'>Hide instantly</option>
+                                                                                </Select>
+                                                                            </label>
+                                                                            <label>
+                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Duration (s)</div>
+                                                                                <SmoothNumberInputNullable
+                                                                                    step={0.1}
+                                                                                    value={(s.duration ?? '')}
+                                                                                    onCommit={(v) => patchStep(a.id, i, { duration: v })}
+                                                                                />
+                                                                            </label>
+                                                                        </>
+                                                                    )}
+
+                                                                    {isWire && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Wireframe</div>
+                                                                            <Select
+                                                                                value={s.value || 'on'}
+                                                                                onChange={(e) => patchStep(a.id, i, { value: e.target.value })}
+                                                                            >
+                                                                                <option value='on'>On</option>
+                                                                                <option value='off'>Off</option>
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+
+                                                                    {isTextBox && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Text Box</div>
+                                                                            <Select
+                                                                                value={s.value || 'on'}
+                                                                                onChange={(e) => patchStep(a.id, i, { value: e.target.value })}
+                                                                            >
+                                                                                <option value='on'>On</option>
+                                                                                <option value='off'>Off</option>
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+                                                                </div>
+                                                            )}
+
+                                                            <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}
+                                                            >
+                                                                <Btn onClick={(e) => { e.preventDefault(); moveStep(a.id, i, -1); }}>↑</Btn>
+                                                                <Btn onClick={(e) => { e.preventDefault(); moveStep(a.id, i, +1); }}>↓</Btn>
+                                                                <Btn onClick={(e) => { e.preventDefault(); delStep(a.id, i); }}>✕</Btn>
+                                                            </div>
+                                                        </div>
+
+                                                        {Array.isArray(s.children) && s.children.length > 0 && (
+                                                            <div style={{ marginTop: 8, paddingLeft: 14, borderLeft: '2px solid rgba(255,255,255,0.08)', display: 'grid', gap: 8 }}
+                                                            >
+                                                                {(s.children || []).map((c, ci) => {
+                                                                    const cIsWire = c.type === 'setWireframe';
+                                                                    const cIsTextBox = c.type === 'setTextBox';
+                                                                    return (
+                                                                        <div
+                                                                            key={ci}
+                                                                            style={{
+                                                                                padding: 8,
+                                                                                borderRadius: 12,
+                                                                                background: 'rgba(255,255,255,0.015)',
+                                                                                border: '1px solid rgba(255,255,255,0.06)',
+                                                                                display: 'grid',
+                                                                                gridTemplateColumns: '1.3fr 1.6fr 1.3fr auto',
+                                                                                gap: 8,
+                                                                                alignItems: 'end',
+                                                                            }}
+                                                                        >
+                                                                            <label>
+                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Type</div>
+                                                                                <Select
+                                                                                    value={c.type}
+                                                                                    onChange={(e) => {
+                                                                                        const type = e.target.value;
+                                                                                        const patch = { type };
+                                                                                        if (type === 'setWireframe') {
+                                                                                            patch.nodeId = null;
+                                                                                            patch.value = c.value || 'on';
+                                                                                        } else if (type === 'setTextBox') {
+                                                                                            patch.value = c.value || 'on';
+                                                                                        }
+                                                                                        patchChildStep(a.id, i, ci, patch);
+                                                                                    }}
+                                                                                >
+                                                                                    {stepTypeOptions
+                                                                                        .filter((opt) => opt.value !== 'cameraMove')
+                                                                                        .map((opt) => (
+                                                                                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                                                                        ))}
+                                                                                </Select>
+                                                                            </label>
+
+                                                                            {cIsWire ? (
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target</div>
+                                                                                    <div style={{
+                                                                                        fontSize: 12,
+                                                                                        opacity: 0.8,
+                                                                                        padding: '5px 8px',
+                                                                                        borderRadius: 10,
+                                                                                        border: '1px solid rgba(255,255,255,0.12)',
+                                                                                        background: 'rgba(255,255,255,0.03)',
+                                                                                    }}>Global: Wireframe</div>
+                                                                                </label>
+                                                                            ) : (
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Node</div>
+                                                                                    <Select
+                                                                                        value={c.nodeId || ''}
+                                                                                        onChange={(e) => patchChildStep(a.id, i, ci, { nodeId: e.target.value || null })}
+                                                                                    >
+                                                                                        <option value=''> (none) </option>
+                                                                                        {nodes.map((n) => (
+                                                                                            <option key={n.id} value={n.id}>{n.label}</option>
+                                                                                        ))}
+                                                                                    </Select>
+                                                                                </label>
+                                                                            )}
+
+                                                                            <div style={{ display: 'grid', gap: 6 }}
+                                                                            >
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Delay (s)</div>
+                                                                                    <SmoothNumberInput
+                                                                                        step={0.1}
+                                                                                        value={c.delay ?? 0}
+                                                                                        onCommit={(v) => patchChildStep(a.id, i, ci, { delay: v })}
+                                                                                    />
+                                                                                </label>
+
+                                                                                {c.type === 'setSignalStyle' && (
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Value</div>
+                                                                                        <Select
+                                                                                            value={c.value || 'waves'}
+                                                                                            onChange={(e) => patchChildStep(a.id, i, ci, { value: e.target.value })}
+                                                                                        >
+                                                                                            <option value='waves'>waves</option>
+                                                                                            <option value='rays'>rays</option>
+                                                                                            <option value='none'>none</option>
+                                                                                        </Select>
+                                                                                    </label>
+                                                                                )}
+
+                                                                                {cIsWire && (
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Wireframe</div>
+                                                                                        <Select
+                                                                                            value={c.value || 'on'}
+                                                                                            onChange={(e) => patchChildStep(a.id, i, ci, { value: e.target.value })}
+                                                                                        >
+                                                                                            <option value='on'>On</option>
+                                                                                            <option value='off'>Off</option>
+                                                                                        </Select>
+                                                                                    </label>
+                                                                                )}
+
+                                                                                {cIsTextBox && (
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Text Box</div>
+                                                                                        <Select
+                                                                                            value={c.value || 'on'}
+                                                                                            onChange={(e) => patchChildStep(a.id, i, ci, { value: e.target.value })}
+                                                                                        >
+                                                                                            <option value='on'>On</option>
+                                                                                            <option value='off'>Off</option>
+                                                                                        </Select>
+                                                                                    </label>
+                                                                                )}
+                                                                            </div>
+
+                                                                            <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}
+                                                                            >
+                                                                                <Btn onClick={(e) => { e.preventDefault(); moveChildStep(a.id, i, ci, -1); }}>↑</Btn>
+                                                                                <Btn onClick={(e) => { e.preventDefault(); moveChildStep(a.id, i, ci, +1); }}>↓</Btn>
+                                                                                <Btn onClick={(e) => { e.preventDefault(); delChildStep(a.id, i, ci); }}>✕</Btn>
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        )}
+
+                                                        <div style={{ marginTop: 8 }}
+                                                        >
+                                                            <Btn
+                                                                onClick={(e) => { e.preventDefault(); addChildStep(a.id, i, { type: 'toggleLight', nodeId: null, delay: 0 }); }}
+                                                                style={{ fontSize: 11, padding: '4px 8px' }}
+                                                            >
+                                                                + Add Sub-step
+                                                            </Btn>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+
+                                            <div style={{ display: 'flex', justifyContent: 'flex-end' }}
+                                            >
+                                                <Btn
+                                                    onClick={(e) => { e.preventDefault(); addStep(a.id, { type: 'toggleLight', nodeId: null, delay: 0 }); }}
+                                                >
+                                                    + Add Step
+                                                </Btn>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        </Panel>
+    );
+});
+
+
+
+
+
+// ---------------- DecksPanel (stable, expandable, counts, add/remove by click) ----------------
+const DecksPanelInner = React.memo(function DecksPanelInner({ ctx }) {
+    const {
+        decks = [],
+        rooms = [],
+        nodes = [],
+        links = [],
+        addDeck,
+        setDeck,
+        deleteDeck,
+        setSelected,
+        deckAddModeId,
+        setDeckAddModeId,
+        deckAddLast,
+        setDeckAddLast,
+        removeRoomFromDeck,
+        removeNodeFromDeck,
+    } = ctx || {};
+
+    const deckById = useMemo(() => Object.fromEntries(decks.map((d) => [d.id, d])), [decks]);
+    const roomById = useMemo(() => Object.fromEntries(rooms.map((r) => [r.id, r])), [rooms]);
+
+    const perDeck = useMemo(() => {
+        const out = {};
+        for (const d of decks) {
+            const roomList = rooms.filter((r) => r.deckId === d.id);
+            const roomIds = new Set(roomList.map((r) => r.id));
+
+            // Nodes inside rooms on this deck are treated as *inherited* membership
+            const roomNodes = nodes.filter((n) => roomIds.has(n.roomId));
+            const roomNodeIds = new Set(roomNodes.map((n) => n.id));
+
+            // Direct nodes = explicitly assigned to the deck, but NOT already covered by a room on the deck
+            const directNodes = nodes.filter((n) => n.deckId === d.id && !roomNodeIds.has(n.id));
+            const directNodeIds = new Set(directNodes.map((n) => n.id));
+
+            const inheritedNodes = roomNodes;
+            const allNodeIds = new Set([...directNodeIds]);
+            for (const n of roomNodes) allNodeIds.add(n.id);
+
+            const internalLinks = links.filter((l) => allNodeIds.has(l.from) && allNodeIds.has(l.to));
+            const touchingLinks = links.filter((l) => allNodeIds.has(l.from) || allNodeIds.has(l.to));
+
+            out[d.id] = {
+                rooms: roomList,
+                directNodes,
+                inheritedNodes,
+                allNodeIds,
+                internalLinksCount: internalLinks.length,
+                touchingLinksCount: touchingLinks.length,
+            };
+        }
+        return out;
+    }, [decks, rooms, nodes, links]);
+
+    const activeDeck = deckAddModeId ? deckById[deckAddModeId] : null;
+
+    const stopAddMode = useCallback(() => {
+        setDeckAddModeId?.(null);
+        setDeckAddLast?.("");
+    }, [setDeckAddModeId, setDeckAddLast]);
+
+    // Expand/collapse per deck (kept local so it doesn't spam global state)
+    const [openById, setOpenById] = React.useState(() => ({}));
+    React.useEffect(() => {
+        if (deckAddModeId) {
+            setOpenById((prev) => ({ ...prev, [deckAddModeId]: true }));
+        }
+    }, [deckAddModeId]);
+
+    const toggleOpen = React.useCallback((id) => {
+        setOpenById((prev) => ({ ...prev, [id]: !prev?.[id] }));
+    }, []);
+
+    const deckCardStyle = {
+        padding: 10,
+        borderRadius: 12,
+        border: "1px solid rgba(255,255,255,0.10)",
+        background: "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))",
+        boxShadow: "0 10px 18px rgba(0,0,0,0.35)",
+    };
+
+    const chipStyle = {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "2px 8px",
+        borderRadius: 999,
+        fontSize: 11,
+        border: "1px solid rgba(255,255,255,0.14)",
+        background: "rgba(0,0,0,0.18)",
+        opacity: 0.95,
+        whiteSpace: "nowrap",
+    };
+
+    const pillStyle = {
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "2px 8px",
+        borderRadius: 999,
+        fontSize: 11,
+        border: "1px solid rgba(255,255,255,0.14)",
+        background: "rgba(255,255,255,0.06)",
+        cursor: "pointer",
+        userSelect: "none",
+        maxWidth: "100%",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+    };
+
+    const summarizeNames = React.useCallback((arr, getName, max = 3) => {
+        const names = (arr || []).map(getName).filter(Boolean);
+        const shown = names.slice(0, max);
+        const rest = Math.max(0, names.length - shown.length);
+        return { shown, rest, total: names.length };
+    }, []);
+
+    return (
+        <Panel title="Decks">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+                <Btn onClick={addDeck}>+ Add Deck</Btn>
+                {activeDeck ? (
+                    <div
+                        style={{
+                            flex: 1,
+                            marginLeft: 8,
+                            padding: "6px 10px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(56,189,248,0.45)",
+                            background: "rgba(56,189,248,0.12)",
+                            fontSize: 12,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 10,
+                        }}
+                    >
+                        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                            <div style={{ fontWeight: 800 }}>Adding to: {activeDeck.name}</div>
+                            <div style={{ opacity: 0.85 }}>
+                                Click any room or node in the scene. Esc cancels.
+                                {deckAddLast ? <span style={{ opacity: 0.9 }}> · {deckAddLast}</span> : null}
+                            </div>
+                        </div>
+                        <Btn onClick={stopAddMode}>Done</Btn>
+                    </div>
+                ) : (
+                    <div style={{ opacity: 0.75, fontSize: 12 }}>Tip: Use “Add” on a deck to click-add rooms/nodes.</div>
+                )}
+            </div>
+
+            {decks.length === 0 ? <div style={{ opacity: 0.8 }}>No decks yet. Click “Add Deck”.</div> : null}
+
+            <div style={{ display: "grid", gap: 10 }}>
+                {decks.map((deck) => {
+                    const info =
+                        perDeck[deck.id] || { rooms: [], directNodes: [], inheritedNodes: [], internalLinksCount: 0, touchingLinksCount: 0 };
+                    const isAdding = deckAddModeId === deck.id;
+                    const open = !!openById?.[deck.id];
+
+                    const roomsSum = summarizeNames(info.rooms, (r) => r?.name || r?.id, 3);
+                    const nodesAll = [...(info.directNodes || []), ...(info.inheritedNodes || [])];
+                    const nodesSum = summarizeNames(nodesAll, (n) => n?.label || n?.name || n?.id, 4);
+
+                    const linkLabel = info.internalLinksCount === info.touchingLinksCount
+                        ? `${info.internalLinksCount}`
+                        : `${info.internalLinksCount} (touch ${info.touchingLinksCount})`;
+
+                    return (
+                        <div
+                            key={deck.id}
+                            style={{
+                                ...deckCardStyle,
+                                outline: isAdding ? "2px solid rgba(56,189,248,0.65)" : "none",
+                            }}
+                        >
+                            {/* Header (click to expand) */}
+                            <div
+                                onClick={() => toggleOpen(deck.id)}
+                                style={{
+                                    display: "flex",
+                                    alignItems: "flex-start",
+                                    justifyContent: "space-between",
+                                    gap: 10,
+                                    cursor: "pointer",
+                                    userSelect: "none",
+                                }}
+                                title={open ? "Collapse" : "Expand"}
+                            >
+                                <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                        <div
+                                            title="Deck color"
+                                            style={{
+                                                width: 14,
+                                                height: 14,
+                                                borderRadius: 4,
+                                                background: deck.color || "#2c3959",
+                                                border: "1px solid rgba(255,255,255,0.25)",
+                                                boxShadow: "0 6px 14px rgba(0,0,0,0.35)",
+                                                flex: "0 0 auto",
+                                            }}
+                                        />
+                                        <div
+                                            style={{ flex: 1, minWidth: 0 }}
+                                            onClick={(e) => e.stopPropagation()}
+                                            onPointerDown={(e) => e.stopPropagation()}
+                                        >
+                                            <SmoothTextInput
+                                                value={deck.name || "Deck"}
+                                                placeholder="Deck name"
+                                                onCommit={(v) => {
+                                                    const name = (v || "").trim();
+                                                    if (name && name !== deck.name) setDeck(deck.id, { name });
+                                                }}
+                                                style={{ width: "100%" }}
+                                            />
+                                        </div>
+
+                                        <div style={{ opacity: 0.8, fontSize: 14, padding: "0 6px" }}>{open ? "▾" : "▸"}</div>
+                                    </div>
+
+                                    <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                        <span style={chipStyle} title="Rooms on this deck">
+                                            🧱 Rooms: <b>{info.rooms.length}</b>
+                                        </span>
+                                        <span style={chipStyle} title="Nodes on this deck (direct + from rooms)">
+                                            ⚙️ Nodes: <b>{info.directNodes.length + info.inheritedNodes.length}</b>
+                                            <span style={{ opacity: 0.75 }}>(direct {info.directNodes.length})</span>
+                                        </span>
+                                        <span style={chipStyle} title="Links between nodes in this deck">
+                                            🔗 Links: <b>{linkLabel}</b>
+                                        </span>
+                                    </div>
+
+                                    {/* Quick preview (better at-a-glance) */}
+                                    <div style={{ marginTop: 8, display: "grid", gap: 6, fontSize: 12, opacity: 0.9 }}>
+                                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                                            <span style={{ opacity: 0.75, fontWeight: 800 }}>Rooms:</span>
+                                            {roomsSum.total === 0 ? (
+                                                <span style={{ opacity: 0.7 }}>—</span>
+                                            ) : (
+                                                <>
+                                                    {roomsSum.shown.map((nm, i) => (
+                                                        <span key={`${deck.id}-rprev-${i}`} style={{ ...pillStyle, cursor: "default" }} title={nm}>
+                                                            {nm}
+                                                        </span>
+                                                    ))}
+                                                    {roomsSum.rest ? <span style={{ opacity: 0.75 }}>+{roomsSum.rest} more</span> : null}
+                                                </>
+                                            )}
+                                        </div>
+
+                                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                                            <span style={{ opacity: 0.75, fontWeight: 800 }}>Nodes:</span>
+                                            {nodesSum.total === 0 ? (
+                                                <span style={{ opacity: 0.7 }}>—</span>
+                                            ) : (
+                                                <>
+                                                    {nodesSum.shown.map((nm, i) => (
+                                                        <span key={`${deck.id}-nprev-${i}`} style={{ ...pillStyle, cursor: "default" }} title={nm}>
+                                                            {nm}
+                                                        </span>
+                                                    ))}
+                                                    {nodesSum.rest ? <span style={{ opacity: 0.75 }}>+{nodesSum.rest} more</span> : null}
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Header controls */}
+                                <div
+                                    style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                >
+                                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                        <Checkbox
+                                            checked={deck.visible !== false}
+                                            onChange={(v) => setDeck(deck.id, { visible: v })}
+                                            label={deck.visible !== false ? "visible" : "hidden"}
+                                        />
+                                    </div>
+
+                                    <div style={{ display: "flex", gap: 8 }}>
+                                        <Btn
+                                            onClick={() => {
+                                                if (isAdding) {
+                                                    setDeckAddModeId(null);
+                                                    setDeckAddLast("");
+                                                } else {
+                                                    setDeckAddModeId(deck.id);
+                                                    setDeckAddLast("");
+                                                }
+                                            }}
+                                        >
+                                            {isAdding ? "Stop" : "Add"}
+                                        </Btn>
+                                        <Btn onClick={() => deleteDeck(deck.id)}>Delete</Btn>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Expandable contents */}
+                            {open ? (
+                                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px dashed rgba(255,255,255,0.14)", display: "grid", gap: 10 }}>
+                                    <details open style={{ borderRadius: 10, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.18)", padding: 8 }}>
+                                        <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 900 }}>
+                                            Rooms in this deck ({info.rooms.length})
+                                        </summary>
+                                        <div style={{ marginTop: 8 }}>
+                                            {info.rooms.length === 0 ? (
+                                                <div style={{ opacity: 0.7, fontSize: 12 }}>—</div>
+                                            ) : (
+                                                <div style={{ display: "grid", gap: 6 }}>
+                                                    {info.rooms.map((r) => (
+                                                        <div key={r.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                                            <a
+                                                                onClick={() => setSelected?.({ type: "room", id: r.id })}
+                                                                style={{
+                                                                    cursor: "pointer",
+                                                                    fontSize: 12,
+                                                                    fontWeight: 800,
+                                                                    overflow: "hidden",
+                                                                    textOverflow: "ellipsis",
+                                                                    whiteSpace: "nowrap",
+                                                                }}
+                                                                title={r.name || r.id}
+                                                            >
+                                                                {r.name || r.id}
+                                                            </a>
+                                                            <Btn
+                                                                onClick={() => removeRoomFromDeck?.(deck.id, r.id)}
+                                                                title="Remove this room (and its nodes) from the deck"
+                                                            >
+                                                                Remove
+                                                            </Btn>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </details>
+
+                                    <details open style={{ borderRadius: 10, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(0,0,0,0.18)", padding: 8 }}>
+                                        <summary style={{ cursor: "pointer", fontSize: 12, fontWeight: 900 }}>
+                                            Nodes in this deck ({info.directNodes.length + info.inheritedNodes.length})
+                                            <span style={{ opacity: 0.75, marginLeft: 6 }}>(direct {info.directNodes.length})</span>
+                                        </summary>
+                                        <div style={{ marginTop: 8, display: "grid", gap: 10 }}>
+                                            <div>
+                                                <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6, opacity: 0.9 }}>
+                                                    Direct nodes ({info.directNodes.length})
+                                                </div>
+                                                {info.directNodes.length === 0 ? (
+                                                    <div style={{ opacity: 0.7, fontSize: 12 }}>—</div>
+                                                ) : (
+                                                    <div style={{ display: "grid", gap: 6 }}>
+                                                        {info.directNodes.map((n) => (
+                                                            <div key={n.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                                                <a
+                                                                    onClick={() => setSelected?.({ type: "node", id: n.id })}
+                                                                    style={{
+                                                                        cursor: "pointer",
+                                                                        fontSize: 12,
+                                                                        fontWeight: 800,
+                                                                        overflow: "hidden",
+                                                                        textOverflow: "ellipsis",
+                                                                        whiteSpace: "nowrap",
+                                                                    }}
+                                                                    title={n.label || n.name || n.id}
+                                                                >
+                                                                    {n.label || n.name || n.id}
+                                                                </a>
+                                                                <Btn onClick={() => removeNodeFromDeck?.(deck.id, n.id)} title="Remove this node from the deck">
+                                                                    Remove
+                                                                </Btn>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div>
+                                                <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6, opacity: 0.9 }}>
+                                                    Nodes via rooms ({info.inheritedNodes.length})
+                                                </div>
+                                                {info.inheritedNodes.length === 0 ? (
+                                                    <div style={{ opacity: 0.7, fontSize: 12 }}>—</div>
+                                                ) : (
+                                                    <div style={{ display: "grid", gap: 6 }}>
+                                                        {info.inheritedNodes.map((n) => {
+                                                            const r = roomById[n.roomId];
+                                                            return (
+                                                                <div key={n.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                                                    <a
+                                                                        onClick={() => setSelected?.({ type: "node", id: n.id })}
+                                                                        style={{
+                                                                            cursor: "pointer",
+                                                                            fontSize: 12,
+                                                                            fontWeight: 800,
+                                                                            overflow: "hidden",
+                                                                            textOverflow: "ellipsis",
+                                                                            whiteSpace: "nowrap",
+                                                                        }}
+                                                                        title={n.label || n.name || n.id}
+                                                                    >
+                                                                        {n.label || n.name || n.id}
+                                                                    </a>
+                                                                    <span
+                                                                        style={{ opacity: 0.75, fontSize: 11, whiteSpace: "nowrap" }}
+                                                                        title="This node is included because its room is on the deck"
+                                                                    >
+                                                                        via room: {r?.name || n.roomId}
+                                                                    </span>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </details>
+                                </div>
+                            ) : null}
+                        </div>
+                    );
+                })}
+            </div>
+        </Panel>
+    );
+});
+
 
 export default function Interactive3DNodeShowcase() {
     // Model & scene
@@ -166,22 +3306,38 @@ export default function Interactive3DNodeShowcase() {
     }, [importedPictures]);
 
     // One-time normalization for older saved payloads
+    // v2 schema adds: x,z,solid,aspect
     useEffect(() => {
         setImportedPictures((prev) => {
             const list = Array.isArray(prev) ? prev : [];
             return list.map((p) => ({
                 ...p,
-                visible: !!p.visible,
-                scale: Number(p.scale) || 1,
-                rotX: Number(p.rotX) || 0,
-                rotY: Number(p.rotY) || 0,
-                rotZ: Number(p.rotZ) || 0,
+                // default to visible ON unless explicitly false
+                visible: p?.visible !== false,
+                solid: !!p?.solid,
+                aspect: Number.isFinite(p?.aspect) && p.aspect > 0 ? p.aspect : 1,
+                scale: Number(p?.scale) || 1,
+                rotX: Number(p?.rotX) || 0,
+                rotY: Number(p?.rotY) || 0,
+                rotZ: Number(p?.rotZ) || 0,
+                // picture position is now real XYZ; older saves only had y
+                x: Number(p?.x) || 0,
+                y: Number(p?.y) || 0.01,
+                z: Number(p?.z) || 0,
             }));
         });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     const picturesInputRef = useRef(null);
     const [picturesOpen, setPicturesOpen] = useState(false);
+
+    // Refs to picture meshes in the scene (used by TransformControls for gizmo movement)
+    const pictureRefs = useRef({}); // { [pictureId]: React.RefObject<THREE.Mesh> }
+
+    // Copy/Paste picture transforms
+    const pictureValuesClipboardRef = useRef(null);
+    // bump this state to re-render when clipboard updates (ref changes don't)
+    const [, setPictureClipboardTick] = useState(0);
 
     const readFileAsDataURL = useCallback((file) => {
         return new Promise((resolve, reject) => {
@@ -193,7 +3349,7 @@ export default function Interactive3DNodeShowcase() {
     }, []);
 
 
-    const importPicturesFromFiles = useCallback(async (files) => {
+    const importPicturesFromFiles = useCallback(async (files, extra) => {
         const arr = Array.from(files || []).filter(Boolean);
         if (!arr.length) return;
 
@@ -207,11 +3363,16 @@ export default function Interactive3DNodeShowcase() {
             const next = list.map((p) => ({
                 ...p,
                 // keep existing state; just normalize
-                visible: !!p.visible,
-                scale: Number(p.scale) || 1,
-                rotX: Number(p.rotX) || 0,
-                rotY: Number(p.rotY) || 0,
-                rotZ: Number(p.rotZ) || 0,
+                visible: p?.visible !== false,
+                solid: !!p?.solid,
+                aspect: Number.isFinite(p?.aspect) && p.aspect > 0 ? p.aspect : 1,
+                scale: Number(p?.scale) || 1,
+                rotX: Number(p?.rotX) || 0,
+                rotY: Number(p?.rotY) || 0,
+                rotZ: Number(p?.rotZ) || 0,
+                x: Number(p?.x) || 0,
+                y: Number(p?.y) || 0.01,
+                z: Number(p?.z) || 0,
             }));
 
             urls.forEach((src, i) => {
@@ -220,8 +3381,16 @@ export default function Interactive3DNodeShowcase() {
                     id: uuid(),
                     name: arr[i]?.name || `Picture ${next.length + 1}`,
                     src,
-                    visible: true,  // default ON
+                    visible: true,
+                    // optional polygon footprint for future polygon room rendering
+                    poly: Array.isArray(extra?.poly) ? extra.poly : undefined,
+                    drawMode: extra?.drawMode || undefined,  // default ON
+                    solid: false,
+                    aspect: 1,
                     scale: 1,
+                    x: 0,
+                    y: 0.01,
+                    z: 0,
                     rotX: 0,
                     rotY: 0,
                     rotZ: 0,
@@ -242,15 +3411,55 @@ export default function Interactive3DNodeShowcase() {
         });
     }, []);
 
+    const setPictureSolid = useCallback((id, solid) => {
+        setImportedPictures((prev) => {
+            const list = Array.isArray(prev) ? prev : [];
+            if (!id) return list;
+            return list.map((p) => (p.id === id ? { ...p, solid: !!solid } : p));
+        });
+    }, []);
+
+    // patch: {x?,y?,z?}
+    const setPicturePosition = useCallback((id, patch) => {
+        setImportedPictures((prev) => {
+            const list = Array.isArray(prev) ? prev : [];
+            if (!id) return list;
+            return list.map((p) => {
+                if (p.id !== id) return p;
+                const nx = patch?.x !== undefined ? clamp(Number(patch.x) || 0, -5000, 5000) : (Number(p.x) || 0);
+                const ny = patch?.y !== undefined ? clamp(Number(patch.y) || 0, -500, 500) : (Number(p.y) || 0.01);
+                const nz = patch?.z !== undefined ? clamp(Number(patch.z) || 0, -5000, 5000) : (Number(p.z) || 0);
+                return { ...p, x: nx, y: ny, z: nz };
+            });
+        });
+    }, []);
+
+    const setPictureAspect = useCallback((id, aspect) => {
+        const a = Number(aspect);
+        if (!id || !Number.isFinite(a) || a <= 0) return;
+        setImportedPictures((prev) => {
+            const list = Array.isArray(prev) ? prev : [];
+            return list.map((p) => (p.id === id ? { ...p, aspect: a } : p));
+        });
+    }, []);
+
 
     const setPictureScale = useCallback((id, scale) => {
         setImportedPictures((prev) => {
             const list = Array.isArray(prev) ? prev : [];
-            const s = clamp(Number(scale) || 1, 0.05, 50);
+            const s = clamp(Number(scale) || 1, 0.01, 500);
             return list.map((p) => (p.id === id ? { ...p, scale: s } : p));
         });
     }, []);
-
+    const setPictureOpacity = useCallback((id, opacity) => {
+        setImportedPictures((prev) => {
+            const list = Array.isArray(prev) ? prev : [];
+            if (!id) return list;
+            const o = Number(opacity);
+            const oo = Number.isFinite(o) ? clamp(o, 0, 1) : 1;
+            return list.map((p) => (p.id === id ? { ...p, opacity: oo } : p));
+        });
+    }, []);
     const setPictureRotation = useCallback((id, patch) => {
         setImportedPictures((prev) => {
             const list = Array.isArray(prev) ? prev : [];
@@ -262,6 +3471,14 @@ export default function Interactive3DNodeShowcase() {
                 const nz = patch?.rotZ !== undefined ? clampDeg(patch.rotZ) : (Number(p.rotZ) || 0);
                 return { ...p, rotX: nx, rotY: ny, rotZ: nz };
             });
+        });
+    }, []);
+
+    const setPictureY = useCallback((id, y) => {
+        setImportedPictures((prev) => {
+            const list = Array.isArray(prev) ? prev : [];
+            const yy = clamp(Number(y) || 0, -50, 50);
+            return list.map((p) => (p.id === id ? { ...p, y: yy } : p));
         });
     }, []);
 
@@ -317,6 +3534,9 @@ export default function Interactive3DNodeShowcase() {
                 size: [4, 1.6, 3],
                 color: "#274064",
                 visible: true,
+                // optional polygon footprint for future polygon room rendering
+                poly: undefined,
+                drawMode: undefined,
                 rotation: [0, 0, 0],
                 locked: false,
             },
@@ -327,6 +3547,9 @@ export default function Interactive3DNodeShowcase() {
                 size: [3, 1.6, 2.2],
                 color: "#3a3359",
                 visible: true,
+                // optional polygon footprint for future polygon room rendering
+                poly: undefined,
+                drawMode: undefined,
                 rotation: [0, 0, 0],
                 locked: false,
             },
@@ -464,6 +3687,23 @@ export default function Interactive3DNodeShowcase() {
     // When active, clicking nodes/rooms toggles membership to this group id
     const [groupAddModeId, setGroupAddModeId] = useState(null);
 
+    // When active, clicking a room or node in the scene adds it to this deck
+    const [deckAddModeId, setDeckAddModeId] = useState(null);
+    const [deckAddLast, setDeckAddLast] = useState("");
+
+    useEffect(() => {
+        if (!deckAddModeId) return;
+        const onKey = (e) => {
+            if (e.key === "Escape") {
+                setDeckAddModeId(null);
+                setDeckAddLast("");
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [deckAddModeId]);
+
+
 // --- Group helpers & filtering ---
     const groupById = useMemo(() => Object.fromEntries(groups.map(g => [g.id, g])), [groups]);
     const isGroupHidden = useCallback((gid) => !!gid && !!groupById[gid]?.hidden, [groupById]);
@@ -526,6 +3766,82 @@ export default function Interactive3DNodeShowcase() {
         setMultiSel(items);
         setSelected(items[0]);
     }, [getGroupMembers]);
+    const moveRoomPack = useCallback((roomId) => {
+        const r = rooms.find((x) => x.id === roomId);
+        if (!r) return;
+
+        const roomNodes = nodes.filter((n) => n.roomId === roomId);
+
+        const items = [
+            { type: "room", id: roomId },
+            ...roomNodes.map((n) => ({ type: "node", id: n.id })),
+        ];
+
+        if (!items.length) return;
+
+        setMode("select");
+        setLinkFromId(null);
+        setMoveMode(true);
+        setTransformMode("translate");
+
+        // Clear any rotate-pivot override
+        setMultiPivotOverride(null);
+
+        // ✅ Treat it as multi-select
+        setSelectionMode("multi");
+
+        setMultiSel(items);
+        setSelected(items[0] || null);
+    }, [rooms, nodes]);
+
+    const rotateRoomPack = useCallback((roomId) => {
+        const r = rooms.find((x) => x.id === roomId);
+        if (!r) return;
+        if (r.locked) return;
+
+        const roomNodes = nodes.filter((n) => n.roomId === roomId);
+
+        const items = [
+            { type: 'room', id: roomId },
+            ...roomNodes.map((n) => ({ type: 'node', id: n.id })),
+        ];
+
+        if (!items.length) return;
+
+        setMode('select');
+        setLinkFromId(null);
+        setMoveMode(true);
+        setTransformMode('rotate');
+
+        // ✅ Treat it as multi-select
+        setSelectionMode('multi');
+        setMultiSel(items);
+        setSelected(items[0] || null);
+
+        // Pivot at the room center so rotate-all spins around the room
+        const c = r.center || [0, 0, 0];
+        setMultiPivotOverride({ pos: [c[0] ?? 0, c[1] ?? 0, c[2] ?? 0], reason: 'room-pack', roomId });
+    }, [rooms, nodes]);
+
+    const scaleRoomWithContents = useCallback((roomId) => {
+        const r = rooms.find((x) => x.id === roomId);
+        if (!r) return;
+        if (r.locked) return;
+
+        setMode('select');
+        setLinkFromId(null);
+        setMoveMode(true);
+        setTransformMode('scale');
+
+        // Scale is a single-room operation (the scene handles scaling its contents as a pack)
+        setSelectionMode('single');
+        setMultiSel([]);
+        setSelected({ type: 'room', id: roomId });
+
+        // No pivot override needed for scale
+        setMultiPivotOverride(null);
+    }, [rooms]);
+
 
     const duplicateGroup = useCallback((gid) => {
         const srcGroup = groups.find(g => g.id === gid);
@@ -577,7 +3893,13 @@ export default function Interactive3DNodeShowcase() {
         const nodeSet = new Set(gNodes.map(n => n.id));
         const newLinks = links
             .filter(l => nodeSet.has(l.from) && nodeSet.has(l.to))
-            .map(l => ({ ...l, id: uuid(), from: nodeIdMap.get(l.from), to: nodeIdMap.get(l.to) }));
+            .map(l => {
+                const bps = Array.isArray(l.breakpoints) ? l.breakpoints : null;
+                const nextBps = bps ? bps.map(bp => [(bp?.[0] ?? 0)+dx, (bp?.[1] ?? 0), (bp?.[2] ?? 0)]) : undefined;
+                const out = { ...l, id: uuid(), from: nodeIdMap.get(l.from), to: nodeIdMap.get(l.to) };
+                if (nextBps) out.breakpoints = nextBps;
+                return out;
+            });
 
         setGroups(prev => [...prev, { id: newGroupId, name: newGroupName, hidden: false }]);
         setRooms(prev => [...prev, ...newRooms]);
@@ -625,6 +3947,40 @@ export default function Interactive3DNodeShowcase() {
     };
 
 
+    const addRoomToDeck = useCallback((deckId, roomId) => {
+        if (!deckId || !roomId) return;
+        keepLeftScroll(() => {
+            setRooms((prev) => prev.map((r) => r.id === roomId ? { ...r, deckId } : r));
+            // Also assign all nodes in this room to the deck (keeps deck membership explicit)
+            setNodes((prev) => prev.map((n) => n.roomId === roomId ? { ...n, deckId } : n));
+        });
+    }, []);
+
+    const addNodeToDeck = useCallback((deckId, nodeId) => {
+        if (!deckId || !nodeId) return;
+        keepLeftScroll(() => {
+            setNodes((prev) => prev.map((n) => n.id === nodeId ? { ...n, deckId } : n));
+        });
+    }, []);
+
+    const removeRoomFromDeck = useCallback((deckId, roomId) => {
+        if (!deckId || !roomId) return;
+        keepLeftScroll(() => {
+            setRooms((prev) => prev.map((r) => (r.id === roomId && r.deckId === deckId) ? { ...r, deckId: null } : r));
+            // Remove deck from nodes in the room *if they were on this deck*
+            setNodes((prev) => prev.map((n) => (n.roomId === roomId && n.deckId === deckId) ? { ...n, deckId: null } : n));
+        });
+    }, []);
+
+    const removeNodeFromDeck = useCallback((deckId, nodeId) => {
+        if (!deckId || !nodeId) return;
+        keepLeftScroll(() => {
+            setNodes((prev) => prev.map((n) => (n.id === nodeId && n.deckId === deckId) ? { ...n, deckId: null } : n));
+        });
+    }, []);
+
+
+
 // Derived hidden sets (used by SceneInner)
     const hiddenDeckIds = useMemo(
         () => new Set(decks.filter((d) => d.visible === false).map((d) => d.id)),
@@ -634,6 +3990,21 @@ export default function Interactive3DNodeShowcase() {
         () => new Set(rooms.filter((r) => r.deckId && hiddenDeckIds.has(r.deckId)).map((r) => r.id)),
         [rooms, hiddenDeckIds]
     );
+    // Nodes visible in-scene should also be the only ones that render signal VFX.
+    // When a deck is hidden, rooms/nodes in that deck are hidden in SceneInner, so we
+    // must also hide their signals here (signals are rendered outside SceneInner).
+    const visibleSignalNodes = useMemo(() => {
+        const hd = hiddenDeckIds;
+        const hr = hiddenRoomIds;
+        return renderNodes.filter((n) => {
+            if (n.hidden) return false;
+            if (n.role === "none") return false;
+            if (n.deckId && hd.has(n.deckId)) return false;
+            if (n.roomId && hr.has(n.roomId)) return false;
+            return true;
+        });
+    }, [renderNodes, hiddenDeckIds, hiddenRoomIds]);
+
 
 
 
@@ -725,12 +4096,49 @@ export default function Interactive3DNodeShowcase() {
 // Production mode: hide all UI except bottom action buttons
     const [prodMode, setProdMode] = useState(false);
 
+// Show/hide on-screen Action Buttons layer (HUD) – handy to clear the view while editing
+    const [hudButtonsVisible, setHudButtonsVisible] = useState(() => {
+        try {
+            const v = localStorage.getItem("epic3d.hudButtonsVisible.v1");
+            if (v === "0") return false;
+            if (v === "1") return true;
+        } catch {}
+        return true;
+    });
+
+    useEffect(() => {
+        try {
+            localStorage.setItem("epic3d.hudButtonsVisible.v1", hudButtonsVisible ? "1" : "0");
+        } catch {}
+    }, [hudButtonsVisible]);
+
+
 // Runtime animation / visibility state for each button
     const [buttonStates, setButtonStates] = useState(() => ({}));
 // shape: { [actionId]: { opacity: 0..1, hidden: bool } }
     const [selected, setSelected] = useState(null); // { type:'node'|'room'|'link', id }
     const [mode, setMode] = useState("select"); // 'select' | 'link'
     const [multiSel, setMultiSel] = useState([]); // array of { type, id }
+
+    // Optional override for the multi-selection pivot (used for "Rotate all" so the gizmo pivots at the room center)
+    const [multiPivotOverride, setMultiPivotOverride] = useState(null); // { pos:[x,y,z], reason?:string, roomId?:string }
+
+    // Auto-clear pivot override when it no longer applies
+    useEffect(() => {
+        if (!multiPivotOverride) return;
+        const multiLen = Array.isArray(multiSel) ? multiSel.length : 0;
+
+        if (!moveMode || transformMode !== 'rotate' || multiLen <= 1) {
+            setMultiPivotOverride(null);
+            return;
+        }
+
+        if (multiPivotOverride?.reason === 'room-pack') {
+            const keep = (multiSel || []).some((it) => it?.type === 'room' && it.id === multiPivotOverride.roomId);
+            if (!keep) setMultiPivotOverride(null);
+        }
+    }, [multiPivotOverride, moveMode, transformMode, multiSel]);
+
 
 // Explicit selection mode for the cursor
 //  - "single": only one thing selected
@@ -752,6 +4160,11 @@ export default function Interactive3DNodeShowcase() {
     useEffect(() => {
         roomsRef.current = rooms;
     }, [rooms]);
+
+    const linksRef = useRef(links);
+    useEffect(() => {
+        linksRef.current = links;
+    }, [links]);
 
 // NEW: currently selected breakpoint (in a link), for gizmo movement
     const [selectedBreakpoint, setSelectedBreakpoint] = useState(null);
@@ -1060,6 +4473,7 @@ export default function Interactive3DNodeShowcase() {
         [selectionMode, applyBoxSelection, moveMode]
     );
 
+    const DEFAULT_PRESET_ID = "__default__";
 
 
 
@@ -1086,7 +4500,35 @@ export default function Interactive3DNodeShowcase() {
     }, [cameraPresetId]);
 
 // Default startup if nothing selected/saved
-    const defaultPose = useMemo(() => ({ position: [6, 4.5, 6], target: [0, 0, 0], fov: 55 }), []);
+    const sanitizePose = React.useCallback((p) => {
+        const fallback = { position: [6, 4.5, 6], target: [0, 0, 0], fov: 55 };
+        if (!p || typeof p !== "object") return fallback;
+        const pos = Array.isArray(p.position) && p.position.length === 3 ? p.position.map(Number) : fallback.position;
+        const tgt = Array.isArray(p.target) && p.target.length === 3 ? p.target.map(Number) : fallback.target;
+        const fov = Number.isFinite(Number(p.fov)) ? Number(p.fov) : fallback.fov;
+        return {
+            position: pos.every(Number.isFinite) ? pos : fallback.position,
+            target: tgt.every(Number.isFinite) ? tgt : fallback.target,
+            fov,
+        };
+    }, []);
+
+    const [defaultPose, setDefaultPose] = useState(() => {
+        // Persisted so imports/merges that change it survive reloads.
+        try {
+            const raw = localStorage.getItem("epic3d.cameraDefaultPose.v1");
+            if (!raw) return { position: [6, 4.5, 6], target: [0, 0, 0], fov: 55 };
+            return sanitizePose(JSON.parse(raw));
+        } catch {
+            return { position: [6, 4.5, 6], target: [0, 0, 0], fov: 55 };
+        }
+    });
+
+    useEffect(() => {
+        try {
+            localStorage.setItem("epic3d.cameraDefaultPose.v1", JSON.stringify(defaultPose));
+        } catch {}
+    }, [defaultPose]);
     const currentPose = useMemo(
         () => cameraPresets.find(p => p.id === cameraPresetId) || null,
         [cameraPresets, cameraPresetId]
@@ -1217,6 +4659,7 @@ export default function Interactive3DNodeShowcase() {
         multi: false,
         snap: 0.25,
         placeKind: "node", // 'node' | 'switch' | 'room'
+        roomDrawMode: "box", // "single" | "box" | "points"
     });
     const placingNode = placement.armed && placement.placeKind === "node";
     const placingSwitch = placement.armed && placement.placeKind === "switch";
@@ -1283,10 +4726,308 @@ export default function Interactive3DNodeShowcase() {
             return [...prev, copy];
         });
     }, []);
+
+    // ---------------------------------------------------------------------
+    // Undo / Redo (Ctrl+Z / Ctrl+Y)
+    // ---------------------------------------------------------------------
+    const HISTORY_LIMIT = 80;
+
+    const historyRef = useRef({
+        past: [],
+        future: [],
+        current: null,
+        currentHash: null,
+        dragStart: null,
+    });
+    const restoringHistoryRef = useRef(false);
+    const historyCommitTimerRef = useRef(null);
+    const [, forceHistoryTick] = useState(0); // re-render when stacks change
+
+    const deepClone = useCallback((v) => {
+        try {
+            return JSON.parse(JSON.stringify(v));
+        } catch {
+            return v;
+        }
+    }, []);
+
+    const makeHistorySnapshot = useCallback(() => {
+        return deepClone({
+            rooms,
+            nodes,
+            links,
+            decks,
+            groups,
+            actions,
+            actionsHud,
+            importedPictures,
+            linkDefaults,
+            roomGap,
+            roomOpacity,
+        });
+    }, [
+        deepClone,
+        rooms,
+        nodes,
+        links,
+        decks,
+        groups,
+        actions,
+        actionsHud,
+        importedPictures,
+        linkDefaults,
+        roomGap,
+        roomOpacity,
+    ]);
+
+    const applyHistorySnapshot = useCallback(
+        (snap) => {
+            if (!snap) return;
+
+            // Don't record this change back into history
+            restoringHistoryRef.current = true;
+            if (historyCommitTimerRef.current) {
+                clearTimeout(historyCommitTimerRef.current);
+                historyCommitTimerRef.current = null;
+            }
+
+            setRooms(deepClone(snap.rooms || []));
+            setNodes(deepClone(snap.nodes || []));
+            setLinks(deepClone(snap.links || []));
+            setDecks(deepClone(snap.decks || []));
+            setGroups(deepClone(snap.groups || []));
+            setActions(deepClone(snap.actions || []));
+            setActionsHud(deepClone(snap.actionsHud || {}));
+            setImportedPictures(deepClone(snap.importedPictures || []));
+            setLinkDefaults(deepClone(snap.linkDefaults || linkDefaults));
+            setRoomGap(deepClone(snap.roomGap || roomGap));
+            setRoomOpacity(
+                typeof snap.roomOpacity === "number" && !Number.isNaN(snap.roomOpacity)
+                    ? snap.roomOpacity
+                    : roomOpacity
+            );
+
+            // Selection might reference deleted items; clear it for safety.
+            setSelected(null);
+            setMultiSel([]);
+            setSelectedBreakpoint(null);
+            setMode("select");
+            setLinkFromId(null);
+            setLevelFromNodeId(null);
+
+            // Allow history recording again after the restore render flushes.
+            setTimeout(() => {
+                restoringHistoryRef.current = false;
+            }, 0);
+        },
+        [
+            deepClone,
+            setRooms,
+            setNodes,
+            setLinks,
+            setDecks,
+            setGroups,
+            setActions,
+            setActionsHud,
+            setImportedPictures,
+            setLinkDefaults,
+            setRoomGap,
+            setRoomOpacity,
+            setSelected,
+            setMultiSel,
+            setMode,
+            setLinkFromId,
+            setLevelFromNodeId,
+            setSelectedBreakpoint,
+            linkDefaults,
+            roomGap,
+            roomOpacity,
+        ]
+    );
+
+    const commitHistorySnapshot = useCallback(() => {
+        if (restoringHistoryRef.current) return;
+
+        const h = historyRef.current;
+        const nextSnap = makeHistorySnapshot();
+        let nextHash = null;
+        try {
+            nextHash = JSON.stringify(nextSnap);
+        } catch {
+            nextHash = String(Date.now());
+        }
+
+        // init
+        if (!h.current) {
+            h.current = nextSnap;
+            h.currentHash = nextHash;
+            h.past = [];
+            h.future = [];
+            forceHistoryTick((t) => t + 1);
+            return;
+        }
+
+        // no change
+        if (h.currentHash === nextHash) return;
+
+        h.past.push(h.current);
+        if (h.past.length > HISTORY_LIMIT) h.past.shift();
+
+        h.current = nextSnap;
+        h.currentHash = nextHash;
+        h.future = [];
+
+        forceHistoryTick((t) => t + 1);
+    }, [makeHistorySnapshot]);
+
+    const undo = useCallback(() => {
+        const h = historyRef.current;
+        if (!h.past.length) return;
+
+        const prev = h.past.pop();
+        if (!prev) return;
+
+        h.future.push(h.current);
+        h.current = prev;
+
+        try {
+            h.currentHash = JSON.stringify(prev);
+        } catch {
+            h.currentHash = String(Date.now());
+        }
+
+        forceHistoryTick((t) => t + 1);
+        applyHistorySnapshot(prev);
+    }, [applyHistorySnapshot]);
+
+    const redo = useCallback(() => {
+        const h = historyRef.current;
+        if (!h.future.length) return;
+
+        const next = h.future.pop();
+        if (!next) return;
+
+        h.past.push(h.current);
+        if (h.past.length > HISTORY_LIMIT) h.past.shift();
+
+        h.current = next;
+        try {
+            h.currentHash = JSON.stringify(next);
+        } catch {
+            h.currentHash = String(Date.now());
+        }
+
+        forceHistoryTick((t) => t + 1);
+        applyHistorySnapshot(next);
+    }, [applyHistorySnapshot]);
+
+    const canUndo = historyRef.current.past.length > 0;
+    const canRedo = historyRef.current.future.length > 0;
+
+    // Initialize a baseline snapshot immediately (so the very first edit can be undone).
+    useEffect(() => {
+        const h = historyRef.current;
+        if (h.current) return;
+
+        const snap = makeHistorySnapshot();
+        h.current = snap;
+        try {
+            h.currentHash = JSON.stringify(snap);
+        } catch {
+            h.currentHash = String(Date.now());
+        }
+        h.past = [];
+        h.future = [];
+        forceHistoryTick((x) => x + 1);
+    }, [makeHistorySnapshot]);
+
+// Auto-commit scene changes (debounced). Dragging uses a separate "commit on drag end".
+    useEffect(() => {
+        if (restoringHistoryRef.current) return;
+
+        // If a gizmo drag is active, skip debounced commits.
+        if (dragActive) return;
+
+        if (historyCommitTimerRef.current) {
+            clearTimeout(historyCommitTimerRef.current);
+            historyCommitTimerRef.current = null;
+        }
+
+        historyCommitTimerRef.current = setTimeout(() => {
+            commitHistorySnapshot();
+        }, 250);
+
+        return () => {
+            if (historyCommitTimerRef.current) {
+                clearTimeout(historyCommitTimerRef.current);
+                historyCommitTimerRef.current = null;
+            }
+        };
+    }, [
+        rooms,
+        nodes,
+        links,
+        decks,
+        groups,
+        actions,
+        actionsHud,
+        importedPictures,
+        linkDefaults,
+        roomGap,
+        roomOpacity,
+        dragActive,
+        commitHistorySnapshot,
+    ]);
+
+    // Flush history at drag start and commit one step at drag end.
+    const dragActivePrevRef = useRef(dragActive);
+    useEffect(() => {
+        const was = dragActivePrevRef.current;
+        const now = dragActive;
+
+        dragActivePrevRef.current = now;
+
+        if (!was && now) {
+            // drag start: commit any pending edits so the drag becomes its own undo step
+            if (historyCommitTimerRef.current) {
+                clearTimeout(historyCommitTimerRef.current);
+                historyCommitTimerRef.current = null;
+            }
+            commitHistorySnapshot();
+            historyRef.current.dragStart = historyRef.current.current;
+        }
+
+        if (was && !now) {
+            // drag end: commit once (will push dragStart -> past, and current -> after)
+            if (historyRef.current.dragStart) {
+                commitHistorySnapshot();
+                historyRef.current.dragStart = null;
+            }
+        }
+    }, [dragActive, commitHistorySnapshot]);
     useEffect(() => {
         const onKey = (e) => {
             // ✅ If user is typing somewhere, ignore all global shortcuts
             if (isTypingInFormField()) return;
+            // Undo / Redo (don't steal browser undo when typing)
+            if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+                e.preventDefault();
+                undo();
+                return;
+            }
+            if ((e.ctrlKey || e.metaKey) && (e.key === "y" || e.key === "Y")) {
+                e.preventDefault();
+                redo();
+                return;
+            }
+            // Common alternative: Ctrl+Shift+Z => Redo
+            if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "z" || e.key === "Z")) {
+                e.preventDefault();
+                redo();
+                return;
+            }
+
+
             if (e.altKey) {
                 const key = e.key.toLowerCase();
                 let view = null;
@@ -1322,7 +5063,7 @@ export default function Interactive3DNodeShowcase() {
                 setTransformMode("translate");
                 setSelected(null);
                 setMultiSel([]);
-                setSelectedBreakpoint?.(null);
+                setSelectedBreakpoint(null);
                 // Always cancel placement + selection + room operator
                 setPlacement((p) => ({ ...p, armed: false }));
                 setSelected(null);
@@ -1355,7 +5096,7 @@ export default function Interactive3DNodeShowcase() {
 
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
-    }, [selected, prodMode, duplicateNode, moveMode]);
+    }, [selected, prodMode, duplicateNode, moveMode, undo, redo]);
 
 // Autosave
     useEffect(() => localStorage.setItem("epic3d.rooms.v7", JSON.stringify(rooms)), [rooms]);
@@ -1413,6 +5154,33 @@ export default function Interactive3DNodeShowcase() {
     const selectedRoom = selected?.type === "room" ? rooms.find((r) => r.id === selected.id) : null;
     const selectedLink = selected?.type === "link" ? links.find((l) => l.id === selected.id) : null;
 
+    const roomsNodesSubtitle = useMemo(() => {
+        if (!selected) return "";
+        if (selected.type === "room" && selectedRoom) {
+            return `Selected: ${selectedRoom.name || selectedRoom.id} → Room`;
+        }
+        if (selected.type === "node" && selectedNode) {
+            const roomName =
+                selectedNode.roomId && rooms.find((r) => r.id === selectedNode.roomId)
+                    ? rooms.find((r) => r.id === selectedNode.roomId).name
+                    : "Unassigned";
+            const cat = selectedNode.cluster || "Uncategorized";
+            const label = selectedNode.label || selectedNode.id;
+            return `Selected: ${roomName} → ${cat} → ${label}`;
+        }
+        return "";
+    }, [selected, selectedRoom, selectedNode, rooms]);
+
+    const linksSubtitle = useMemo(() => {
+        if (!selected) return "";
+        if (selected.type !== "link" || !selectedLink) return "";
+        const a = nodes.find((n) => n.id === selectedLink.from);
+        const b = nodes.find((n) => n.id === selectedLink.to);
+        const aLabel = a?.label || selectedLink.from;
+        const bLabel = b?.label || selectedLink.to;
+        return `Selected: ${aLabel} → ${bLabel}`;
+    }, [selected, selectedLink, nodes]);
+
     const setNode = (id, patch) => setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)));
     const setNodeById = React.useCallback((id, patchOrFn) => {
         setNodes(prev =>
@@ -1439,42 +5207,178 @@ export default function Interactive3DNodeShowcase() {
         }
         if (ext === "zip") {
             const zip = await JSZip.loadAsync(file);
-            const gltfEntry = Object.values(zip.files).find((f) => f.name.toLowerCase().endsWith(".gltf"));
-            const glbEntry = Object.values(zip.files).find((f) => f.name.toLowerCase().endsWith(".glb"));
+
+            // Ignore macOS resource fork entries (e.g. __MACOSX/._model.gltf) which can be tiny and break parsing.
+            const normalizeEntryName = (name) =>
+                String(name || "")
+                    .replace(/\\/g, "/")
+                    .replace(/^\/+/, "");
+
+            const isJunkEntry = (name) => {
+                const n = normalizeEntryName(name).toLowerCase();
+                if (!n) return true;
+                if (n.startsWith("__macosx/")) return true;
+                if (n.split("/").some((seg) => seg.startsWith("._"))) return true;
+                if (n.endsWith(".ds_store") || n.endsWith("thumbs.db")) return true;
+                return false;
+            };
+
+            const gltfCandidates = Object.values(zip.files).filter(
+                (f) => !f.dir && f.name && f.name.toLowerCase().endsWith(".gltf") && !isJunkEntry(f.name),
+            );
+            const glbCandidates = Object.values(zip.files).filter(
+                (f) => !f.dir && f.name && f.name.toLowerCase().endsWith(".glb") && !isJunkEntry(f.name),
+            );
+
+            const gltfEntry = gltfCandidates[0] || null;
+            const glbEntry = glbCandidates[0] || null;
+
             const blobMap = new Map();
+            const keyByLower = new Map();
+
             await Promise.all(
                 Object.values(zip.files).map(async (f) => {
-                    if (f.dir) return;
+                    if (!f || f.dir) return;
+                    if (isJunkEntry(f.name)) return;
+                    const key = normalizeEntryName(f.name);
                     const b = await f.async("blob");
-                    blobMap.set(f.name, b);
-                })
+                    blobMap.set(key, b);
+                    const lc = key.toLowerCase();
+                    if (!keyByLower.has(lc)) keyByLower.set(lc, key);
+                }),
             );
-            const makeURL = (name) => URL.createObjectURL(blobMap.get(name));
+
+            const createdUrls = new Set();
+            const urlCache = new Map();
+
+            const resolveKey = (k) => {
+                if (!k) return null;
+                const key = normalizeEntryName(k);
+                if (blobMap.has(key)) return key;
+                const lc = key.toLowerCase();
+                return keyByLower.get(lc) || null;
+            };
+
+            const makeURL = (nameOrKey) => {
+                const key = resolveKey(nameOrKey);
+                if (!key) return null;
+                if (urlCache.has(key)) return urlCache.get(key);
+                const b = blobMap.get(key);
+                if (!b) return null;
+                const u = URL.createObjectURL(b);
+                urlCache.set(key, u);
+                createdUrls.add(u);
+                return u;
+            };
+
+            const cleanupAll = () => {
+                createdUrls.forEach((u) => {
+                    try {
+                        URL.revokeObjectURL(u);
+                    } catch {}
+                });
+                createdUrls.clear();
+                urlCache.clear();
+            };
 
             if (gltfEntry) {
-                const base = gltfEntry.name.split("/").slice(0, -1).join("/") + (gltfEntry.name.includes("/") ? "/" : "");
-                const gltfUrl = makeURL(gltfEntry.name);
+                const gltfKey = resolveKey(gltfEntry.name);
+                const gltfUrl = makeURL(gltfKey);
+                if (!gltfUrl) {
+                    alert("Could not read .gltf from zip");
+                    return;
+                }
+
+                const base = (() => {
+                    const n = normalizeEntryName(gltfEntry.name);
+                    const parts = n.split("/");
+                    parts.pop();
+                    return parts.length ? parts.join("/") + "/" : "";
+                })();
+
+                const normalizePath = (p) => {
+                    const parts = [];
+                    String(p || "")
+                        .replace(/\\/g, "/")
+                        .split("/")
+                        .forEach((seg) => {
+                            if (!seg || seg === ".") return;
+                            if (seg === "..") parts.pop();
+                            else parts.push(seg);
+                        });
+                    return parts.join("/");
+                };
+
                 const urlModifier = (url) => {
+                    if (!url) return url;
                     if (url.startsWith("blob:") || url.startsWith("data:")) return url;
-                    const rel = decodeURIComponent(url).replace(/^[^#?]*\//, "");
-                    const full = base + rel;
-                    if (blobMap.has(full)) return makeURL(full);
-                    if (blobMap.has(rel)) return makeURL(rel);
+
+                    let clean = url;
+                    try {
+                        clean = decodeURIComponent(url);
+                    } catch {}
+                    clean = clean.split(/[?#]/)[0].replace(/\\/g, "/");
+                    clean = clean.replace(/^\/+/, "");
+                    clean = clean.replace(/^(\.\/)+/, "");
+
+                    const rel = clean;
+                    const justName = rel.split("/").pop();
+
+                    const candidates = [];
+                    if (base) candidates.push(normalizePath(base + rel));
+                    candidates.push(normalizePath(rel));
+                    if (base && justName) candidates.push(normalizePath(base + justName));
+                    if (justName) candidates.push(justName);
+
+                    // If we still can't find it, try a suffix match by basename (helps when gltf paths differ from zip folders).
+                    const trySuffixMatch = () => {
+                        const baseName = (justName || "").toLowerCase();
+                        if (!baseName) return null;
+                        const matches = [];
+                        for (const k of blobMap.keys()) {
+                            const kl = k.toLowerCase();
+                            if (kl === baseName || kl.endsWith("/" + baseName)) matches.push(k);
+                        }
+                        if (matches.length === 1) return matches[0];
+                        return null;
+                    };
+
+                    for (const cand of candidates) {
+                        const key = resolveKey(cand);
+                        if (key && blobMap.has(key)) {
+                            const u = makeURL(key);
+                            if (u) return u;
+                        }
+                    }
+
+                    const suffixKey = trySuffixMatch();
+                    if (suffixKey) {
+                        const u = makeURL(suffixKey);
+                        if (u) return u;
+                    }
+
                     return url;
                 };
-                setModelDescriptor({ type: "zip:gltf", url: gltfUrl, urlModifier, cleanup: () => URL.revokeObjectURL(gltfUrl) });
+
+                // IMPORTANT: keep descriptor.type compatible with existing loader logic.
+                setModelDescriptor({ type: "zip:gltf", url: gltfUrl, urlModifier, cleanup: cleanupAll });
                 setModelBlob(file);
                 setModelFilename(file.name);
                 return;
             }
+
             if (glbEntry) {
-                const blob = blobMap.get(glbEntry.name);
-                const url = URL.createObjectURL(blob);
-                setModelDescriptor({ type: "zip:glb", url, cleanup: () => URL.revokeObjectURL(url) });
+                const url = makeURL(glbEntry.name);
+                if (!url) {
+                    alert("Could not read .glb from zip");
+                    return;
+                }
+                setModelDescriptor({ type: "zip:glb", url, cleanup: cleanupAll });
                 setModelBlob(file);
                 setModelFilename(file.name);
                 return;
             }
+
             alert("Zip must contain a .gltf or .glb");
             return;
         }
@@ -1482,6 +5386,690 @@ export default function Interactive3DNodeShowcase() {
     }, []);
 
     const fileRef = useRef(null);
+
+    // ---------------------------------------------------------------------
+    // Merge (non-destructive import)
+    // ---------------------------------------------------------------------
+    const [mergeOpen, setMergeOpen] = useState(false);
+    const mergeFileRef = useRef(null);
+    const [mergeIncoming, setMergeIncoming] = useState(null); // { file, ext, obj, zip, hasBundledModel, modelEntryName }
+    const [mergeOptions, setMergeOptions] = useState(() => ({
+        graph: true,
+        decks: true,
+        groups: true,
+        actions: true,
+        pictures: true,
+        settings: true,
+        hud: true,
+        prefs: true,
+        products: true,
+        model: false,
+    }));
+    const [mergeFlags, setMergeFlags] = useState(() => ({
+        overwrite: false,
+        addNew: true,
+    }));
+    const [mergePlan, setMergePlan] = useState(null);
+
+    const MergeToggle = useCallback(({ label, on, onClick, title, style }) => (
+        <Btn
+            onClick={onClick}
+            title={title}
+            variant={on ? "primary" : "ghost"}
+            style={{
+                height: 34,
+                padding: "0 10px",
+                borderRadius: 10,
+                fontSize: 12,
+                minWidth: 64,
+                ...style,
+            }}
+        >
+            {label}
+        </Btn>
+    ), []);
+
+    const openMergeDialog = useCallback(() => {
+        setMergeIncoming(null);
+        setMergePlan(null);
+        setMergeFlags({ overwrite: false, addNew: true });
+        setMergeOptions({
+            graph: true,
+            decks: true,
+            groups: true,
+            actions: true,
+            pictures: true,
+            settings: true,
+            hud: true,
+            prefs: true,
+            products: true,
+            model: false,
+        });
+        setMergeOpen(true);
+    }, []);
+
+    const normalizeForCompare = useCallback((v) => {
+        if (v == null) return v;
+        if (typeof v !== "object") return v;
+
+        if (Array.isArray(v)) {
+            // If it's an array of identifiable objects, sort by id for stable comparison.
+            const allHaveId = v.every((x) => x && typeof x === "object" && ("id" in x) && x.id != null);
+            const arr = allHaveId
+                ? [...v].sort((a, b) => String(a.id).localeCompare(String(b.id)))
+                : [...v];
+            return arr.map((x) => normalizeForCompare(x));
+        }
+
+        const out = {};
+        Object.keys(v)
+            .sort()
+            .forEach((k) => {
+                out[k] = normalizeForCompare(v[k]);
+            });
+        return out;
+    }, []);
+
+    const stableStringify = useCallback((v) => {
+        try {
+            return JSON.stringify(normalizeForCompare(v));
+        } catch {
+            return String(v);
+        }
+    }, [normalizeForCompare]);
+
+    const deepEqualStable = useCallback((a, b) => {
+        return stableStringify(a) === stableStringify(b);
+    }, [stableStringify]);
+
+    const entityKey = useCallback((item, idx = 0) => {
+        if (!item) return `__nil__${idx}`;
+        if (item.id != null) return String(item.id);
+        if (item.key != null) return String(item.key);
+        if (item.uuid != null) return String(item.uuid);
+        if (typeof item.url === "string" && item.url) return `url:${item.url}`;
+        if (typeof item.name === "string" && item.name) return `name:${item.name}`;
+        return `obj:${stableStringify(item)}:${idx}`;
+    }, [stableStringify]);
+
+    const diffArray = useCallback((currentArr, incomingArr, keyFn) => {
+        const cur = Array.isArray(currentArr) ? currentArr : [];
+        const inc = Array.isArray(incomingArr) ? incomingArr : [];
+
+        const curMap = new Map();
+        cur.forEach((it, i) => curMap.set(keyFn(it, i), it));
+
+        let same = 0;
+        let changed = 0;
+        let added = 0;
+
+        inc.forEach((it, i) => {
+            const k = keyFn(it, i);
+            if (!curMap.has(k)) {
+                added++;
+                return;
+            }
+            const curIt = curMap.get(k);
+            if (deepEqualStable(curIt, it)) same++;
+            else changed++;
+        });
+
+        return { totalIncoming: inc.length, same, changed, added };
+    }, [deepEqualStable]);
+
+    const mergeArray = useCallback((currentArr, incomingArr, { addNew, overwriteChanges, keyFn }) => {
+        const cur = Array.isArray(currentArr) ? currentArr : [];
+        const inc = Array.isArray(incomingArr) ? incomingArr : [];
+
+        const map = new Map();
+        const order = [];
+        cur.forEach((it, i) => {
+            const k = keyFn(it, i);
+            if (!map.has(k)) order.push(k);
+            map.set(k, it);
+        });
+
+        inc.forEach((it, i) => {
+            const k = keyFn(it, i);
+            if (!map.has(k)) {
+                if (addNew) {
+                    map.set(k, it);
+                    order.push(k);
+                }
+                return;
+            }
+            const curIt = map.get(k);
+            if (deepEqualStable(curIt, it)) return; // identical → skip
+            if (overwriteChanges) {
+                map.set(k, it);
+            }
+        });
+
+        return order.map((k) => map.get(k));
+    }, [deepEqualStable]);
+
+    const parseScenePackage = useCallback(async (file) => {
+        const ext = String(file?.name || "").toLowerCase().split(".").pop();
+        if (ext !== "zip" && ext !== "json") {
+            throw new Error("Unsupported merge file. Use .zip or .json export.");
+        }
+
+        if (ext === "json") {
+            const txt = await file.text();
+            const obj = JSON.parse(txt || "{}");
+            return { ext, file, obj, zip: null, hasBundledModel: false, modelEntryName: null };
+        }
+
+        const zip = await JSZip.loadAsync(file);
+        const sceneFile = zip.file("scene.json");
+        if (!sceneFile) {
+            throw new Error("scene.json not found in zip.");
+        }
+        const txt = await sceneFile.async("string");
+        const obj = JSON.parse(txt || "{}");
+
+        const modelEntry = Object.values(zip.files).find((f) => f.name.startsWith("models/") && !f.dir);
+        const hasBundledModel = !!modelEntry;
+        const modelEntryName = modelEntry ? modelEntry.name : null;
+
+        return { ext, file, obj, zip, hasBundledModel, modelEntryName };
+    }, []);
+
+    const computeMergePlan = useCallback((incomingObj, options) => {
+        if (!incomingObj) return null;
+        const obj = incomingObj.obj || {};
+
+        const incRooms = obj.rooms || [];
+        const incNodes = obj.nodes || [];
+        const incLinks = obj.links || [];
+        const incDecks = obj.decks || [];
+        const incGroups = obj.groups || [];
+        const incActions = obj.actions || [];
+        const incPics = Array.isArray(obj.pictures) ? obj.pictures : (Array.isArray(obj.pictures?.items) ? obj.pictures.items : []);
+
+        const plan = {
+            meta: {
+                fileName: incomingObj.file?.name || "",
+                projectName: obj.project?.name || "",
+                version: obj.version ?? "",
+            },
+            graph: options.graph ? {
+                rooms: diffArray(rooms, incRooms, entityKey),
+                nodes: diffArray(nodes, incNodes, entityKey),
+                links: diffArray(links, incLinks, entityKey),
+            } : null,
+            decks: options.decks ? diffArray(decks, incDecks, entityKey) : null,
+            groups: options.groups ? diffArray(groups, incGroups, entityKey) : null,
+            actions: options.actions ? diffArray(actions, incActions, entityKey) : null,
+            pictures: options.pictures ? diffArray(importedPictures, incPics, (p, i) => {
+                // pictures can be id-less → best-effort stable key
+                if (p && p.id != null) return String(p.id);
+                if (p && p.url) return `url:${p.url}`;
+                if (p && p.src) return `src:${p.src}`;
+                return entityKey(p, i);
+            }) : null,
+            settings: null,
+            prefs: null,
+            hud: null,
+            products: null,
+            model: null,
+        };
+
+        if (options.settings) {
+            const changedSections = [];
+            const sectionDiff = (name, a, b) => {
+                if (!deepEqualStable(a, b)) changedSections.push(name);
+            };
+            sectionDiff("view", {
+                bg,
+                roomOpacity,
+                wireframe,
+                wireOpacity,
+                wireDetail,
+                wireHideSurfaces,
+                wireStroke,
+                showLights,
+                showLightBounds,
+                showGround,
+                animate,
+                perf,
+                shadowsOn,
+                wireReveal,
+            }, obj.view || {});
+            sectionDiff("productsView", {
+                productScale,
+                showDimsGlobal,
+                photoDefault,
+                productUnits,
+            }, obj.productsView || {});
+            sectionDiff("linkDefaults", linkDefaults, obj.linkDefaults || null);
+            sectionDiff("roomGap", roomGap, obj.roomGap || null);
+            sectionDiff("placement", placement, obj.placement || null);
+            sectionDiff("camera", { presets: cameraPresets, activePresetId: cameraPresetId, defaultPose }, obj.camera || null);
+            sectionDiff("actionsHud", actionsHud, obj.actionsHud || null);
+            sectionDiff("buttonStates", buttonStates, obj.buttonStates || null);
+            sectionDiff("ui", {
+                prodMode,
+                modelVisible,
+                modelScale,
+                alwaysShow3DInfo,
+                currentModelId,
+                snapRoomsEnabled,
+                snapRoomsDistance,
+                labelsOn,
+                labelMode,
+                labelSize,
+                mode,
+                selectionMode,
+                moveMode,
+                transformMode,
+            }, obj.ui || null);
+
+            plan.settings = {
+                changedSections,
+                changedCount: changedSections.length,
+            };
+        }
+
+        if (options.prefs) {
+            const incomingPrefs = obj.epicPrefs || {};
+            let same = 0;
+            let changed = 0;
+            let added = 0;
+            try {
+                if (typeof window !== "undefined" && window.localStorage) {
+                    const ls = window.localStorage;
+                    Object.entries(incomingPrefs).forEach(([k, v]) => {
+                        const cur = ls.getItem(k);
+                        if (cur == null) { added++; return; }
+                        if (String(cur) === String(v ?? "")) same++;
+                        else changed++;
+                    });
+                }
+            } catch {}
+            plan.prefs = { totalIncoming: Object.keys(incomingPrefs).length, same, changed, added };
+        }
+
+        if (options.hud) {
+            // HUD is stored in localStorage keys; compare against incoming hud block if present.
+            const incomingHud = obj.hud || null;
+            let changed = 0;
+            if (incomingHud) {
+                try {
+                    const ls = typeof window !== "undefined" ? window.localStorage : null;
+                    const curCfg = ls ? JSON.parse(ls.getItem("epic3d.hudConfig.v1") || "null") : null;
+                    const curLayout = ls ? JSON.parse(ls.getItem("epic3d.hudLayout.v3") || "null") : null;
+                    const curVisible = ls ? JSON.parse(ls.getItem("epic3d.hudVisible.v1") || "null") : null;
+                    const curStyles = ls ? JSON.parse(ls.getItem("epic3d.hudStyles.v1") || "null") : null;
+
+                    if (!deepEqualStable(curCfg || {}, incomingHud.cfg || {})) changed++;
+                    if (!deepEqualStable(curLayout || {}, incomingHud.layout || {})) changed++;
+                    if (!deepEqualStable(curVisible || {}, incomingHud.visibleMap || {})) changed++;
+                    if (!deepEqualStable(curStyles || {}, incomingHud.stylePresets || {})) changed++;
+                } catch {
+                    // if parsing fails, treat as changed
+                    changed = 4;
+                }
+            }
+            plan.hud = { hasIncoming: !!incomingHud, changedBlocks: changed };
+        }
+
+        if (options.products) {
+            const incomingProducts = obj.products?.items || [];
+            let currentProducts = [];
+            try {
+                const all = listProducts && listProducts();
+                if (Array.isArray(all)) currentProducts = all;
+            } catch {}
+            plan.products = diffArray(currentProducts, incomingProducts, (p, i) => (p && p.id != null ? String(p.id) : entityKey(p, i)));
+        }
+
+        if (options.model) {
+            plan.model = {
+                hasBundledModel: !!incomingObj.hasBundledModel,
+                incomingStaticId: obj.model?.staticId || obj.ui?.currentModelId || "",
+                incomingFilename: obj.model?.filename || "",
+            };
+        }
+
+        return plan;
+    }, [
+        rooms,
+        nodes,
+        links,
+        decks,
+        groups,
+        actions,
+        importedPictures,
+        entityKey,
+        diffArray,
+        deepEqualStable,
+        bg,
+        roomOpacity,
+        wireframe,
+        wireOpacity,
+        wireDetail,
+        wireHideSurfaces,
+        wireStroke,
+        showLights,
+        showLightBounds,
+        showGround,
+        animate,
+        perf,
+        shadowsOn,
+        wireReveal,
+        productScale,
+        showDimsGlobal,
+        photoDefault,
+        productUnits,
+        linkDefaults,
+        roomGap,
+        placement,
+        cameraPresets,
+        cameraPresetId,
+        defaultPose,
+        actionsHud,
+        buttonStates,
+        prodMode,
+        modelVisible,
+        modelScale,
+        alwaysShow3DInfo,
+        currentModelId,
+        snapRoomsEnabled,
+        snapRoomsDistance,
+        labelsOn,
+        labelMode,
+        labelSize,
+        mode,
+        selectionMode,
+        moveMode,
+        transformMode,
+    ]);
+
+    const loadMergeFile = useCallback(async (file) => {
+        const incoming = await parseScenePackage(file);
+        setMergeIncoming(incoming);
+        setMergePlan(computeMergePlan(incoming, mergeOptions));
+    }, [parseScenePackage, computeMergePlan, mergeOptions]);
+
+    useEffect(() => {
+        if (!mergeIncoming) return;
+        setMergePlan(computeMergePlan(mergeIncoming, mergeOptions));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [mergeOptions, mergeIncoming]);
+
+    const applyMerge = useCallback(async () => {
+        if (!mergeIncoming) return;
+
+        const obj = mergeIncoming.obj || {};
+        const addNew = !!mergeFlags.addNew;
+        const overwriteChanges = !!mergeFlags.overwrite;
+
+        // --- Core graph ---
+        if (mergeOptions.graph) {
+            setRooms((prev) => mergeArray(prev, obj.rooms || [], { addNew, overwriteChanges, keyFn: entityKey }));
+            setNodes((prev) => mergeArray(prev, obj.nodes || [], { addNew, overwriteChanges, keyFn: entityKey }));
+            setLinks((prev) => mergeArray(prev, obj.links || [], { addNew, overwriteChanges, keyFn: entityKey }));
+        }
+
+        if (mergeOptions.decks) {
+            setDecks((prev) => mergeArray(prev, obj.decks || [], { addNew, overwriteChanges, keyFn: entityKey }));
+        }
+        if (mergeOptions.groups) {
+            setGroups((prev) => mergeArray(prev, obj.groups || [], { addNew, overwriteChanges, keyFn: entityKey }));
+        }
+        if (mergeOptions.actions) {
+            setActions((prev) => mergeArray(prev, obj.actions || [], { addNew, overwriteChanges, keyFn: entityKey }));
+        }
+        if (mergeOptions.pictures) {
+            const picKey = (p, i) => {
+                if (p && p.id != null) return String(p.id);
+                if (p && p.url) return `url:${p.url}`;
+                if (p && p.src) return `src:${p.src}`;
+                return entityKey(p, i);
+            };
+            setImportedPictures((prev) => {
+                const mergedPics = mergeArray(prev, obj.pictures || [], { addNew, overwriteChanges, keyFn: picKey });
+                try {
+                    window.localStorage.setItem(PICTURES_KEY, JSON.stringify(mergedPics));
+                } catch {}
+                return mergedPics;
+            });
+        }
+
+        // --- Settings ---
+        if (mergeOptions.settings) {
+            // Overwrite-only for settings (unless current section is missing and addNew is enabled)
+            const canApply = overwriteChanges;
+
+            if (obj.view && canApply) {
+                const v = obj.view;
+                if (v.bg !== undefined) setBg(v.bg);
+                if (v.roomOpacity !== undefined) setRoomOpacity(v.roomOpacity);
+                if (v.wireframe !== undefined) setWireframe(v.wireframe);
+                if (v.wireOpacity !== undefined) setWireOpacity(v.wireOpacity);
+                if (v.wireDetail !== undefined && setWireDetail) setWireDetail(v.wireDetail);
+                if (v.wireHideSurfaces !== undefined) setWireHideSurfaces(v.wireHideSurfaces);
+                if (v.wireStroke && typeof v.wireStroke === "object") setWireStroke((d) => ({ ...(d || {}), ...v.wireStroke }));
+                if (v.showLights !== undefined) setShowLights(v.showLights);
+                if (v.showLightBounds !== undefined) setShowLightBounds(v.showLightBounds);
+                if (v.showGround !== undefined) setShowGround(v.showGround);
+                if (v.animate !== undefined) setAnimate(v.animate);
+                if (v.perf !== undefined) setPerf(v.perf);
+                if (v.shadowsOn !== undefined) setShadowsOn(v.shadowsOn);
+                if (v.wireReveal !== undefined) setWireReveal(v.wireReveal);
+            }
+
+            if (obj.productsView && canApply) {
+                const pv = obj.productsView;
+                if (pv.productScale !== undefined) setProductScale(pv.productScale);
+                if (pv.showDimsGlobal !== undefined) setShowDimsGlobal(pv.showDimsGlobal);
+                if (pv.photoDefault !== undefined) setPhotoDefault(pv.photoDefault);
+                if (pv.productUnits !== undefined) setProductUnits(pv.productUnits);
+            }
+
+            if (obj.linkDefaults && canApply) setLinkDefaults(obj.linkDefaults);
+            if (obj.roomGap && canApply) setRoomGap(obj.roomGap);
+            if (obj.placement && canApply) setPlacement(obj.placement);
+
+            if (obj.camera && canApply) {
+                const cam = obj.camera;
+                if (Array.isArray(cam.presets)) setCameraPresets(cam.presets);
+                if (cam.activePresetId !== undefined) setCameraPresetId(cam.activePresetId || "");
+                if (cam.defaultPose !== undefined) setDefaultPose(cam.defaultPose);
+            }
+
+            if (obj.actionsHud && canApply) setActionsHud(obj.actionsHud);
+            if (obj.buttonStates && canApply) setButtonStates(obj.buttonStates);
+
+            if (obj.ui && canApply) {
+                const u = obj.ui;
+                if (u.prodMode !== undefined) setProdMode(!!u.prodMode);
+                if (u.modelVisible !== undefined) setModelVisible(!!u.modelVisible);
+                if (u.modelScale !== undefined) setModelScale(Number(u.modelScale) || 1);
+                if (u.alwaysShow3DInfo !== undefined) setAlwaysShow3DInfo(!!u.alwaysShow3DInfo);
+                if (u.currentModelId) setCurrentModelId(u.currentModelId);
+                if (u.snapRooms) {
+                    if (u.snapRooms.enabled !== undefined) setSnapRoomsEnabled(!!u.snapRooms.enabled);
+                    if (u.snapRooms.distance !== undefined) setSnapRoomsDistance(Number(u.snapRooms.distance) || 0.5);
+                }
+                if (u.labels) {
+                    if (u.labels.on !== undefined) setLabelsOn(!!u.labels.on);
+                    if (u.labels.mode) setLabelMode(u.labels.mode);
+                    if (u.labels.size !== undefined) setLabelSize(Number(u.labels.size) || 0.24);
+                }
+                if (u.wire) {
+                    if (u.wire.hideSurfaces !== undefined) setWireHideSurfaces(!!u.wire.hideSurfaces);
+                    if (u.wire.stroke && typeof u.wire.stroke === "object") setWireStroke((d) => ({ ...(d || {}), ...u.wire.stroke }));
+                }
+                if (u.editor) {
+                    if (u.editor.mode) setMode(u.editor.mode);
+                    if (u.editor.selectionMode) setSelectionMode(u.editor.selectionMode);
+                    if (u.editor.moveMode !== undefined) setMoveMode(!!u.editor.moveMode);
+                    if (u.editor.transformMode) setTransformMode(u.editor.transformMode);
+                }
+            }
+
+            // If they disabled overwrite but want to addNew and some setting section is missing (rare), allow it.
+            if (!canApply && addNew) {
+                // no-op for now; settings are always present in this app
+            }
+        }
+
+        // --- HUD block (localStorage)
+        if (mergeOptions.hud && obj.hud && typeof window !== "undefined" && window.localStorage) {
+            if (overwriteChanges) {
+                try {
+                    const h = obj.hud;
+                    const ls = window.localStorage;
+                    if (h.cfg !== undefined) ls.setItem("epic3d.hudConfig.v1", JSON.stringify(h.cfg));
+                    if (h.layout !== undefined) ls.setItem("epic3d.hudLayout.v3", JSON.stringify(h.layout));
+                    if (h.visibleMap !== undefined) ls.setItem("epic3d.hudVisible.v1", JSON.stringify(h.visibleMap));
+                    if (h.stylePresets !== undefined) ls.setItem("epic3d.hudStyles.v1", JSON.stringify(h.stylePresets));
+                } catch (err) {
+                    console.warn("Failed to merge HUD layout/styles", err);
+                }
+            }
+        }
+
+        // --- epic3d.* prefs (localStorage)
+        if (mergeOptions.prefs && obj.epicPrefs && typeof window !== "undefined" && window.localStorage) {
+            try {
+                const ls = window.localStorage;
+                Object.entries(obj.epicPrefs).forEach(([k, v]) => {
+                    const cur = ls.getItem(k);
+                    const incomingVal = String(v ?? "");
+                    if (cur == null) {
+                        if (addNew) ls.setItem(k, incomingVal);
+                        return;
+                    }
+                    if (String(cur) === incomingVal) return;
+                    if (overwriteChanges) ls.setItem(k, incomingVal);
+                });
+            } catch (err) {
+                console.warn("Failed to merge epic3d.* prefs", err);
+            }
+        }
+
+        // --- products DB
+        if (mergeOptions.products && obj.products && Array.isArray(obj.products.items)) {
+            let currentProducts = [];
+            try {
+                const all = listProducts && listProducts();
+                if (Array.isArray(all)) currentProducts = all;
+            } catch {}
+            const curMap = new Map();
+            currentProducts.forEach((p, i) => curMap.set(p && p.id != null ? String(p.id) : entityKey(p, i), p));
+
+            obj.products.items.forEach((p, i) => {
+                const k = p && p.id != null ? String(p.id) : entityKey(p, i);
+                if (!curMap.has(k)) {
+                    if (addNew && upsertProduct) upsertProduct(p);
+                    return;
+                }
+                const curP = curMap.get(k);
+                if (deepEqualStable(curP, p)) return;
+                if (overwriteChanges && upsertProduct) upsertProduct(p);
+            });
+        }
+
+        // --- model bytes (optional)
+        if (mergeOptions.model) {
+            try {
+                const incomingStaticId = obj.model?.staticId || obj.ui?.currentModelId || "";
+
+                if (mergeIncoming.ext === "zip" && mergeIncoming.zip && mergeIncoming.modelEntryName) {
+                    const shouldLoadBundled = overwriteChanges || (addNew && !modelBlob && !modelDescriptor);
+                    if (shouldLoadBundled) {
+                        const entry = mergeIncoming.zip.file(mergeIncoming.modelEntryName);
+                        if (entry) {
+                            const blob = await entry.async("blob");
+                            const fname = mergeIncoming.modelEntryName.split("/").pop() || "model.glb";
+                            let fileLike = blob;
+                            if (typeof File !== "undefined") {
+                                fileLike = new File([blob], fname, { type: blob.type || "application/octet-stream" });
+                            } else {
+                                fileLike = Object.assign(blob, { name: fname });
+                            }
+                            await onModelFiles(fileLike);
+                        }
+                    }
+                } else if (incomingStaticId) {
+                    const shouldApplyStatic = overwriteChanges || (addNew && !currentModelId && !modelBlob);
+                    if (shouldApplyStatic) setCurrentModelId(incomingStaticId);
+                }
+            } catch (err) {
+                console.warn("Failed to merge model", err);
+            }
+        }
+
+        // Remount HUD if we touched LS-based layout.
+        if ((mergeOptions.hud && obj.hud) || (mergeOptions.prefs && obj.epicPrefs)) {
+            setHudVersion((v) => v + 1);
+        }
+
+        setMergeOpen(false);
+    }, [
+        mergeIncoming,
+        mergeFlags,
+        mergeOptions,
+        mergeArray,
+        entityKey,
+        importedPictures,
+        deepEqualStable,
+        setRooms,
+        setNodes,
+        setLinks,
+        setDecks,
+        setGroups,
+        setActions,
+        setImportedPictures,
+        setBg,
+        setRoomOpacity,
+        setWireframe,
+        setWireOpacity,
+        setWireDetail,
+        setWireHideSurfaces,
+        setWireStroke,
+        setShowLights,
+        setShowLightBounds,
+        setShowGround,
+        setAnimate,
+        setPerf,
+        setShadowsOn,
+        setWireReveal,
+        setProductScale,
+        setShowDimsGlobal,
+        setPhotoDefault,
+        setProductUnits,
+        setLinkDefaults,
+        setRoomGap,
+        setPlacement,
+        setCameraPresets,
+        setCameraPresetId,
+        setDefaultPose,
+        setActionsHud,
+        setButtonStates,
+        setProdMode,
+        setModelVisible,
+        setModelScale,
+        setAlwaysShow3DInfo,
+        setCurrentModelId,
+        setSnapRoomsEnabled,
+        setSnapRoomsDistance,
+        setLabelsOn,
+        setLabelMode,
+        setLabelSize,
+        setMode,
+        setSelectionMode,
+        setMoveMode,
+        setTransformMode,
+        setHudVersion,
+        modelBlob,
+        modelDescriptor,
+        currentModelId,
+        onModelFiles,
+    ]);
 
     const exportZip = async () => {
         const zip = new JSZip();
@@ -1543,7 +6131,7 @@ export default function Interactive3DNodeShowcase() {
         }
 
         const payload = {
-            version: 13,                          // bump version so you know this format
+            version: 14,                          // bump version so you know this format
             project: { name: projectName || "Showcase" },
 
             // --- core graph ---
@@ -1553,6 +6141,7 @@ export default function Interactive3DNodeShowcase() {
             decks,
             groups,
             actions,
+            pictures: importedPictures,
 
             // --- “classic” Actions HUD (right pane grid) ---
             actionsHud,
@@ -1586,6 +6175,8 @@ export default function Interactive3DNodeShowcase() {
                 wireframe,
                 wireOpacity,
                 wireDetail,
+                wireHideSurfaces,
+                wireStroke,
                 showLights,
                 showLightBounds,
                 showGround,
@@ -1603,10 +6194,27 @@ export default function Interactive3DNodeShowcase() {
                 productUnits,
             },
 
+            // --- UI / prefs (non-graph state that still matters for a full restore) ---
+            ui: {
+                prodMode,
+                modelVisible,
+                modelScale,
+                alwaysShow3DInfo,
+                currentModelId,
+                snapRooms: { enabled: snapRoomsEnabled, distance: snapRoomsDistance },
+                labels: { on: labelsOn, mode: labelMode, size: labelSize },
+                wire: { hideSurfaces: wireHideSurfaces, stroke: wireStroke },
+                editor: { mode, selectionMode, moveMode, transformMode },
+            },
+
             // --- model descriptor (not the bytes; bytes are added below) ---
             model: {
                 filename: modelFilename,
                 type: modelDescriptor?.type || null,
+                source: modelBlob ? "file" : (modelDescriptor ? "static" : null),
+                staticId: currentModelId || "",
+                visible: modelVisible,
+                scale: modelScale,
             },
 
             // --- NEW: all epic3d.* prefs (top bar, model scale, panel widths, etc) ---
@@ -1662,6 +6270,10 @@ export default function Interactive3DNodeShowcase() {
 
                 const txt = await sceneFile.async("string");
                 const obj = JSON.parse(txt || "{}");
+
+                // --- bundled model (if any) ---
+                const modelEntry = Object.values(zip.files).find((f) => f.name.startsWith("models/") && !f.dir);
+                const hasBundledModel = !!modelEntry;
 
                 // --- core graph ---
                 setRooms(obj.rooms || []);
@@ -1756,6 +6368,8 @@ export default function Interactive3DNodeShowcase() {
                     if (v.wireframe !== undefined) setWireframe(v.wireframe);
                     if (v.wireOpacity !== undefined) setWireOpacity(v.wireOpacity);
                     if (v.wireDetail !== undefined && setWireDetail) setWireDetail(v.wireDetail);
+                    if (v.wireHideSurfaces !== undefined) setWireHideSurfaces(v.wireHideSurfaces);
+                    if (v.wireStroke && typeof v.wireStroke === "object") setWireStroke((d) => ({ ...(d || {}), ...v.wireStroke }));
 
                     if (v.showLights !== undefined) setShowLights(v.showLights);
                     if (v.showLightBounds !== undefined) setShowLightBounds(v.showLightBounds);
@@ -1778,30 +6392,126 @@ export default function Interactive3DNodeShowcase() {
                     if (pv.productUnits !== undefined) setProductUnits(pv.productUnits);
                 }
 
+                // --- extra UI / render prefs (labels, model visibility/scale, snap settings, wire stroke, etc.) ---
+                {
+                    const prefs = obj.epicPrefs || {};
+                    const prefGet = (k) => (prefs && Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : null);
+                    const toBool = (v) => v === true || v === 1 || v === "1";
+                    const toNum = (v, d) => {
+                        const n = Number(v);
+                        return Number.isFinite(n) ? n : d;
+                    };
+
+                    let appliedModelScale = false;
+                    let appliedModelVisible = false;
+                    let appliedCurrentModel = false;
+                    let appliedAlwaysInfo = false;
+                    let appliedSnapEnabled = false;
+                    let appliedSnapDist = false;
+                    let appliedWireHide = false;
+
+                    if (obj.model) {
+                        const m = obj.model;
+                        if (m.visible !== undefined) { setModelVisible(!!m.visible); appliedModelVisible = true; }
+                        if (m.scale !== undefined) { setModelScale(toNum(m.scale, 1)); appliedModelScale = true; }
+                        if (!hasBundledModel && m.staticId) { setCurrentModelId(m.staticId); appliedCurrentModel = true; }
+                    }
+
+                    if (obj.ui) {
+                        const u = obj.ui;
+                        if (u.prodMode !== undefined) setProdMode(!!u.prodMode);
+                        if (u.modelVisible !== undefined) { setModelVisible(!!u.modelVisible); appliedModelVisible = true; }
+                        if (u.modelScale !== undefined) { setModelScale(toNum(u.modelScale, 1)); appliedModelScale = true; }
+                        if (!hasBundledModel && u.currentModelId) { setCurrentModelId(u.currentModelId); appliedCurrentModel = true; }
+                        if (u.alwaysShow3DInfo !== undefined) { setAlwaysShow3DInfo(!!u.alwaysShow3DInfo); appliedAlwaysInfo = true; }
+                        if (u.snapRooms) {
+                            if (u.snapRooms.enabled !== undefined) { setSnapRoomsEnabled(!!u.snapRooms.enabled); appliedSnapEnabled = true; }
+                            if (u.snapRooms.distance !== undefined) { setSnapRoomsDistance(toNum(u.snapRooms.distance, 0.5)); appliedSnapDist = true; }
+                        }
+                        if (u.labels) {
+                            if (u.labels.on !== undefined) setLabelsOn(!!u.labels.on);
+                            if (u.labels.mode) setLabelMode(u.labels.mode);
+                            if (u.labels.size !== undefined) setLabelSize(toNum(u.labels.size, 0.24));
+                        }
+                        if (u.wire) {
+                            if (u.wire.hideSurfaces !== undefined) { setWireHideSurfaces(!!u.wire.hideSurfaces); appliedWireHide = true; }
+                            if (u.wire.stroke && typeof u.wire.stroke === "object") {
+                                setWireStroke((d) => ({ ...(d || {}), ...u.wire.stroke }));
+                            }
+                        }
+                        if (u.editor) {
+                            if (u.editor.mode) setMode(u.editor.mode);
+                            if (u.editor.selectionMode) setSelectionMode(u.editor.selectionMode);
+                            if (u.editor.moveMode !== undefined) setMoveMode(!!u.editor.moveMode);
+                            if (u.editor.transformMode) setTransformMode(u.editor.transformMode);
+                        }
+                    }
+
+                    // Back-compat: some prefs were historically only in epicPrefs/localStorage and are init-only.
+                    if (!appliedModelScale) {
+                        const ms = prefGet("epic3d.modelScale.v1");
+                        if (ms != null) setModelScale(toNum(ms, 1));
+                    }
+                    if (!appliedAlwaysInfo) {
+                        const ai = prefGet("epic3d.alwaysShow3DInfo.v1");
+                        if (ai != null) setAlwaysShow3DInfo(toBool(ai));
+                    }
+                    if (!appliedSnapEnabled) {
+                        const se = prefGet("epic3d.snapRooms.enabled.v1");
+                        if (se != null) setSnapRoomsEnabled(toBool(se));
+                    }
+                    if (!appliedSnapDist) {
+                        const sd = prefGet("epic3d.snapRooms.distance.v1");
+                        if (sd != null) setSnapRoomsDistance(toNum(sd, 0.5));
+                    }
+                    if (!appliedWireHide) {
+                        const wh = prefGet("epic3d.wireHideSurfaces.v1");
+                        if (wh != null) setWireHideSurfaces(toBool(wh));
+                    }
+                    if (!appliedCurrentModel && !hasBundledModel) {
+                        const cm = prefGet("epic3d.static.current");
+                        if (cm) setCurrentModelId(cm);
+                    }
+                    if (!appliedModelVisible) {
+                        // default is true; if older scenes relied on that, nothing to do
+                    }
+                }
+
                 // --- project / name ---
                 if (obj.project && obj.project.name) {
                     setProjectName(obj.project.name);
                 }
 
                 // --- model descriptor & file (if bundled) ---
-                const modelEntry = Object
-                    .values(zip.files)
-                    .find((f) => f.name.startsWith("models/") && !f.dir);
-
                 if (modelEntry) {
                     const blob = await modelEntry.async("blob");
                     const fname = modelEntry.name.split("/").pop() || "model.glb";
-                    const url = URL.createObjectURL(blob);
 
+                    // Clean up any previous model URLs
                     if (modelDescriptor?.cleanup) {
                         try { modelDescriptor.cleanup(); } catch {}
                     }
 
-                    setModelDescriptor({ type: "zip:glb", url, cleanup: () => URL.revokeObjectURL(url) });
-                    setModelBlob(blob);
-                    setModelFilename(fname);
+                    // Reuse the normal model loader so .glb/.gltf/.zip all work (incl. textured zips)
+                    try {
+                        let fileLike = blob;
+                        if (typeof File !== "undefined") {
+                            fileLike = new File([blob], fname, { type: blob.type || "application/octet-stream" });
+                        } else {
+                            // Fallback: attach a name field for environments without File()
+                            fileLike = Object.assign(blob, { name: fname });
+                        }
+                        await onModelFiles(fileLike);
+                    } catch (err) {
+                        console.warn("Failed to restore bundled model from package", err);
+                    }
                 }
-
+                if (Array.isArray(obj.pictures)) {
+                    setImportedPictures(obj.pictures);
+                    try {
+                        window.localStorage.setItem(PICTURES_KEY, JSON.stringify(obj.pictures));
+                    } catch {}
+                }
                 // --- Restore full product DB from scene (names, images, etc.) ---
                 let productsLoaded = false;
                 if (obj.products && Array.isArray(obj.products.items)) {
@@ -1871,6 +6581,12 @@ export default function Interactive3DNodeShowcase() {
                         console.warn("Failed to restore HUD layout/styles from JSON scene", err);
                     }
                 }
+                if (Array.isArray(obj.pictures)) {
+                    setImportedPictures(obj.pictures);
+                    try {
+                        window.localStorage.setItem(PICTURES_KEY, JSON.stringify(obj.pictures));
+                    } catch {}
+                }
 
                 // epic3d.* prefs for JSON scenes too
                 if (obj.epicPrefs && typeof window !== "undefined" && window.localStorage) {
@@ -1906,6 +6622,8 @@ export default function Interactive3DNodeShowcase() {
                     if (v.wireframe !== undefined) setWireframe(v.wireframe);
                     if (v.wireOpacity !== undefined) setWireOpacity(v.wireOpacity);
                     if (v.wireDetail !== undefined && setWireDetail) setWireDetail(v.wireDetail);
+                    if (v.wireHideSurfaces !== undefined) setWireHideSurfaces(v.wireHideSurfaces);
+                    if (v.wireStroke && typeof v.wireStroke === "object") setWireStroke((d) => ({ ...(d || {}), ...v.wireStroke }));
                     if (v.showLights !== undefined) setShowLights(v.showLights);
                     if (v.showLightBounds !== undefined) setShowLightBounds(v.showLightBounds);
                     if (v.showGround !== undefined) setShowGround(v.showGround);
@@ -1921,6 +6639,92 @@ export default function Interactive3DNodeShowcase() {
                     if (pv.showDimsGlobal !== undefined) setShowDimsGlobal(pv.showDimsGlobal);
                     if (pv.photoDefault !== undefined) setPhotoDefault(pv.photoDefault);
                     if (pv.productUnits !== undefined) setProductUnits(pv.productUnits);
+                }
+
+                // --- extra UI / render prefs (labels, model visibility/scale, snap settings, wire stroke, etc.) ---
+                {
+                    const hasBundledModel = false;
+                    const prefs = obj.epicPrefs || {};
+                    const prefGet = (k) => (prefs && Object.prototype.hasOwnProperty.call(prefs, k) ? prefs[k] : null);
+                    const toBool = (v) => v === true || v === 1 || v === "1";
+                    const toNum = (v, d) => {
+                        const n = Number(v);
+                        return Number.isFinite(n) ? n : d;
+                    };
+
+                    let appliedModelScale = false;
+                    let appliedModelVisible = false;
+                    let appliedCurrentModel = false;
+                    let appliedAlwaysInfo = false;
+                    let appliedSnapEnabled = false;
+                    let appliedSnapDist = false;
+                    let appliedWireHide = false;
+
+                    if (obj.model) {
+                        const m = obj.model;
+                        if (m.visible !== undefined) { setModelVisible(!!m.visible); appliedModelVisible = true; }
+                        if (m.scale !== undefined) { setModelScale(toNum(m.scale, 1)); appliedModelScale = true; }
+                        if (!hasBundledModel && m.staticId) { setCurrentModelId(m.staticId); appliedCurrentModel = true; }
+                    }
+
+                    if (obj.ui) {
+                        const u = obj.ui;
+                        if (u.prodMode !== undefined) setProdMode(!!u.prodMode);
+                        if (u.modelVisible !== undefined) { setModelVisible(!!u.modelVisible); appliedModelVisible = true; }
+                        if (u.modelScale !== undefined) { setModelScale(toNum(u.modelScale, 1)); appliedModelScale = true; }
+                        if (!hasBundledModel && u.currentModelId) { setCurrentModelId(u.currentModelId); appliedCurrentModel = true; }
+                        if (u.alwaysShow3DInfo !== undefined) { setAlwaysShow3DInfo(!!u.alwaysShow3DInfo); appliedAlwaysInfo = true; }
+                        if (u.snapRooms) {
+                            if (u.snapRooms.enabled !== undefined) { setSnapRoomsEnabled(!!u.snapRooms.enabled); appliedSnapEnabled = true; }
+                            if (u.snapRooms.distance !== undefined) { setSnapRoomsDistance(toNum(u.snapRooms.distance, 0.5)); appliedSnapDist = true; }
+                        }
+                        if (u.labels) {
+                            if (u.labels.on !== undefined) setLabelsOn(!!u.labels.on);
+                            if (u.labels.mode) setLabelMode(u.labels.mode);
+                            if (u.labels.size !== undefined) setLabelSize(toNum(u.labels.size, 0.24));
+                        }
+                        if (u.wire) {
+                            if (u.wire.hideSurfaces !== undefined) { setWireHideSurfaces(!!u.wire.hideSurfaces); appliedWireHide = true; }
+                            if (u.wire.stroke && typeof u.wire.stroke === "object") {
+                                setWireStroke((d) => ({ ...(d || {}), ...u.wire.stroke }));
+                            }
+                        }
+                        if (u.editor) {
+                            if (u.editor.mode) setMode(u.editor.mode);
+                            if (u.editor.selectionMode) setSelectionMode(u.editor.selectionMode);
+                            if (u.editor.moveMode !== undefined) setMoveMode(!!u.editor.moveMode);
+                            if (u.editor.transformMode) setTransformMode(u.editor.transformMode);
+                        }
+                    }
+
+                    // Back-compat: some prefs were historically only in epicPrefs/localStorage and are init-only.
+                    if (!appliedModelScale) {
+                        const ms = prefGet("epic3d.modelScale.v1");
+                        if (ms != null) setModelScale(toNum(ms, 1));
+                    }
+                    if (!appliedAlwaysInfo) {
+                        const ai = prefGet("epic3d.alwaysShow3DInfo.v1");
+                        if (ai != null) setAlwaysShow3DInfo(toBool(ai));
+                    }
+                    if (!appliedSnapEnabled) {
+                        const se = prefGet("epic3d.snapRooms.enabled.v1");
+                        if (se != null) setSnapRoomsEnabled(toBool(se));
+                    }
+                    if (!appliedSnapDist) {
+                        const sd = prefGet("epic3d.snapRooms.distance.v1");
+                        if (sd != null) setSnapRoomsDistance(toNum(sd, 0.5));
+                    }
+                    if (!appliedWireHide) {
+                        const wh = prefGet("epic3d.wireHideSurfaces.v1");
+                        if (wh != null) setWireHideSurfaces(toBool(wh));
+                    }
+                    if (!appliedCurrentModel && !hasBundledModel) {
+                        const cm = prefGet("epic3d.static.current");
+                        if (cm) setCurrentModelId(cm);
+                    }
+                    if (!appliedModelVisible) {
+                        // default is true; if older scenes relied on that, nothing to do
+                    }
                 }
 
                 if (obj.project && obj.project.name) {
@@ -2000,6 +6804,20 @@ export default function Interactive3DNodeShowcase() {
         roomChildStarts: new Map(),
         movedRoomIds: new Set(),
         selectedNodeIds: new Set(),
+        linkBpStarts: new Map(),
+    });
+
+
+    // --- Multi-rotate snapshot (used when multiSel length > 1 and transformMode === 'rotate') ---
+    const multiRotateRef = useRef({
+        active: false,
+        baselineQuat: new THREE.Quaternion(),
+        pivot: [0, 0, 0],
+        starts: new Map(),          // key -> { pos:[x,y,z], rot:[x,y,z] }
+        roomChildStarts: new Map(), // nodeId -> { pos:[x,y,z], rot:[x,y,z] }
+        movedRoomIds: new Set(),
+        selectedNodeIds: new Set(),
+        linkBpStarts: new Map(),    // linkId -> [[x,y,z], ...]
     });
 
 
@@ -2010,10 +6828,16 @@ export default function Interactive3DNodeShowcase() {
         r.driverKey = null;
     }, [moveMode, transformMode, selected?.type, selected?.id, multiSel]);
 
+// reset rotate drag baseline when selection/mode changes
+    useEffect(() => {
+        const r = multiRotateRef.current;
+        r.active = false;
+    }, [moveMode, transformMode, selected?.type, selected?.id, multiSel]);
+
 // stop a drag when pointer is released (so the next drag re-snapshots correctly)
     useEffect(() => {
         if (typeof window === "undefined") return;
-        const end = () => { multiMoveRef.current.active = false; };
+        const end = () => { multiMoveRef.current.active = false; multiRotateRef.current.active = false; };
         window.addEventListener("pointerup", end);
         window.addEventListener("pointercancel", end);
         return () => {
@@ -2033,6 +6857,12 @@ export default function Interactive3DNodeShowcase() {
 
         const pos = toArr3(position);
         if (!pos) return;
+
+        // ----- SINGLE PICTURE (gizmo translate) -----
+        if (target?.type === "picture") {
+            setPicturePosition(target.id, { x: pos[0], y: pos[1], z: pos[2] });
+            return;
+        }
 
 
         // ----- GROUP MOVE (multi selection) -----
@@ -2103,6 +6933,25 @@ export default function Interactive3DNodeShowcase() {
 
                     ref.roomChildStarts.set(n.id, [...n.position]);
                 }
+                // Snapshot breakpoints for links connected to any moving node
+                // (selected nodes + nodes inside moved rooms). We translate them by the same dx/dy/dz
+                // so they don't get left behind when moving room packs.
+                ref.linkBpStarts = new Map();
+                const curLinks = linksRef.current || [];
+                const movingNodeIds = new Set(ref.selectedNodeIds);
+                for (const [nid] of ref.roomChildStarts) movingNodeIds.add(nid);
+
+                for (const l of curLinks) {
+                    if (!l) continue;
+                    if (!movingNodeIds.has(l.from) && !movingNodeIds.has(l.to)) continue;
+                    const bps = Array.isArray(l.breakpoints) ? l.breakpoints : null;
+                    if (!bps || !bps.length) continue;
+                    ref.linkBpStarts.set(
+                        l.id,
+                        bps.map((bp) => [bp?.[0] ?? 0, bp?.[1] ?? 0, bp?.[2] ?? 0])
+                    );
+                }
+
             }
 
             // --- MOVEMENT PHASE ---
@@ -2118,7 +6967,9 @@ export default function Interactive3DNodeShowcase() {
                     prev.map(r => {
                         if (!ref.movedRoomIds.has(r.id)) return r;
                         const s = ref.starts.get(`room:${r.id}`);
-                        return { ...r, center: [s[0] + dx, s[1] + dy, s[2] + dz] };
+                        const next = [s[0] + dx, s[1] + dy, s[2] + dz];
+                        const clamped = clampRoomToPictureDecks(r, next);
+                        return { ...r, center: clamped };
                     })
                 );
             }
@@ -2131,17 +6982,37 @@ export default function Interactive3DNodeShowcase() {
                     if (ref.starts.has(key)) {
                         const s = ref.starts.get(key);
                         const next = [s[0] + dx, s[1] + dy, s[2] + dz];
-                        return { ...n, position: next };
+                        // If node is constrained inside a room that is NOT moving, keep it constrained.
+                        const roomClamped = (n.roomId && !ref.movedRoomIds.has(n.roomId))
+                            ? clampNodeToRoomBounds(n, next)
+                            : next;
+                        const deckClamped = clampNodeToPictureDecks(n, roomClamped);
+                        return { ...n, position: deckClamped };
                     }
 
                     if (ref.roomChildStarts.has(n.id)) {
                         const s = ref.roomChildStarts.get(n.id);
-                        return { ...n, position: [s[0] + dx, s[1] + dy, s[2] + dz] };
+                        const next = [s[0] + dx, s[1] + dy, s[2] + dz];
+                        const deckClamped = clampNodeToPictureDecks(n, next);
+                        return { ...n, position: deckClamped };
                     }
 
                     return n;
                 })
             );
+
+            // Move link breakpoints for any affected links (keep relative while pack-moving)
+            if (ref.linkBpStarts && ref.linkBpStarts.size) {
+                setLinks((prev) =>
+                    prev.map((l) => {
+                        const starts = ref.linkBpStarts.get(l.id);
+                        if (!starts) return l;
+                        const next = starts.map((bp) => [bp[0] + dx, bp[1] + dy, bp[2] + dz]);
+                        return { ...l, breakpoints: next };
+                    })
+                );
+            }
+
 
             return;
         }
@@ -2149,13 +7020,16 @@ export default function Interactive3DNodeShowcase() {
         // ----- SINGLE MOVE -----
         if (target?.type === "node") {
             const node = nodes.find((n) => n.id === target.id) || null;
-            const clamped = clampNodeToRoomBounds(node, pos);
-            setNode(target.id, { position: clamped });
+            const roomClamped = clampNodeToRoomBounds(node, pos);
+            const deckClamped = clampNodeToPictureDecks(node, roomClamped);
+            setNode(target.id, { position: deckClamped });
             return;
         }
 
         if (target?.type === "room") {
-            setRoom(target.id, { center: pos });
+            const room = rooms.find((r) => r.id === target.id) || null;
+            const deckClamped = clampRoomToPictureDecks(room, pos);
+            setRoom(target.id, { center: deckClamped });
             return;
         }
 
@@ -2178,8 +7052,213 @@ export default function Interactive3DNodeShowcase() {
 
 
     const onEntityRotate = (target, rotation) => {
-        if (target.type === "node") setNode(target.id, { rotation });
-        if (target.type === "room") setRoom(target.id, { rotation });
+        const toArr3 = (v) => {
+            if (Array.isArray(v)) return [v[0] ?? 0, v[1] ?? 0, v[2] ?? 0];
+            if (v?.toArray) return v.toArray();
+            return [v?.x ?? 0, v?.y ?? 0, v?.z ?? 0];
+        };
+
+        const rot = toArr3(rotation);
+        if (!rot) return;
+
+        // ----- GROUP ROTATE (multi selection) -----
+        const raw = (Array.isArray(multiSel) && multiSel.length)
+            ? multiSel
+            : (selected ? [selected] : []);
+
+        const seen = new Set();
+        const selection = [];
+        for (const it of raw) {
+            if (!it || (it.type !== 'node' && it.type !== 'room') || it.id == null) continue;
+            const k = `${it.type}:${it.id}`;
+            if (seen.has(k)) continue;
+            seen.add(k);
+            selection.push(it);
+        }
+
+        const isGroupRotate =
+            moveMode &&
+            transformMode === 'rotate' &&
+            selection.length > 1 &&
+            target?.type === 'pivot';
+
+        if (isGroupRotate) {
+            const ref = multiRotateRef.current;
+
+            const curNodes = nodesRef.current || [];
+            const curRooms = roomsRef.current || [];
+
+            // Pick pivot (room-pack override uses room center)
+            let pivot = null;
+            const o = multiPivotOverride?.pos;
+            if (Array.isArray(o) && o.length >= 3 && [o[0], o[1], o[2]].every(Number.isFinite)) {
+                pivot = [o[0], o[1], o[2]];
+            }
+
+            if (!pivot) {
+                // centroid of selection
+                let sx = 0, sy = 0, sz = 0, c = 0;
+                for (const it of selection) {
+                    if (it.type === 'node') {
+                        const n = curNodes.find((x) => x.id === it.id);
+                        const p = n?.position;
+                        if (!p) continue;
+                        sx += p[0] ?? 0; sy += p[1] ?? 0; sz += p[2] ?? 0; c++;
+                    } else {
+                        const r = curRooms.find((x) => x.id === it.id);
+                        const p = r?.center;
+                        if (!p) continue;
+                        sx += p[0] ?? 0; sy += p[1] ?? 0; sz += p[2] ?? 0; c++;
+                    }
+                }
+                pivot = c ? [sx / c, sy / c, sz / c] : [0, 0, 0];
+            }
+
+            const curQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(rot[0], rot[1], rot[2], 'XYZ'));
+
+            // --- START OF DRAG ---
+            if (!ref.active) {
+                ref.active = true;
+                ref.baselineQuat.copy(curQuat);
+                ref.pivot = pivot;
+                ref.starts = new Map();
+                ref.roomChildStarts = new Map();
+                ref.movedRoomIds = new Set();
+                ref.selectedNodeIds = new Set();
+                ref.linkBpStarts = new Map();
+
+                // Snapshot selected items
+                for (const it of selection) {
+                    const key = `${it.type}:${it.id}`;
+                    if (it.type === 'node') {
+                        const n = curNodes.find((x) => x.id === it.id);
+                        if (n?.position) {
+                            ref.starts.set(key, {
+                                pos: [...n.position],
+                                rot: Array.isArray(n.rotation) ? [...n.rotation] : [0, 0, 0],
+                            });
+                        }
+                        ref.selectedNodeIds.add(it.id);
+                    } else {
+                        const r = curRooms.find((x) => x.id === it.id);
+                        if (r?.center) {
+                            ref.starts.set(key, {
+                                pos: [...r.center],
+                                rot: Array.isArray(r.rotation) ? [...r.rotation] : [0, 0, 0],
+                            });
+                        }
+                        if (r?.id) ref.movedRoomIds.add(r.id);
+                    }
+                }
+
+                // Snapshot nodes inside rotated rooms (so room-rotate behaves like pack-rotate)
+                for (const n of curNodes) {
+                    if (!n.roomId) continue;
+                    if (!ref.movedRoomIds.has(n.roomId)) continue;
+                    if (ref.selectedNodeIds.has(n.id)) continue;
+                    ref.roomChildStarts.set(n.id, {
+                        pos: [...(n.position || [0, 0, 0])],
+                        rot: Array.isArray(n.rotation) ? [...n.rotation] : [0, 0, 0],
+                    });
+                }
+
+                // Snapshot breakpoints for links fully inside the rotating node set
+                const curLinks = linksRef.current || [];
+                const rotatingNodeIds = new Set(ref.selectedNodeIds);
+                for (const [nid] of ref.roomChildStarts) rotatingNodeIds.add(nid);
+
+                for (const l of curLinks) {
+                    if (!l) continue;
+                    if (!rotatingNodeIds.has(l.from) || !rotatingNodeIds.has(l.to)) continue;
+                    const bps = Array.isArray(l.breakpoints) ? l.breakpoints : null;
+                    if (!bps || !bps.length) continue;
+                    ref.linkBpStarts.set(
+                        l.id,
+                        bps.map((bp) => [bp?.[0] ?? 0, bp?.[1] ?? 0, bp?.[2] ?? 0])
+                    );
+                }
+
+                return; // baseline only
+            }
+
+            // --- ROTATION PHASE ---
+            const invBase = ref.baselineQuat.clone().invert();
+            const delta = curQuat.clone().multiply(invBase);
+
+            const pv = new THREE.Vector3(ref.pivot[0] ?? 0, ref.pivot[1] ?? 0, ref.pivot[2] ?? 0);
+            const v = new THREE.Vector3();
+
+            const applyRotPos = (posArr) => {
+                v.set((posArr[0] ?? 0) - pv.x, (posArr[1] ?? 0) - pv.y, (posArr[2] ?? 0) - pv.z);
+                v.applyQuaternion(delta);
+                return [pv.x + v.x, pv.y + v.y, pv.z + v.z];
+            };
+
+            const applyRotEuler = (rotArr) => {
+                const q0 = new THREE.Quaternion().setFromEuler(new THREE.Euler(rotArr[0] ?? 0, rotArr[1] ?? 0, rotArr[2] ?? 0, 'XYZ'));
+                const q1 = delta.clone().multiply(q0);
+                const e1 = new THREE.Euler().setFromQuaternion(q1, 'XYZ');
+                return [e1.x, e1.y, e1.z];
+            };
+
+            // Rotate rooms (center + rotation)
+            if (ref.movedRoomIds.size > 0) {
+                setRooms((prev) =>
+                    prev.map((r) => {
+                        if (!ref.movedRoomIds.has(r.id)) return r;
+                        const s = ref.starts.get(`room:${r.id}`);
+                        if (!s?.pos) return r;
+                        const nextCenter = applyRotPos(s.pos);
+                        const nextRot = applyRotEuler(s.rot || r.rotation || [0, 0, 0]);
+                        const deckClamped = clampRoomToPictureDecks({ ...r, size: r.size || [1, 1, 1] }, nextCenter);
+                        return { ...r, center: deckClamped, rotation: nextRot };
+                    })
+                );
+            }
+
+            // Rotate nodes (selected + inside rotated rooms)
+            setNodes((prev) =>
+                prev.map((n) => {
+                    const key = `node:${n.id}`;
+
+                    if (ref.starts.has(key)) {
+                        const s = ref.starts.get(key);
+                        const nextPos = applyRotPos(s.pos);
+                        const nextRot = applyRotEuler(s.rot || n.rotation || [0, 0, 0]);
+                        const deckClamped = clampNodeToPictureDecks(n, nextPos);
+                        return { ...n, position: deckClamped, rotation: nextRot };
+                    }
+
+                    if (ref.roomChildStarts.has(n.id)) {
+                        const s = ref.roomChildStarts.get(n.id);
+                        const nextPos = applyRotPos(s.pos);
+                        const nextRot = applyRotEuler(s.rot || n.rotation || [0, 0, 0]);
+                        const deckClamped = clampNodeToPictureDecks(n, nextPos);
+                        return { ...n, position: deckClamped, rotation: nextRot };
+                    }
+
+                    return n;
+                })
+            );
+
+            // Rotate breakpoints for internal links
+            if (ref.linkBpStarts && ref.linkBpStarts.size) {
+                setLinks((prev) =>
+                    prev.map((l) => {
+                        const starts = ref.linkBpStarts.get(l.id);
+                        if (!starts) return l;
+                        const next = starts.map((bp) => applyRotPos(bp));
+                        return { ...l, breakpoints: next };
+                    })
+                );
+            }
+
+            return;
+        }
+
+        // ----- SINGLE ROTATE -----
+        if (target?.type === 'node') setNode(target.id, { rotation: rot });
+        if (target?.type === 'room') setRoom(target.id, { rotation: rot });
     };
 
 
@@ -2270,7 +7349,9 @@ export default function Interactive3DNodeShowcase() {
         const pack = roomDragRef.current;
         if (!pack || pack.id !== roomId) return;
 
-        const finalCenter = computeSnappedRoomCenter(roomId, newCenter);
+        const snapped = computeSnappedRoomCenter(roomId, newCenter);
+        const roomObj = rooms.find((r) => r.id === roomId) || null;
+        const finalCenter = clampRoomToPictureDecks(roomObj, snapped);
 
         const dx = finalCenter[0] - pack.startCenter[0];
         const dy = finalCenter[1] - pack.startCenter[1];
@@ -2281,16 +7362,155 @@ export default function Interactive3DNodeShowcase() {
             setNodes((prev) =>
                 prev.map((n) =>
                     n.roomId === roomId
-                        ? {
-                            ...n,
-                            position: [
-                                pack.nodeStarts.find((s) => s.id === n.id).pos[0] + dx,
-                                pack.nodeStarts.find((s) => s.id === n.id).pos[1] + dy,
-                                pack.nodeStarts.find((s) => s.id === n.id).pos[2] + dz,
-                            ],
-                        }
+                        ? (() => {
+                            const s = pack.nodeStarts.find((ss) => ss.id === n.id);
+                            const next = [
+                                (s?.pos?.[0] ?? n.position?.[0] ?? 0) + dx,
+                                (s?.pos?.[1] ?? n.position?.[1] ?? 0) + dy,
+                                (s?.pos?.[2] ?? n.position?.[2] ?? 0) + dz,
+                            ];
+                            const deckClamped = clampNodeToPictureDecks(n, next);
+                            return { ...n, position: deckClamped };
+                        })()
                         : n
                 )
+            );
+        }
+    };
+
+    // --- Room scale pack (scale room + everything inside it) ---
+    const roomScalePackRef = useRef({
+        id: null,
+        startCenter: [0, 0, 0],
+        startSize: [1, 1, 1],
+        startRot: [0, 0, 0],
+        startBottomY: 0,
+        nodeStarts: [],
+        linkBpStarts: new Map(),
+    });
+
+    const onRoomScalePack = (roomId) => {
+        const room = rooms.find((r) => r.id === roomId);
+        if (!room || room.locked) return;
+
+        const startCenter = [...(room.center || [0, 0, 0])];
+        const startSize = [...(room.size || [3, 1.6, 2.2])];
+        const startRot = [...(room.rotation || [0, 0, 0])];
+        const startBottomY = (startCenter[1] ?? 0) - (startSize[1] ?? 1) / 2;
+
+        // nodes inside room
+        const nodeStarts = nodes
+            .filter((n) => n.roomId === roomId)
+            .map((n) => ({
+                id: n.id,
+                pos: [...(n.position || [0, 0, 0])],
+            }));
+
+        // breakpoints for internal links (both endpoints inside room)
+        const inRoomNodeIds = new Set(nodeStarts.map((s) => s.id));
+        const linkBpStarts = new Map();
+        for (const l of links) {
+            if (!l) continue;
+            if (!inRoomNodeIds.has(l.from) || !inRoomNodeIds.has(l.to)) continue;
+            const bps = Array.isArray(l.breakpoints) ? l.breakpoints : null;
+            if (!bps || !bps.length) continue;
+            linkBpStarts.set(
+                l.id,
+                bps.map((bp) => [bp?.[0] ?? 0, bp?.[1] ?? 0, bp?.[2] ?? 0])
+            );
+        }
+
+        roomScalePackRef.current = {
+            id: roomId,
+            startCenter,
+            startSize,
+            startRot,
+            startBottomY,
+            nodeStarts,
+            linkBpStarts,
+        };
+    };
+
+    const onRoomScaleApply = (roomId, scaleVec) => {
+        const pack = roomScalePackRef.current;
+        if (!pack || pack.id !== roomId) return;
+
+        const s = Array.isArray(scaleVec) ? scaleVec : [scaleVec?.[0], scaleVec?.[1], scaleVec?.[2]];
+        const sx = Number(s?.[0]);
+        const sy = Number(s?.[1]);
+        const sz = Number(s?.[2]);
+        if (![sx, sy, sz].every((v) => Number.isFinite(v) && v > 0)) return;
+
+        // clamp scale factors to avoid exploding
+        const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+        const kx = clamp(sx, 0.05, 50);
+        const ky = clamp(sy, 0.05, 50);
+        const kz = clamp(sz, 0.05, 50);
+
+        // New room size
+        const base = pack.startSize || [1, 1, 1];
+        const newSize = [
+            clamp((base[0] ?? 1) * kx, 0.2, 500),
+            clamp((base[1] ?? 1) * ky, 0.2, 500),
+            clamp((base[2] ?? 1) * kz, 0.2, 500),
+        ];
+
+        // Keep bottom Y stable (so it stays on the floor/deck)
+        const rawCenter = [
+            pack.startCenter[0] ?? 0,
+            (pack.startBottomY ?? 0) + newSize[1] / 2,
+            pack.startCenter[2] ?? 0,
+        ];
+
+        const roomObj = rooms.find((r) => r.id === roomId) || null;
+        const finalCenter = clampRoomToPictureDecks({ ...(roomObj || {}), size: newSize, rotation: pack.startRot }, rawCenter);
+
+        // Rotation basis (room-local scaling)
+        const e = pack.startRot || [0, 0, 0];
+        const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(e[0] ?? 0, e[1] ?? 0, e[2] ?? 0, 'XYZ'));
+        const qInv = q.clone().invert();
+        const v = new THREE.Vector3();
+        const c0 = new THREE.Vector3(pack.startCenter[0] ?? 0, pack.startCenter[1] ?? 0, pack.startCenter[2] ?? 0);
+        const c1 = new THREE.Vector3(finalCenter[0] ?? 0, finalCenter[1] ?? 0, finalCenter[2] ?? 0);
+
+        const scaleLocalPoint = (p) => {
+            v.set((p[0] ?? 0) - c0.x, (p[1] ?? 0) - c0.y, (p[2] ?? 0) - c0.z);
+            v.applyQuaternion(qInv);
+            v.set(v.x * kx, v.y * ky, v.z * kz);
+            v.applyQuaternion(q);
+            return [c1.x + v.x, c1.y + v.y, c1.z + v.z];
+        };
+
+        // Apply room size + (possibly lifted) center
+        setRooms((prev) =>
+            prev.map((r) =>
+                r.id === roomId ? { ...r, size: newSize, center: finalCenter } : r
+            )
+        );
+
+        // Scale nodes inside
+        if (pack.nodeStarts?.length) {
+            const byId = new Map(pack.nodeStarts.map((x) => [x.id, x.pos]));
+            setNodes((prev) =>
+                prev.map((n) => {
+                    if (n.roomId !== roomId) return n;
+                    const p0 = byId.get(n.id) || n.position || [0, 0, 0];
+                    const p1 = scaleLocalPoint(p0);
+                    const deckClamped = clampNodeToPictureDecks(n, p1);
+                    return { ...n, position: deckClamped };
+                })
+            );
+        }
+
+        // Scale internal link breakpoints
+        if (pack.linkBpStarts && pack.linkBpStarts.size) {
+            setLinks((prev) =>
+                prev.map((l) => {
+                    const starts = pack.linkBpStarts.get(l.id);
+                    if (!starts) return l;
+                    const next = starts.map((bp) => scaleLocalPoint(bp));
+                    return { ...l, breakpoints: next };
+                })
             );
         }
     };
@@ -2299,68 +7519,71 @@ export default function Interactive3DNodeShowcase() {
         const orig = rooms.find((r) => r.id === roomId);
         if (!orig) return;
 
-        const offX = Math.max(1, (orig.size?.[0] ?? 1)) + 0.5;
-        const offset = [offX, 0, 0];
+        // place copy next to original (X offset by width + padding)
+        const dx = Math.max(1, (orig.size?.[0] ?? 1)) + 0.5;
+        const dy = 0;
+        const dz = 0;
 
         const newRoomId = uuid();
-        const copy = {
+        const copyRoom = {
             ...orig,
             id: newRoomId,
             name: `${orig.name} Copy`,
-            center: [
-                (orig.center?.[0] ?? 0) + offset[0],
-                (orig.center?.[1] ?? 0) + offset[1],
-                (orig.center?.[2] ?? 0) + offset[2],
-            ],
+            center: [ (orig.center?.[0] ?? 0) + dx, (orig.center?.[1] ?? 0) + dy, (orig.center?.[2] ?? 0) + dz ],
         };
 
-        // Duplicate nodes in this room and keep relative positions.
-        const origNodes = nodes.filter((n) => n.roomId === roomId);
-        const idMap = new Map();
-        const newNodes = origNodes.map((n) => {
+        // Duplicate nodes that belong to this room
+        const oldNodes = nodes.filter((n) => n.roomId === roomId);
+        const nodeIdMap = new Map();
+        const newNodes = oldNodes.map((n) => {
             const newId = uuid();
-            idMap.set(n.id, newId);
+            nodeIdMap.set(n.id, newId);
             const p = n.position || [0, 0, 0];
             return {
                 ...n,
                 id: newId,
-                label: `${n.label || "Node"} Copy`,
+                label: n.label ? `${n.label} (Copy)` : `Node (Copy)`,
+                position: [ (p[0] ?? 0) + dx, (p[1] ?? 0) + dy, (p[2] ?? 0) + dz ],
                 roomId: newRoomId,
-                position: [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2]],
             };
         });
 
-        // Duplicate links where both endpoints are inside the duplicated room.
-        const origNodeIds = new Set(origNodes.map((n) => n.id));
+        // Duplicate internal links between those nodes (and offset breakpoints)
+        const oldNodeIdSet = new Set(oldNodes.map((n) => n.id));
         const newLinks = links
-            .filter((l) => origNodeIds.has(l.from) && origNodeIds.has(l.to))
+            .filter((l) => oldNodeIdSet.has(l.from) && oldNodeIdSet.has(l.to))
             .map((l) => {
-                const bp = Array.isArray(l.breakpoints) ? l.breakpoints : [];
-                const shifted = bp.map((b) => [
-                    (b?.[0] ?? 0) + offset[0],
-                    (b?.[1] ?? 0) + offset[1],
-                    (b?.[2] ?? 0) + offset[2],
-                ]);
-                return {
+                const bps = Array.isArray(l.breakpoints) ? l.breakpoints : null;
+                const nextBps = bps
+                    ? bps.map((bp) => [ (bp?.[0] ?? 0) + dx, (bp?.[1] ?? 0) + dy, (bp?.[2] ?? 0) + dz ])
+                    : undefined;
+                const out = {
                     ...l,
                     id: uuid(),
-                    from: idMap.get(l.from) || l.from,
-                    to: idMap.get(l.to) || l.to,
-                    breakpoints: shifted,
+                    from: nodeIdMap.get(l.from),
+                    to: nodeIdMap.get(l.to),
                 };
+                if (nextBps) out.breakpoints = nextBps;
+                return out;
             });
 
-        setRooms((prev) => [...prev, copy]);
+        // Apply
+        setRooms((prev) => [...prev, copyRoom]);
         if (newNodes.length) setNodes((prev) => [...prev, ...newNodes]);
         if (newLinks.length) setLinks((prev) => [...prev, ...newLinks]);
 
-        setSelected({ type: "room", id: copy.id });
+        // Select the new room + all its duplicated nodes
+        const sel = [{ type: 'room', id: newRoomId }, ...newNodes.map((n) => ({ type: 'node', id: n.id }))];
+        setMultiSel(sel);
+        setSelected(sel[0] || null);
     };
 
-    const onPlace = (kind, p, multi) => {
+    const onPlace = (kind, p, multi, extra) => {
         if (kind === "room") {
             // Always place rooms on the ground grid, using only X/Z
-            const size = [3, 1.6, 2.2];        // default room: [width, height, depth]
+            const size = (extra?.size && Array.isArray(extra.size) && extra.size.length >= 3)
+                ? [Number(extra.size[0]) || 3, Number(extra.size[1]) || 1.6, Number(extra.size[2]) || 2.2]
+                : [3, 1.6, 2.2];        // default room: [width, height, depth]
             const [w, h, d] = size;
             const [x, , z] = p;                // ignore incoming Y – we want it floor aligned
             const center = [x, h * 0.5, z];    // bottom sits at y=0
@@ -2373,6 +7596,9 @@ export default function Interactive3DNodeShowcase() {
                 size,
                 color: "#253454",
                 visible: true,
+                // optional polygon footprint for future polygon room rendering
+                poly: Array.isArray(extra?.poly) ? extra.poly : undefined,
+                drawMode: extra?.drawMode || undefined,
             };
 
             setRooms((prev) => [...prev, r]);
@@ -2510,6 +7736,152 @@ export default function Interactive3DNodeShowcase() {
         [rooms]
     );
 
+    // ------------------------------------------------------------
+    // Picture "Deck" collisions (Solid pictures)
+    // If a picture is Visible + Solid, nodes/rooms cannot go below its plane
+    // when overlapping its XZ footprint.
+    // Hidden pictures are ignored.
+    // ------------------------------------------------------------
+    const pointInOBB2D = (x, z, obb) => {
+        const dx = x - obb.cx;
+        const dz = z - obb.cz;
+        const c = Math.cos(obb.angle);
+        const s = Math.sin(obb.angle);
+        // inverse rotate by angle
+        const lx = dx * c + dz * s;
+        const lz = -dx * s + dz * c;
+        return Math.abs(lx) <= obb.hx && Math.abs(lz) <= obb.hz;
+    };
+
+    const obbOverlap2D = (a, b) => {
+        // a,b: {cx,cz,hx,hz,angle}
+        const uA = [Math.cos(a.angle), Math.sin(a.angle)];
+        const vA = [-Math.sin(a.angle), Math.cos(a.angle)];
+        const uB = [Math.cos(b.angle), Math.sin(b.angle)];
+        const vB = [-Math.sin(b.angle), Math.cos(b.angle)];
+        const axes = [uA, vA, uB, vB];
+
+        for (const axis of axes) {
+            const ax = axis[0];
+            const az = axis[1];
+
+            const cA = a.cx * ax + a.cz * az;
+            const cB = b.cx * ax + b.cz * az;
+
+            const rA =
+                a.hx * Math.abs(uA[0] * ax + uA[1] * az) +
+                a.hz * Math.abs(vA[0] * ax + vA[1] * az);
+            const rB =
+                b.hx * Math.abs(uB[0] * ax + uB[1] * az) +
+                b.hz * Math.abs(vB[0] * ax + vB[1] * az);
+
+            if (Math.abs(cA - cB) > rA + rB) return false;
+        }
+        return true;
+    };
+
+    const getNodeHalfHeight = (node) => {
+        const sh = node?.shape || {};
+        if (sh.type === "sphere") {
+            const r = Number(sh.radius);
+            return Number.isFinite(r) && r > 0 ? r : 0.28;
+        }
+        if (Number.isFinite(sh.h)) {
+            return Math.max(0.01, Number(sh.h) / 2);
+        }
+        // fallback
+        return 0.28;
+    };
+
+    const clampNodeToPictureDecks = useCallback(
+        (node, pos) => {
+            const p = Array.isArray(pos)
+                ? [pos[0] ?? 0, pos[1] ?? 0, pos[2] ?? 0]
+                : (pos?.toArray ? pos.toArray() : [pos?.x ?? 0, pos?.y ?? 0, pos?.z ?? 0]);
+
+            const pics = (Array.isArray(importedPictures) ? importedPictures : []).filter(
+                (pic) => pic && pic.src && pic.visible && pic.solid,
+            );
+            if (!pics.length) return p;
+
+            const hh = getNodeHalfHeight(node);
+            let [x, y, z] = p;
+            let minY = -Infinity;
+
+            for (const pic of pics) {
+                const s = clamp(Number(pic.scale) || 1, 0.01, 500);
+                const w = FLOORPLAN_BASE_SIZE * s;
+                const aspect = Number.isFinite(pic.aspect) && pic.aspect > 0 ? pic.aspect : 1;
+                const h = w * aspect;
+                const obb = {
+                    cx: Number(pic.x) || 0,
+                    cz: Number(pic.z) || 0,
+                    hx: w / 2,
+                    hz: h / 2,
+                    angle: THREE.MathUtils.degToRad(Number(pic.rotY) || 0),
+                };
+
+                if (!pointInOBB2D(x, z, obb)) continue;
+
+                const deckY = Number(pic.y) || 0;
+                minY = Math.max(minY, deckY + hh);
+            }
+
+            if (Number.isFinite(minY) && minY !== -Infinity && y < minY) y = minY;
+            return [x, y, z];
+        },
+        [importedPictures],
+    );
+
+    const clampRoomToPictureDecks = useCallback(
+        (room, centerPos) => {
+            const c = Array.isArray(centerPos)
+                ? [centerPos[0] ?? 0, centerPos[1] ?? 0, centerPos[2] ?? 0]
+                : (centerPos?.toArray ? centerPos.toArray() : [centerPos?.x ?? 0, centerPos?.y ?? 0, centerPos?.z ?? 0]);
+
+            const pics = (Array.isArray(importedPictures) ? importedPictures : []).filter(
+                (pic) => pic && pic.src && pic.visible && pic.solid,
+            );
+            if (!pics.length) return c;
+
+            const size = room?.size || [1, 1, 1];
+            const hy = (Number(size[1]) || 1) / 2;
+
+            const roomObb = {
+                cx: c[0],
+                cz: c[2],
+                hx: (Number(size[0]) || 1) / 2,
+                hz: (Number(size[2]) || 1) / 2,
+                angle: Number(room?.rotation?.[1]) || 0,
+            };
+
+            let y = c[1];
+            let minCenterY = -Infinity;
+
+            for (const pic of pics) {
+                const s = clamp(Number(pic.scale) || 1, 0.01, 500);
+                const w = FLOORPLAN_BASE_SIZE * s;
+                const aspect = Number.isFinite(pic.aspect) && pic.aspect > 0 ? pic.aspect : 1;
+                const h = w * aspect;
+                const picObb = {
+                    cx: Number(pic.x) || 0,
+                    cz: Number(pic.z) || 0,
+                    hx: w / 2,
+                    hz: h / 2,
+                    angle: THREE.MathUtils.degToRad(Number(pic.rotY) || 0),
+                };
+
+                if (!obbOverlap2D(roomObb, picObb)) continue;
+                const deckY = Number(pic.y) || 0;
+                minCenterY = Math.max(minCenterY, deckY + hy);
+            }
+
+            if (Number.isFinite(minCenterY) && minCenterY !== -Infinity && y < minCenterY) y = minCenterY;
+            return [c[0], y, c[2]];
+        },
+        [importedPictures],
+    );
+
 
 
 
@@ -2545,11 +7917,78 @@ export default function Interactive3DNodeShowcase() {
         setSelected(null);
         setConfirm({ open: false, payload: null, text: "" });
     };
+
+
+    // Logo: click -> smooth camera move to the currently selected View (same logic as Action: Camera Move / Track)
+    const [logoHot, setLogoHot] = useState(false);
+    const [logoFlash, setLogoFlash] = useState(false);
+
+    useEffect(() => {
+        if (!logoFlash) return;
+        const t = setTimeout(() => setLogoFlash(false), 900);
+        return () => clearTimeout(t);
+    }, [logoFlash]);
+
+    const goToSelectedViewFromLogo = useCallback(() => {
+        const toPresetId = cameraPresetId || DEFAULT_PRESET_ID;
+
+        // Visual confirmation
+        setLogoFlash(true);
+
+        // Avoid stacking logo clicks; keep other (action) tracks intact.
+        setCameraTracks((prev) =>
+            Array.isArray(prev) ? prev.filter((t) => t?.tag !== "logo") : []
+        );
+
+        // If we're already basically at the destination, don't waste time animating.
+        try {
+            const snap = cameraSnapshotRef?.current?.();
+            const toPose =
+                toPresetId === DEFAULT_PRESET_ID
+                    ? defaultPose
+                    : (cameraPresets || []).find((p) => p?.id === toPresetId);
+
+            if (snap && toPose?.position && toPose?.target) {
+                const dp = Math.hypot(
+                    (snap.position?.[0] ?? 0) - (toPose.position?.[0] ?? 0),
+                    (snap.position?.[1] ?? 0) - (toPose.position?.[1] ?? 0),
+                    (snap.position?.[2] ?? 0) - (toPose.position?.[2] ?? 0)
+                );
+                const dt = Math.hypot(
+                    (snap.target?.[0] ?? 0) - (toPose.target?.[0] ?? 0),
+                    (snap.target?.[1] ?? 0) - (toPose.target?.[1] ?? 0),
+                    (snap.target?.[2] ?? 0) - (toPose.target?.[2] ?? 0)
+                );
+                if (dp < 0.02 && dt < 0.02) return;
+            }
+        } catch {}
+
+        // Smooth track from current → selected (2s)
+        scheduleCameraMove({
+            fromPresetId: null,
+            toPresetId,
+            startDelay: 0,
+            duration: 2,
+            tag: "logo",
+        });
+    }, [cameraPresetId, scheduleCameraMove, cameraPresets, defaultPose, setCameraTracks, cameraSnapshotRef]);
+
 // Handles clicking a ROOM (single select for now)
 // ✅ multi-select aware node click (also respects link mode)
     const handleNodeDown = (id, e) => {
         if (dragActive) return;
         setSelectedBreakpoint(null);
+
+        // Deck add mode: click nodes to add them to the active deck
+        if (deckAddModeId) {
+            addNodeToDeck(deckAddModeId, id);
+            const n = nodes.find((x) => x.id === id);
+            setDeckAddLast(n ? `Added node: ${n.label || n.name || n.id}` : "Added node");
+            setMultiSel([]);
+            setSelected({ type: "node", id });
+            return;
+        }
+
 
         // Add-to-Group mode: selection only; apply on "Done"
         if (groupAddModeId) {
@@ -2661,6 +8100,18 @@ export default function Interactive3DNodeShowcase() {
         const room = rooms.find((r) => r.id === id);
         if (!room) return;
         if (room.locked) return;   // ❌ Never return pos, it does not exist
+
+
+        // Deck add mode: click rooms to add them (and their nodes) to the active deck
+        if (deckAddModeId) {
+            addRoomToDeck(deckAddModeId, id);
+            const count = nodes.filter((n) => n.roomId === id).length;
+            setDeckAddLast(`Added room: ${room.name || room.id} (+${count} nodes)`);
+            setMultiSel([]);
+            setSelected({ type: "room", id });
+            return;
+        }
+
 
         // Add-to-Group mode: selection only; apply on "Done"
         if (groupAddModeId) {
@@ -2948,1266 +8399,6 @@ export default function Interactive3DNodeShowcase() {
         return null;
     }
 
-    /* Top bar */
-    /* ---------------- TopBar (2 rows, evenly spaced, accessible) ---------------- */
-    /* ---------------- TopBar (header + 2 rows + HUD layout) ---------------- */
-    const TopBar = ({ shadowsOn, setShadowsOn }) => {
-        const H = 26; // compact height
-        const uid = () => uuid();
-        // Picture overlay manager popover
-        const picturesMenuRef = useRef(null);
-        const picturesBtnRef = useRef(null);
-
-        // Keep menu open while interacting; close only when clicking outside (or Esc).
-        useEffect(() => {
-            if (!picturesOpen) return;
-            if (typeof document === "undefined") return;
-
-            const onPointerDown = (e) => {
-                const menuEl = picturesMenuRef.current;
-                const btnEl = picturesBtnRef.current;
-
-                // Robust "inside" detection (works with range-input thumbs / shadow DOM)
-                const path = typeof e.composedPath === "function" ? e.composedPath() : [];
-                const target = e.target;
-
-                const insideMenu =
-                    !!menuEl && (menuEl.contains(target) || path.includes(menuEl));
-                const insideBtn =
-                    !!btnEl && (btnEl.contains(target) || path.includes(btnEl));
-
-                if (insideMenu || insideBtn) return;
-
-                setPicturesOpen(false);
-            };
-
-            const onKeyDown = (e) => {
-                if (e.key === "Escape") setPicturesOpen(false);
-            };
-
-            // Capture keeps it reliable even if the canvas or other layers stop bubbling.
-            document.addEventListener("pointerdown", onPointerDown, true);
-            document.addEventListener("keydown", onKeyDown, true);
-            return () => {
-                document.removeEventListener("pointerdown", onPointerDown, true);
-                document.removeEventListener("keydown", onKeyDown, true);
-            };
-        }, [picturesOpen]);
-
-        // Small local HUD layout UI state that drives HudButtonsLayer via window events
-        const [hudEdit, setHudEdit] = useState(false);
-        const [hudSnap, setHudSnap] = useState(8);
-        const [hudMagnet, setHudMagnet] = useState(8);
-        const sendHudConfig = useCallback((patch) => {
-            if (typeof window === "undefined") return;
-            window.dispatchEvent(
-                new CustomEvent("EPIC3D_HUD_CONFIG", { detail: patch })
-            );
-        }, []);
-        const sendCameraView = useCallback((view) => {
-            if (typeof window === "undefined") return;
-            window.dispatchEvent(
-                new CustomEvent("EPIC3D_CAMERA_VIEW", { detail: { view } })
-            );
-        }, []);
-
-        useEffect(() => {
-            // Keep HudButtonsLayer cfg in sync with the top-bar HUD controls
-            sendHudConfig({
-                edit: hudEdit,
-                snap: hudSnap,
-                magnet: hudMagnet,
-            });
-        }, [hudEdit, hudSnap, hudMagnet, sendHudConfig]);
-
-
-
-        useEffect(() => {
-            // Keep HudButtonsLayer cfg in sync with the top-bar HUD controls
-            sendHudConfig({
-                edit: hudEdit,
-                snap: hudSnap,
-                magnet: hudMagnet,
-            });
-        }, [hudEdit, hudSnap, hudMagnet, sendHudConfig]);
-
-        const labelStyle = {
-            fontSize: 10,
-            letterSpacing: 0.5,
-            textTransform: "uppercase",
-            color: "rgba(226,238,255,0.8)",
-            whiteSpace: "nowrap",
-        };
-
-        const rowStyle = {
-            display: "grid",
-            gridTemplateColumns:
-                "minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(220px, 1.2fr)",            gap: 8,
-            alignItems: "center",
-            padding: 6,
-            borderRadius: 10,
-            background: "rgba(8,13,24,0.96)",
-            backdropFilter: "blur(8px)",
-            boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
-            border: "1px solid rgba(148,163,184,0.55)",
-            position: "relative",
-        };
-
-        const row2Style = {
-            ...rowStyle,
-            gridTemplateColumns:
-                "minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(220px, 1.2fr)",            alignItems: "flex-start",
-            position: "relative",
-        };
-
-        const Section = ({ title, children }) => (
-            <div
-                style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    minWidth: 0,
-                    flexWrap: "wrap",
-                }}
-            >
-                <span style={labelStyle}>{title}</span>
-                {children}
-            </div>
-        );
-
-        const Toggle = ({ label, on, onClick, title, style }) => (
-            <Btn
-                onClick={onClick}
-                title={title}
-                variant={on ? "primary" : "ghost"}
-                style={{
-                    height: H,
-                    padding: "0 8px",
-                    borderRadius: 8,
-                    fontSize: 11,
-                    minWidth: 48,
-                    ...style,
-                }}
-            >
-                {label}
-            </Btn>
-        );
-
-        return (
-            <div
-                onPointerDown={(e) => {
-                    e.stopPropagation();
-                    uiStart();
-                }}
-                onPointerUp={uiStop}
-                onPointerCancel={uiStop}
-                onPointerLeave={uiStop}
-                style={{
-                    position: "absolute",
-                    top: 8,
-                    left: 8,
-                    right: 8,
-                    zIndex: 2147483647,
-                    pointerEvents: "auto",
-                    display: "grid",
-                    gridAutoRows: "min-content",
-                    rowGap: 6,
-                }}
-            >
-                {/* HEADER — logo + title + totals */}
-                <div
-                    style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "6px 10px",
-                        borderRadius: 10,
-                        border: "1px solid rgba(148,163,184,0.6)",
-                        background:
-                            "linear-gradient(130deg, rgba(15,23,42,0.98), rgba(56,189,248,0.25))",
-                        boxShadow: "0 10px 24px rgba(0,0,0,0.6)",
-                    }}
-                >
-                    {/* Left: logo + text */}
-                    <div
-                        style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 10,
-                            minWidth: 0,
-                        }}
-                    >
-                        {typeof logoImg !== "undefined" && (
-                            <img
-                                src={logoImg}
-                                alt="Logo"
-                                style={{
-                                    width: 35,
-                                    height: 35,
-                                    borderRadius: 6,
-                                    objectFit: "contain",
-                                    boxShadow: "0 0 0 1px rgba(15,23,42,0.9)",
-                                    pointerEvents: "none",
-                                }}
-                            />
-                        )}
-                        <div
-                            style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: 2,
-                                overflow: "hidden",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    fontSize: 10,
-                                    letterSpacing: "0.22em",
-                                    textTransform: "uppercase",
-                                    color: "rgba(226,241,255,0.9)",
-                                    whiteSpace: "nowrap",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                }}
-                            >
-                                Node Forge 1.2
-                            </div>
-                            <div
-                                style={{
-                                    fontSize: 12,
-                                    color: "#e5e7eb",
-                                    opacity: 0.9,
-                                    whiteSpace: "nowrap",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                }}
-                            >
-                                {projectName || "Untitled project"}
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Right: totals */}
-                    <div
-                        style={{
-                            display: "flex",
-                            alignItems: "baseline",
-                            gap: 14,
-                            fontSize: 11,
-                            color: "rgba(226,232,240,0.9)",
-                            flexShrink: 0,
-                        }}
-                    >
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                            <span style={{ opacity: 0.7 }}>Rooms</span>
-                            <span style={{ fontWeight: 600 }}>{rooms.length}</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                            <span style={{ opacity: 0.7 }}>Nodes</span>
-                            <span style={{ fontWeight: 600 }}>{nodes.length}</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                            <span style={{ opacity: 0.7 }}>Links</span>
-                            <span style={{ fontWeight: 600 }}>{links.length}</span>
-                        </div>
-                    </div>
-                </div>
-
-                {/* ROW 1 — Project / File · Views · Model & Products */}
-                <div style={rowStyle}>
-                    {/* Project / File */}
-                    <Section title="Project / File">
-
-                        <Input
-                            style={{
-                                width: 140,
-                                height: H,
-                            }}
-                            value={projectName}
-                            onChange={(e) => setProjectName(e.target.value)}
-                            title="Project name"
-                            placeholder="Project"
-                        />
-                        <Toggle
-                            label={prodMode ? "Prod" : "UI"}
-                            on={prodMode}
-                            onClick={() => setProdMode((v) => !v)}
-                            title="Toggle production / presentation mode"
-                            style={{ minWidth: 52 }}
-                        />
-                        <Btn
-                            onClick={() => fileRef.current?.click()}
-                            style={{ height: H, padding: "0 8px", minWidth: 52 }}
-                            title="Import .zip/.json/.glb/.gltf"
-                        >
-                            Import
-                        </Btn>
-                        <input
-                            ref={fileRef}
-                            type="file"
-                            accept=".zip,.json,.glb,.gltf"
-                            style={{
-                                position: "absolute",
-                                left: -9999,
-                                width: 1,
-                                height: 1,
-                                opacity: 0,
-                            }}
-                            onChange={(e) => {
-                                const f = e.target.files?.[0];
-                                if (!f) return;
-                                /\.(zip|json)$/i.test(f.name)
-                                    ? importPackage(f)
-                                    : onModelFiles(f);
-                                e.target.value = "";
-                            }}
-                        />
-                        <Btn
-                            onClick={exportZip}
-                            style={{ height: H, padding: "0 8px", minWidth: 52 }}
-                            title="Export project (.zip)"
-                            variant={
-                                !!(nodes?.length || modelBlob) ? "primary" : "ghost"
-                            }
-                        >
-                            Export
-                        </Btn>
-                        <span ref={picturesBtnRef} style={{ display: "inline-flex" }}>
-                            <Btn
-                                onClick={() => setPicturesOpen((v) => !v)}
-                                style={{ height: H, padding: "0 8px", minWidth: 78 }}
-                                title="Import / show / scale reference pictures"
-                                variant={
-                                    picturesOpen || (importedPictures && importedPictures.length)
-                                        ? "primary"
-                                        : "ghost"
-                                }
-                            >
-                                Pictures{importedPictures?.length ? ` (${importedPictures.length})` : ""}
-                            </Btn>
-                        </span>
-                    </Section>
-
-                    {/* Views / Camera presets */}
-                    <Section title="Views">
-                        <Btn
-                            onClick={() => {
-                                const snap = cameraSnapshotRef.current?.();
-                                if (!snap) return;
-                                const name =
-                                    window.prompt(
-                                        "Name this view:",
-                                        `View ${
-                                            (cameraPresets?.length || 0) + 1
-                                        }`,
-                                    ) || "View";
-                                const id = uid();
-                                setCameraPresets((prev) => [
-                                    ...prev,
-                                    { id, name, ...snap },
-                                ]);
-                                setCameraPresetId(id);
-                            }}
-                            style={{ height: H, padding: "0 8px", minWidth: 52 }}
-                            title="Save current camera as view"
-                        >
-                            Save
-                        </Btn>
-                        <Select
-                            value={cameraPresetId}
-                            onChange={(e) => setCameraPresetId(e.target.value)}
-                            style={{
-                                minWidth: 140,
-                                maxWidth: 190,
-                                height: H,
-                            }}
-                            title="Select a saved view"
-                        >
-                            <option value="">Default</option>
-                            {cameraPresets.map((p) => (
-                                <option key={p.id} value={p.id}>
-                                    {p.name}
-                                </option>
-                            ))}
-                        </Select>
-                        <Btn
-                            onClick={() => {
-                                if (!cameraPresetId) return;
-                                setCameraPresets((prev) =>
-                                    prev.filter((p) => p.id !== cameraPresetId),
-                                );
-                                setCameraPresetId("");
-                            }}
-                            style={{ height: H, padding: "0 6px", minWidth: 44 }}
-                            title="Delete selected view"
-                            variant={cameraPresetId ? "primary" : "ghost"}
-                        >
-                            Del
-                        </Btn>
-                        <div
-                            style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 4,
-                                marginLeft: 8,
-                            }}
-                        >
-                            <IconBtn
-                                label="⟳"
-                                title="Reset view"
-                                onClick={() => sendCameraView("reset")}
-                            />
-                            <IconBtn
-                                label="F"
-                                title="Front (Alt+W)"
-                                onClick={() => sendCameraView("front")}
-                            />
-                            <IconBtn
-                                label="B"
-                                title="Back (Alt+S)"
-                                onClick={() => sendCameraView("back")}
-                            />
-                            <IconBtn
-                                label="L"
-                                title="Left (Alt+A)"
-                                onClick={() => sendCameraView("left")}
-                            />
-                            <IconBtn
-                                label="R"
-                                title="Right (Alt+D)"
-                                onClick={() => sendCameraView("right")}
-                            />
-                            <IconBtn
-                                label="⊤"
-                                title="Top (Alt+Q)"
-                                onClick={() => sendCameraView("top")}
-                            />
-                            <IconBtn
-                                label="⊥"
-                                title="Bottom (Alt+E)"
-                                onClick={() => sendCameraView("bottom")}
-                            />
-                        </div>
-                    </Section>
-
-                    {/* Model & Products */}
-                    <Section title="Model / Products">
-                        <Select
-                            style={{
-                                flex: 1,
-                                minWidth: 120,
-                                maxWidth: 180,
-                                height: H,
-                            }}
-                            value={currentModelId}
-                            onChange={(e) => setCurrentModelId(e.target.value)}
-                            title="Static model"
-                        >
-                            <option value="">(none)</option>
-                            {STATIC_MODELS.map((m) => (
-                                <option key={m.id} value={m.id}>
-                                    {m.name}
-                                </option>
-                            ))}
-                        </Select>
-                        <Toggle
-                            label={modelVisible ? "Hide" : "Show"}
-                            on={modelVisible}
-                            onClick={() => setModelVisible((v) => !v)}
-                            title={modelVisible ? "Hide model" : "Show model"}
-                            style={{ minWidth: 60 }}
-                        />
-                        <Btn
-                            onClick={() => setProductsOpen(true)}
-                            style={{ height: H, padding: "0 8px", minWidth: 80 }}
-                            title="Open product manager"
-                        >
-                            Products
-                        </Btn>
-
-                        {/* 🔁 NEW: Model scale in top bar */}
-                        <Input
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            max="5"
-                            value={modelScale}
-                            onChange={(e) =>
-                                setModelScale(Number(e.target.value) || 1)
-                            }
-                            title="Model scale"
-                            style={{
-                                width: 64,
-                                height: H,
-                                textAlign: "center",
-                            }}
-                        />
-
-                        {/* Existing: Product scale */}
-                        <Input
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            max="5"
-                            value={productScale}
-                            onChange={(e) =>
-                                setProductScale(Number(e.target.value) || 1)
-                            }
-                            title="Product scale"
-                            style={{
-                                width: 64,
-                                height: H,
-                                textAlign: "center",
-                            }}
-                        />
-                        <Select
-                            value={productUnits}
-                            onChange={(e) => setProductUnits(e.target.value)}
-                            style={{ width: 64, height: H }}
-                            title="Units"
-                        >
-                            <option value="cm">cm</option>
-                            <option value="mm">mm</option>
-                            <option value="m">m</option>
-                            <option value="in">in</option>
-                            <option value="ft">ft</option>
-                        </Select>
-                    </Section>
-
-
-                    {/* QUICK SCENE SLIDERS */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontSize: 12, opacity: 0.8 }}>SCENE Configs</span>
-
-                        {/* Wireframe opacity */}
-                        <span style={{ fontSize: 11, color: "#b6c8e6" }}>Wire</span>
-                        <div style={{ width: 120 }}>
-                            <Slider
-                                value={wireOpacity}
-                                min={0}
-                                max={1}
-                                step={0.02}
-                                onChange={setWireOpacity}
-                            />
-                        </div>
-
-                        {/* 🔁 NEW: Wireframe quality */}
-                        <span style={{ fontSize: 11, color: "#b6c8e6" }}>Quality</span>
-                        <Select
-                            value={wireDetail}
-                            onChange={(e) => setWireDetail(e.target.value)}
-                            style={{ width: 80, height: H }}
-                            title="Wireframe quality"
-                        >
-                            <option value="ultra">Wire: Ultra (full mesh)</option>
-                            <option value="high">Wire: High</option>
-                            <option value="med">Wire: Medium</option>
-                            <option value="low">Wire: Low</option>
-                            <option value="bbox">Wire: BBox only</option>
-                        </Select>
-
-                        {/* Room opacity */}
-                        <span style={{ fontSize: 11, color: "#b6c8e6" }}>Room</span>
-                        <div style={{ width: 120 }}>
-                            <Slider
-                                value={roomOpacity}
-                                min={0}
-                                max={1}
-                                step={0.02}
-                                onChange={setRoomOpacity}
-                            />
-                        </div>
-
-                        {/* Background color */}
-                        <span style={{ fontSize: 11, color: "#b6c8e6" }}>BG</span>
-                        <Input
-                            type="color"
-                            value={bg}
-                            onChange={(e) => setBg(e.target.value)}
-                            style={{ width: 36, height: H, padding: 0 }}
-                            title="Background color"
-                        />
-                    </div>
-
-                    {/* Pictures popover (hangs under row 1) */}
-                    {picturesOpen && (
-                        <div
-                            ref={picturesMenuRef}
-                            style={{
-                                position: "absolute",
-                                top: "400%",
-                                left: 10,
-                                marginTop: 6,
-                                zIndex: 2147483647,
-                            }}
-                            onPointerDown={(e) => e.stopPropagation()}
-                        >
-                            <Panel title="Imported pictures">
-                                <div style={{ display: "grid", gap: 10, minWidth: 520, maxWidth: 820 }}>
-                                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                        <Btn
-                                            variant="primary"
-                                            onClick={() => picturesInputRef.current?.click()}
-                                            style={{ height: 28, padding: "0 10px" }}
-                                            title="Add one or more images"
-                                        >
-                                            Add…
-                                        </Btn>
-                                        <Btn
-                                            variant="ghost"
-                                            onClick={() => setImportedPictures([])}
-                                            disabled={!importedPictures?.length}
-                                            style={{ height: 28, padding: "0 10px" }}
-                                            title="Remove all imported pictures"
-                                        >
-                                            Clear all
-                                        </Btn>
-                                        <span style={{ fontSize: 11, opacity: 0.75 }}>
-                                            Tip: pictures render as flat 2D planes on the ground at the origin. You can show multiple at once.
-                                        </span>
-
-                                        <input
-                                            ref={picturesInputRef}
-                                            type="file"
-                                            accept="image/*"
-                                            multiple
-                                            style={{
-                                                position: "absolute",
-                                                left: -9999,
-                                                width: 1,
-                                                height: 1,
-                                                opacity: 0,
-                                            }}
-                                            onChange={async (e) => {
-                                                const files = e.target.files;
-                                                if (!files || !files.length) return;
-                                                await importPicturesFromFiles(files);
-                                                e.target.value = "";
-                                            }}
-                                        />
-                                    </div>
-
-                                    <div
-                                        style={{
-                                            display: "grid",
-                                            gap: 10,
-                                            maxHeight: 360,
-                                            overflow: "auto",
-                                            paddingRight: 6,
-                                        }}
-                                    >
-                                        {!importedPictures?.length ? (
-                                            <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                                No pictures imported yet.
-                                            </div>
-                                        ) : (
-                                            importedPictures
-                                                .slice()
-                                                .reverse()
-                                                .map((p) => (
-                                                    <div
-                                                        key={p.id}
-                                                        style={{
-                                                            display: "grid",
-                                                            gridTemplateColumns: "110px 1fr 360px 64px",
-                                                            alignItems: "start",
-                                                            gap: 10,
-                                                            padding: "8px 10px",
-                                                            borderRadius: 10,
-                                                            border: "1px solid rgba(148,163,184,0.35)",
-                                                            background: "rgba(10,16,30,0.55)",
-                                                        }}
-                                                    >
-                                                        <Checkbox
-                                                            checked={!!p.visible}
-                                                            onChange={(v) => setPictureVisible(p.id, v)}
-                                                            label="Show"
-                                                            style={{ fontSize: 11 }}
-                                                        />
-
-                                                        <div
-                                                            title={p.name}
-                                                            style={{
-                                                                overflow: "hidden",
-                                                                textOverflow: "ellipsis",
-                                                                whiteSpace: "nowrap",
-                                                                fontSize: 12,
-                                                                opacity: 0.92,
-                                                            }}
-                                                        >
-                                                            {p.name || "(unnamed)"}
-                                                        </div>
-
-                                                        <div style={{ display: "grid", gap: 8 }}>
-                                                            {/* Scale */}
-                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>
-                                                                    Scale
-                                                                </span>
-                                                                <div style={{ flex: 1, minWidth: 120 }}>
-                                                                    <Slider
-                                                                        min={0.05}
-                                                                        max={20}
-                                                                        step={0.05}
-                                                                        value={Number(p.scale) || 1}
-                                                                        onChange={(v) => setPictureScale(p.id, v)}
-                                                                    />
-                                                                </div>
-                                                                <Input
-                                                                    type="number"
-                                                                    step="0.05"
-                                                                    min="0.05"
-                                                                    max="50"
-                                                                    value={Number(p.scale) || 1}
-                                                                    onChange={(e) => setPictureScale(p.id, e.target.value)}
-                                                                    style={{ width: 78, height: 28, textAlign: "center" }}
-                                                                    title="Scale"
-                                                                />
-                                                            </div>
-
-                                                            {/* Quick rotate (degrees on Y / yaw) */}
-                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>
-                                                                    Rotate
-                                                                </span>
-                                                                <div style={{ flex: 1, minWidth: 120 }}>
-                                                                    <Slider
-                                                                        min={-180}
-                                                                        max={180}
-                                                                        step={1}
-                                                                        value={Number(p.rotY) || 0}
-                                                                        onChange={(v) => setPictureRotation(p.id, { rotY: v })}
-                                                                    />
-                                                                </div>
-                                                                <Input
-                                                                    type="number"
-                                                                    step="1"
-                                                                    min="-360"
-                                                                    max="360"
-                                                                    value={Number(p.rotY) || 0}
-                                                                    onChange={(e) => setPictureRotation(p.id, { rotY: e.target.value })}
-                                                                    style={{ width: 78, height: 28, textAlign: "center" }}
-                                                                    title="Rotation (deg)"
-                                                                />
-                                                            </div>
-
-                                                            {/* Advanced XYZ rotation (degrees) */}
-                                                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>
-                                                                    XYZ
-                                                                </span>
-                                                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                                                    <span style={{ fontSize: 11, opacity: 0.7 }}>X</span>
-                                                                    <Input
-                                                                        type="number"
-                                                                        step="1"
-                                                                        min="-360"
-                                                                        max="360"
-                                                                        value={Number(p.rotX) || 0}
-                                                                        onChange={(e) => setPictureRotation(p.id, { rotX: e.target.value })}
-                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
-                                                                        title="Rotate X (deg)"
-                                                                    />
-                                                                    <span style={{ fontSize: 11, opacity: 0.7 }}>Y</span>
-                                                                    <Input
-                                                                        type="number"
-                                                                        step="1"
-                                                                        min="-360"
-                                                                        max="360"
-                                                                        value={Number(p.rotY) || 0}
-                                                                        onChange={(e) => setPictureRotation(p.id, { rotY: e.target.value })}
-                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
-                                                                        title="Rotate Y (deg)"
-                                                                    />
-                                                                    <span style={{ fontSize: 11, opacity: 0.7 }}>Z</span>
-                                                                    <Input
-                                                                        type="number"
-                                                                        step="1"
-                                                                        min="-360"
-                                                                        max="360"
-                                                                        value={Number(p.rotZ) || 0}
-                                                                        onChange={(e) => setPictureRotation(p.id, { rotZ: e.target.value })}
-                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
-                                                                        title="Rotate Z (deg)"
-                                                                    />
-                                                                </div>
-                                                                <span style={{ fontSize: 10, opacity: 0.55 }}>
-                                                                    (X/Z tilt the plane)
-                                                                </span>
-                                                            </div>
-                                                        </div>
-
-                                                        <Btn
-                                                            variant="ghost"
-                                                            onClick={() => deletePicture(p.id)}
-                                                            style={{ height: 28, padding: "0 10px" }}
-                                                            title="Delete"
-                                                        >
-                                                            Del
-                                                        </Btn>
-                                                    </div>
-                                                ))
-                                        )}
-                                    </div>
-                                </div>
-                            </Panel>
-                        </div>
-                    )}
-
-
-
-
-                </div>
-
-                {/* ROW 2 — Scene · HUD Layout · Reveal FX · Transform / Info */}
-                <div style={row2Style}>
-                    {/* Scene toggles */}
-                    <Section title="Scene">
-                        <Toggle
-                            label="Wire"
-                            on={wireframe}
-                            onClick={() => setWireframe((v) => !v)}
-                            title={`Wireframe: ${wireframe ? "On" : "Off"}`}
-                        />
-                        <Toggle
-                            label="Lights"
-                            on={showLights}
-                            onClick={() => setShowLights((v) => !v)}
-                            title={`Lights: ${showLights ? "On" : "Off"}`}
-                        />
-                        <Toggle
-                            label="Bounds"
-                            on={showLightBounds}
-                            onClick={() => setShowLightBounds((v) => !v)}
-                            title={`Light bounds: ${
-                                showLightBounds ? "On" : "Off"
-                            }`}
-                        />
-                        <Toggle
-                            label="Ground"
-                            on={showGround}
-                            onClick={() => setShowGround((v) => !v)}
-                            title={`Ground grid: ${showGround ? "On" : "Off"}`}
-                        />
-                        <Toggle
-                            label="Shadows"
-                            on={shadowsOn}
-                            onClick={() => setShadowsOn((v) => !v)}
-                            title={`Shadows: ${shadowsOn ? "On" : "Off"}`}
-                        />
-                        <Toggle
-                            label="Anim"
-                            on={animate}
-                            onClick={() => setAnimate((v) => !v)}
-                            title={`Animation: ${animate ? "On" : "Off"}`}
-                        />
-                        <Toggle
-                            label="Labels"
-                            on={labelsOn}
-                            onClick={() => setLabelsOn((v) => !v)}
-                            title={`Labels: ${labelsOn ? "On" : "Off"}`}
-                        />
-
-                    </Section>
-                    {/* HUD Layout – in the middle of row 2 */}
-                    <Section title="HUD Layout">
-                        <Toggle
-                            label={hudEdit ? "Edit ON" : "Edit OFF"}
-                            on={hudEdit}
-                            onClick={() => setHudEdit((v) => !v)}
-                            title="Toggle HUD grid layout edit mode"
-                            style={{ minWidth: 80 }}
-                        />
-                        <label
-                            style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: 4,
-                                fontSize: 11,
-                            }}
-                        >
-                            <span style={{ opacity: 0.8 }}>Snap</span>
-                            <Input
-                                type="number"
-                                min={1}
-                                max={32}
-                                step={1}
-                                value={hudSnap}
-                                onChange={(e) =>
-                                    setHudSnap(
-                                        Math.max(
-                                            1,
-                                            Number(e.target.value) || 1,
-                                        ),
-                                    )
-                                }
-                                style={{
-                                    width: 56,
-                                    height: H,
-                                    textAlign: "center",
-                                }}
-                            />
-                        </label>
-                        <label
-                            style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: 4,
-                                fontSize: 11,
-                            }}
-                        >
-                            <span style={{ opacity: 0.8 }}>Magnet</span>
-                            <Input
-                                type="number"
-                                min={0}
-                                max={64}
-                                step={1}
-                                value={hudMagnet}
-                                onChange={(e) =>
-                                    setHudMagnet(
-                                        Math.max(
-                                            0,
-                                            Number(e.target.value) || 0,
-                                        ),
-                                    )
-                                }
-                                style={{
-                                    width: 56,
-                                    height: H,
-                                    textAlign: "center",
-                                }}
-                            />
-                        </label>
-                        <Btn
-                            onClick={() => {
-                                if (typeof window !== "undefined") {
-                                    window.dispatchEvent(
-                                        new CustomEvent(
-                                            "EPIC3D_HUD_RESET_LAYOUT",
-                                        ),
-                                    );
-                                }
-                            }}
-                            style={{
-                                height: H,
-                                padding: "0 10px",
-                                borderRadius: 999,
-                                minWidth: 90,
-                            }}
-                            title="Reset all HUD buttons into a neat row"
-                            variant="ghost"
-                        >
-                            Reset layout
-                        </Btn>
-                    </Section>
-
-                    {/* Reveal FX */}
-                    <Section title="Reveal FX">
-                        <Toggle
-                            label="FX"
-                            on={wireStroke.enabled}
-                            onClick={() =>
-                                setWireStroke((s) => ({
-                                    ...s,
-                                    enabled: !s.enabled,
-                                }))
-                            }
-                            title="Toggle reveal wireframe sweep"
-                            style={{ minWidth: 44 }}
-                        />
-                        <Select
-                            value={wireStroke.mode}
-                            onChange={(e) =>
-                                setWireStroke((s) => ({
-                                    ...s,
-                                    mode: e.target.value,
-                                }))
-                            }
-                            style={{ width: 110, height: H }}
-                            title="Sweep direction"
-                        >
-                            <option value="lr">Left → Right</option>
-                            <option value="rl">Right → Left</option>
-                            <option value="tb">Top → Bottom</option>
-                            <option value="bt">Bottom → Top</option>
-                        </Select>
-                        <Btn
-                            onClick={() => setRevealOpen((o) => !o)}
-                            style={{ height: H, padding: "0 8px", minWidth: 60 }}
-                            title="Fine-tune reveal stroke"
-                            variant={revealOpen ? "primary" : "ghost"}
-                        >
-                            Settings
-                        </Btn>
-                        <Btn
-                            variant={roomOperatorMode ? "primary" : "ghost"}
-                            glow={roomOperatorMode}
-                            onClick={toggleRoomOperatorMode}
-                            style={{ height: H, minWidth: 130 }}
-                            title={
-                                roomOperatorMode
-                                    ? "Exit Room Operator mode"
-                                    : "Enter top-down Room Operator mode"
-                            }
-                        >
-                            {roomOperatorMode ? "Exit Room Operator" : "Room Operator"}
-                        </Btn>
-                    </Section>
-
-                    {/* Transform & Global */}
-                    {/* Transform & Global */}
-                    <Section title="Transform / Info">
-                        <Toggle
-                            label="Move"
-                            on={moveMode}
-                            onClick={() => {
-                                setMoveMode((v) => {
-                                    const next = !v;
-
-                                    // Turning Move OFF should unlock box selection again.
-                                    // Clear selection so the next drag starts a fresh selection.
-                                    if (!next) {
-                                        setSelected(null);
-                                        setMultiSel([]);
-                                        setSelectedBreakpoint?.(null);
-                                    }
-
-                                    return next;
-                                });
-                            }}
-                            title={`Move mode: ${moveMode ? "On" : "Off"}`}
-                        />
-                        <Select
-                            disabled={!moveMode}
-                            value={transformMode}
-                            onChange={(e) => setTransformMode(e.target.value)}
-                            style={{
-                                width: 120,
-                                height: H,
-                                opacity: moveMode ? 1 : 0.5,
-                            }}
-                            title="Transform gizmo"
-                        >
-                            <option value="translate">Move</option>
-                            <option value="rotate">Rotate</option>
-                            <option value="scale">Scale</option>
-                        </Select>
-
-                        {/* Selection modes + Move selected */}
-                        <div
-                            style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 6,
-                                flexWrap: "wrap",
-                                marginLeft: 8,
-                            }}
-                        >
-                            <span style={{ fontSize: 11, opacity: 0.8 }}>
-                                Selection
-                            </span>
-                            <Btn
-                                size="xs"
-                                variant={
-                                    selectionMode === "single"
-                                        ? "primary"
-                                        : "ghost"
-                                }
-                                onClick={() => {
-                                    setSelectionMode("single");
-                                    setMoveMode(true);
-                                    setTransformMode("translate");
-                                }}
-                            >
-                                Single
-                            </Btn>
-
-
-                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 10, flexWrap: "wrap" }}>
-                                <Checkbox
-                                    checked={snapRoomsEnabled}
-                                    onChange={setSnapRoomsEnabled}
-                                    label="Snap rooms"
-                                />
-                                <span style={{ fontSize: 11, opacity: 0.75 }}>Strength</span>
-                                <Input
-                                    type="number"
-                                    step="0.05"
-                                    min="0.01"
-                                    value={snapRoomsDistance}
-                                    onChange={(e) => setSnapRoomsDistance(Number(e.target.value) || 0.5)}
-                                    style={{ width: 72, height: H, textAlign: "center" }}
-                                    title="Snap distance threshold (world units)"
-                                    disabled={!snapRoomsEnabled}
-                                />
-                            </div>
-                            <Btn
-                                size="xs"
-                                variant={
-                                    selectionMode === "multi"
-                                        ? "primary"
-                                        : "ghost"
-                                }
-                                onClick={() => {
-                                    setSelectionMode("multi");
-                                    setMoveMode(true);
-                                    setTransformMode("translate");
-                                }}
-                            >
-                                Multi
-                            </Btn>
-                            <Btn
-                                size="xs"
-                                variant={
-                                    selectionMode === "box"
-                                        ? "primary"
-                                        : "ghost"
-                                }
-                                onClick={() => {
-                                    setSelectionMode("box");
-                                    setMoveMode(false);          // allow drawing the first marquee
-                                    setTransformMode("translate");
-                                    // optional, but usually feels best:
-                                    setSelected(null);
-                                    setMultiSel([]);
-                                    setSelectedBreakpoint(null);
-                                    setLinkFromId(null);
-                                    setMode("select");
-                                }}
-                            >
-                                Box
-                            </Btn>
-
-                            <Btn
-                                size="xs"
-                                variant={
-                                    selected || (multiSel && multiSel.length)
-                                        ? "primary"
-                                        : "ghost"
-                                }
-                                disabled={
-                                    !selected &&
-                                    (!multiSel || !multiSel.length)
-                                }
-                                onClick={() => {
-                                    const all =
-                                        multiSel && multiSel.length
-                                            ? multiSel
-                                            : selected
-                                                ? [selected]
-                                                : [];
-                                    if (!all.length) return;
-
-                                    // Ensure gizmo is active and we have an anchor
-                                    setMoveMode(true);
-                                    const main =
-                                        selected ||
-                                        all[all.length - 1] ||
-                                        null;
-                                    if (main) setSelected(main);
-                                }}
-                            >
-                                Move selected
-                                {multiSel && multiSel.length > 1
-                                    ? ` (${multiSel.length})`
-                                    : ""}
-                            </Btn>
-                        </div>
-
-                        {/* Global product display toggles */}
-                        <Checkbox
-                            checked={showDimsGlobal}
-                            onChange={setShowDimsGlobal}
-                            label="Show dimensions"
-                            style={{ fontSize: 11 }}
-                        />
-                        <Checkbox
-                            checked={photoDefault}
-                            onChange={setPhotoDefault}
-                            label="Product photos default"
-                            style={{ fontSize: 11 }}
-                        />
-                        <Checkbox
-                            checked={alwaysShow3DInfo}
-                            onChange={setAlwaysShow3DInfo}
-                            label="3D info"
-                            style={{ fontSize: 11 }}
-                        />
-                    </Section>
-
-
-
-
-                    {/* Reveal FX settings popover (still hangs under row 2, not a 3rd row) */}
-                    {revealOpen && (
-                        <div
-                            style={{
-                                position: "absolute",
-                                top: "100%",
-                                right: "40%",
-                                marginTop: 6,
-                                zIndex: 2147483647,
-                            }}
-                            onMouseLeave={() => setRevealOpen(false)}
-                        >
-                            <Panel title="Reveal FX stroke">
-                                <div
-                                    style={{
-                                        display: "grid",
-                                        gridTemplateColumns:
-                                            "140px minmax(180px, 1fr)",
-                                        gap: 8,
-                                        minWidth: 380,
-                                    }}
-                                >
-                                    <label>Duration (s)</label>
-                                    <Slider
-                                        min={0.2}
-                                        max={4}
-                                        step={0.05}
-                                        value={wireStroke.duration}
-                                        onChange={(v) =>
-                                            setWireStroke((s) => ({
-                                                ...s,
-                                                duration: v,
-                                            }))
-                                        }
-                                    />
-                                    <label>Line feather</label>
-                                    <Slider
-                                        min={0}
-                                        max={0.3}
-                                        step={0.01}
-                                        value={wireStroke.feather}
-                                        onChange={(v) =>
-                                            setWireStroke((s) => ({
-                                                ...s,
-                                                feather: v,
-                                            }))
-                                        }
-                                    />
-                                    <label>Surface feather</label>
-                                    <Slider
-                                        min={0}
-                                        max={0.3}
-                                        step={0.01}
-                                        value={wireStroke.surfaceFeather}
-                                        onChange={(v) =>
-                                            setWireStroke((s) => ({
-                                                ...s,
-                                                surfaceFeather: v,
-                                            }))
-                                        }
-                                    />
-                                </div>
-                            </Panel>
-                        </div>
-                    )}
-                </div>
-            </div>
-        );
-    };
-
     const LegendTree = () => {
         const [filter, setFilter] = useState("");
         const grouped = useMemo(() => {
@@ -4233,6 +8424,71 @@ export default function Interactive3DNodeShowcase() {
             setSelected({ type: "node", id });
         };
 
+        const selectionKey = selected ? `${selected.type}:${selected.id}` : "";
+
+        const focus = useMemo(() => {
+            const out = { roomId: null, cat: null, nodeId: null };
+            if (!selected) return out;
+
+            if (selected.type === "room") {
+                out.roomId = selected.id;
+                return out;
+            }
+
+            if (selected.type === "node") {
+                const n = nodes.find((x) => x.id === selected.id);
+                if (!n) return out;
+                out.nodeId = n.id;
+                out.cat = n.cluster || null;
+                out.roomId = n.roomId || "__no_room__";
+                return out;
+            }
+
+            if (selected.type === "link") {
+                const l = links.find((x) => x.id === selected.id);
+                if (!l) return out;
+                const a = nodes.find((x) => x.id === l.from);
+                out.nodeId = null;
+                out.cat = null;
+                out.roomId = a?.roomId || "__no_room__";
+                return out;
+            }
+
+            return out;
+        }, [selected, nodes, links]);
+
+        const [openRooms, setOpenRooms] = useState(() => ({}));
+        const [openCats, setOpenCats] = useState(() => ({}));
+
+        const roomHeaderRefs = useRef(new Map());
+        const nodeRowRefs = useRef(new Map());
+
+        // Auto-unfold the selected room/category
+        useEffect(() => {
+            if (!focus.roomId) return;
+            setOpenRooms((prev) => ({ ...prev, [focus.roomId]: true }));
+        }, [selectionKey, focus.roomId]);
+
+        useEffect(() => {
+            if (!focus.roomId || !focus.cat) return;
+            const key = `${focus.roomId}|${focus.cat}`;
+            setOpenCats((prev) => ({ ...prev, [key]: true }));
+        }, [selectionKey, focus.roomId, focus.cat]);
+
+        // Scroll the left tree so the selection is always visible
+        useEffect(() => {
+            if (!selectionKey) return;
+            const raf = requestAnimationFrame(() => {
+                const nodeEl = focus.nodeId ? nodeRowRefs.current.get(focus.nodeId) : null;
+                const roomEl = focus.roomId ? roomHeaderRefs.current.get(focus.roomId) : null;
+                const el = nodeEl || roomEl;
+                if (el && typeof el.scrollIntoView === "function") {
+                    el.scrollIntoView({ block: "center", behavior: "smooth" });
+                }
+            });
+            return () => cancelAnimationFrame(raf);
+        }, [selectionKey, focus.roomId, focus.nodeId]);
+
         return (
             <Panel title="Legend / Tree">
                 <div style={{ display: "grid", gap: 8, marginBottom: 8 }}>
@@ -4247,6 +8503,48 @@ export default function Interactive3DNodeShowcase() {
                         >
                             {placingRoom ? "Placing Room (ON)" : "Place Room"}
                         </Btn>
+
+                        {placingRoom && (
+                            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                <span style={{ opacity: 0.8, fontSize: 12 }}>Room draw:</span>
+                                <Btn
+                                    variant={(placement.roomDrawMode || "box") === "box" ? "primary" : "ghost"}
+                                    onClick={() => setPlacement((p) => ({ ...p, roomDrawMode: "box" }))}
+                                    title="2-click square draw"
+                                >
+                                    Box
+                                </Btn>
+                                <Btn
+                                    variant={(placement.roomDrawMode || "box") === "points" ? "primary" : "ghost"}
+                                    onClick={() => setPlacement((p) => ({ ...p, roomDrawMode: "points" }))}
+                                    title="Click points, then Enter or Finalize"
+                                >
+                                    Points
+                                </Btn>
+
+                                {(placement.roomDrawMode || "box") === "points" && (
+                                    <Btn
+                                        variant="primary"
+                                        onClick={() => window.dispatchEvent(new Event("EPIC3D_FINALIZE_ROOM_POINTS"))}
+                                        title="Finalize polygon points (Enter)"
+                                    >
+                                        Finalize
+                                    </Btn>
+                                )}
+
+                                <Btn
+                                    variant="ghost"
+                                    onClick={() => {
+                                        const mode = placement.roomDrawMode || "box";
+                                        window.dispatchEvent(new Event(mode === "points" ? "EPIC3D_CLEAR_ROOM_POINTS" : "EPIC3D_CANCEL_ROOM_BOX"));
+                                    }}
+                                    title="Clear points / cancel box"
+                                >
+                                    Clear
+                                </Btn>
+                            </div>
+                        )}
+
 
                         <Btn
                             variant={placingNode ? "primary" : "ghost"}
@@ -4286,92 +8584,459 @@ export default function Interactive3DNodeShowcase() {
                 {Object.values(grouped).map((bucket) => {
                     const rid = bucket.room.id;
                     const itemsByCat = bucket.cats;
-                    return (
-                        <div key={rid} style={{ marginBottom: 10, borderTop: "1px dashed rgba(255,255,255,0.1)", paddingTop: 8 }}>
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                                <div
-                                    style={{ fontWeight: 800, color: "#a8c0ff", cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}
-                                    onClick={() => setSelected({ type: "room", id: rid })}
-                                >
-                                    {bucket.room.name}
-                                </div>
-                                {rid !== "__no_room__" && (
-                                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                                        <Checkbox
-                                            checked={!!rooms.find((r) => r.id === rid)?.locked}
-                                            onChange={(v) =>
-                                                setRooms((prev) =>
-                                                    prev.map((r) =>
-                                                        r.id === rid ? { ...r, locked: v } : r,
-                                                    ),
-                                                )
-                                            }
-                                            label="lock"
-                                        />
-                                        <Checkbox
-                                            checked={rooms.find((r) => r.id === rid)?.visible !== false}
-                                            onChange={(v) => setRooms((prev) => prev.map((r) => (r.id === rid ? { ...r, visible: v } : r)))}
-                                            label="visible"
-                                        />
-                                        <Btn onClick={() => duplicateRoom(rid)}>Duplicate</Btn>
-                                        <Btn onClick={() => requestDelete({ type: "room", id: rid })}>Delete</Btn>
-                                    </div>
-                                )}
-                            </div>
+                    const focusedRoom = focus.roomId === rid;
 
-                            <div>
-                                {DEFAULT_CLUSTERS.map((cat) => {
-                                    const list = (itemsByCat[cat] || []).filter((n) => !filter || n.label.toLowerCase().includes(filter.toLowerCase()));
-                                    return (
-                                        <div key={cat} style={{ marginLeft: 8, marginBottom: 6 }}>
-                                            <div style={{ color: "#9fb6d8", fontWeight: 700 }}>
-                                                {cat} <span style={{ opacity: 0.6 }}>({list.length})</span>
+                    const roomOpen = Object.prototype.hasOwnProperty.call(openRooms, rid)
+                        ? !!openRooms[rid]
+                        : focusedRoom;
+
+                    const toggleRoom = (e) => {
+                        e.preventDefault();
+                        setOpenRooms((prev) => {
+                            const current = Object.prototype.hasOwnProperty.call(prev, rid)
+                                ? !!prev[rid]
+                                : focusedRoom;
+                            return { ...prev, [rid]: !current };
+                        });
+                    };
+
+                    return (
+                        <div
+                            key={rid}
+                            style={{
+                                marginBottom: 10,
+                                borderTop: "1px dashed rgba(255,255,255,0.1)",
+                                paddingTop: 8,
+                            }}
+                        >
+                            <details open={roomOpen}>
+                                <summary
+                                    ref={(el) => {
+                                        if (el) roomHeaderRefs.current.set(rid, el);
+                                        else roomHeaderRefs.current.delete(rid);
+                                    }}
+                                    onClick={toggleRoom}
+                                    style={{
+                                        listStyle: "none",
+                                        cursor: "pointer",
+                                        userSelect: "none",
+                                        padding: "6px 8px",
+                                        borderRadius: 12,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "space-between",
+                                        gap: 8,
+                                        background: focusedRoom
+                                            ? "linear-gradient(180deg, rgba(56,189,248,0.18), rgba(255,255,255,0.03))"
+                                            : "rgba(255,255,255,0.04)",
+                                        border: focusedRoom
+                                            ? "1px solid rgba(56,189,248,0.55)"
+                                            : "1px solid rgba(255,255,255,0.10)",
+                                        boxShadow: focusedRoom
+                                            ? "0 10px 22px rgba(0,0,0,0.45), 0 0 0 2px rgba(56,189,248,0.12)"
+                                            : "0 8px 18px rgba(0,0,0,0.28)",
+                                    }}
+                                >
+                                    <div
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 8,
+                                            minWidth: 0,
+                                        }}
+                                    >
+                                        <a
+                                            onClick={(e) => {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                setSelected({ type: "room", id: rid });
+                                                setOpenRooms((prev) => ({ ...prev, [rid]: true }));
+                                            }}
+                                            style={{
+                                                fontWeight: 800,
+                                                color: focusedRoom
+                                                    ? "rgba(224,247,255,0.98)"
+                                                    : "#a8c0ff",
+                                                cursor: "pointer",
+                                                textDecoration: "none",
+                                                whiteSpace: "nowrap",
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                            }}
+                                        >
+                                            {bucket.room.name}
+                                        </a>
+
+                                        {focusedRoom && (
+                                            <span
+                                                style={{
+                                                    fontSize: 10,
+                                                    padding: "2px 6px",
+                                                    borderRadius: 999,
+                                                    background: "rgba(56,189,248,0.18)",
+                                                    border:
+                                                        "1px solid rgba(56,189,248,0.45)",
+                                                    color: "rgba(226,241,255,0.95)",
+                                                }}
+                                            >
+                                                Selected
+                                            </span>
+                                        )}
+                                    </div>
+                                    <span style={{ opacity: 0.8, fontSize: 12 }}>
+                                        {roomOpen ? "▾" : "▸"}
+                                    </span>
+                                </summary>
+
+                                <div
+                                    style={{
+                                        marginTop: 8,
+                                        padding: 8,
+                                        borderRadius: 12,
+                                        background: focusedRoom
+                                            ? "rgba(0,0,0,0.16)"
+                                            : "rgba(0,0,0,0.10)",
+                                        border: focusedRoom
+                                            ? "1px solid rgba(56,189,248,0.22)"
+                                            : "1px solid rgba(255,255,255,0.06)",
+                                    }}
+                                >
+                                    {rid !== "__no_room__" && (
+                                        <div
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "space-between",
+                                                gap: 8,
+                                                flexWrap: "wrap",
+                                                marginBottom: 8,
+                                            }}
+                                        >
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    gap: 8,
+                                                    alignItems: "center",
+                                                    flexWrap: "wrap",
+                                                }}
+                                            >
+                                                <Checkbox
+                                                    checked={!!rooms.find((r) => r.id === rid)?.locked}
+                                                    onChange={(v) =>
+                                                        setRooms((prev) =>
+                                                            prev.map((r) =>
+                                                                r.id === rid
+                                                                    ? { ...r, locked: v }
+                                                                    : r,
+                                                            ),
+                                                        )
+                                                    }
+                                                    label="lock"
+                                                />
+                                                <Checkbox
+                                                    checked={rooms.find((r) => r.id === rid)?.visible !== false}
+                                                    onChange={(v) =>
+                                                        setRooms((prev) =>
+                                                            prev.map((r) =>
+                                                                r.id === rid
+                                                                    ? { ...r, visible: v }
+                                                                    : r,
+                                                            ),
+                                                        )
+                                                    }
+                                                    label="visible"
+                                                />
                                             </div>
-                                            <div style={{ marginLeft: 10, display: "flex", flexDirection: "column", gap: 4 }}>
-                                                {list.map((n) => (
-                                                    <div
-                                                        key={n.id}
+
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    gap: 6,
+                                                    alignItems: "center",
+                                                    flexWrap: "wrap",
+                                                }}
+                                            >
+                                                <Btn onClick={() => duplicateRoom(rid)}>
+                                                    Duplicate
+                                                </Btn>
+                                                <Btn onClick={() => moveRoomPack(rid)}>
+                                                    Move all
+                                                </Btn>
+                                                <Btn onClick={() => rotateRoomPack(rid)} disabled={!!rooms.find((r) => r.id === rid)?.locked}>
+                                                    Rotate all
+                                                </Btn>
+                                                <Btn onClick={() => scaleRoomWithContents(rid)} disabled={!!rooms.find((r) => r.id === rid)?.locked}>
+                                                    Scale
+                                                </Btn>
+                                                <Btn
+                                                    onClick={() =>
+                                                        requestDelete({
+                                                            type: "room",
+                                                            id: rid,
+                                                        })
+                                                    }
+                                                >
+                                                    Delete
+                                                </Btn>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div>
+                                        {DEFAULT_CLUSTERS.map((cat) => {
+                                            const list = (itemsByCat[cat] || []).filter(
+                                                (n) =>
+                                                    !filter ||
+                                                    n.label
+                                                        .toLowerCase()
+                                                        .includes(filter.toLowerCase()),
+                                            );
+                                            const catKey = `${rid}|${cat}`;
+                                            const focusedCat = focusedRoom && focus.cat === cat;
+                                            const catOpen = Object.prototype.hasOwnProperty.call(
+                                                openCats,
+                                                catKey,
+                                            )
+                                                ? !!openCats[catKey]
+                                                : (focusedCat || focusedRoom);
+
+                                            const toggleCat = (e) => {
+                                                e.preventDefault();
+                                                setOpenCats((prev) => {
+                                                    const cur = Object.prototype.hasOwnProperty.call(
+                                                        prev,
+                                                        catKey,
+                                                    )
+                                                        ? !!prev[catKey]
+                                                        : focusedCat;
+                                                    return {
+                                                        ...prev,
+                                                        [catKey]: !cur,
+                                                    };
+                                                });
+                                            };
+
+                                            return (
+                                                <details
+                                                    key={cat}
+                                                    open={catOpen}
+                                                    style={{ marginLeft: 4, marginBottom: 8 }}
+                                                >
+                                                    <summary
+                                                        onClick={toggleCat}
                                                         style={{
+                                                            listStyle: "none",
+                                                            cursor: "pointer",
+                                                            userSelect: "none",
                                                             display: "flex",
                                                             alignItems: "center",
                                                             justifyContent: "space-between",
-                                                            border: "1px solid rgba(255,255,255,0.08)",
+                                                            gap: 8,
+                                                            padding: "4px 6px",
                                                             borderRadius: 10,
-                                                            padding: "5px 7px",
-                                                            background: selected?.type === "node" && selected?.id === n.id ? "rgba(0,225,255,0.12)" : "rgba(255,255,255,0.04)",
+                                                            background: focusedCat
+                                                                ? "rgba(56,189,248,0.12)"
+                                                                : "rgba(255,255,255,0.03)",
+                                                            border: focusedCat
+                                                                ? "1px solid rgba(56,189,248,0.35)"
+                                                                : "1px solid rgba(255,255,255,0.08)",
+                                                            color: focusedCat
+                                                                ? "rgba(226,241,255,0.95)"
+                                                                : "#9fb6d8",
+                                                            fontWeight: 800,
                                                         }}
                                                     >
-                                                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                                            <span style={{ width: 10, height: 10, borderRadius: 3, background: n.color || clusterColor(n.cluster) }} />
-                                                            <a onClick={() => setSelected({ type: "node", id: n.id })} style={{ color: "#fff", cursor: "pointer", textDecoration: "none" }}>
-                                                                {n.label}
-                                                            </a>
-                                                            {n.kind === "switch" && <span style={{ opacity: 0.7, fontSize: 11 }}>(switch)</span>}
-                                                        </div>
-                                                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                                            <IconBtn label="⚭" title="Link from this node" onClick={() => quickLink(n.id)} />
-                                                            <IconBtn label="⧉" title="Duplicate" onClick={() => duplicateNode(n.id)} />
-                                                            {n.light?.type !== "none" && (
-                                                                <Checkbox
-                                                                    checked={!!n.light.enabled}
-                                                                    onChange={(v) =>
-                                                                        setNode(n.id, {
-                                                                            light: { ...(n.light || {}), enabled: v },
-                                                                        })
-                                                                    }
-                                                                    label="light"
-                                                                />
-                                                            )}
+                                                        <span
+                                                            style={{
+                                                                display: "flex",
+                                                                alignItems: "center",
+                                                                gap: 8,
+                                                                minWidth: 0,
+                                                            }}
+                                                        >
+                                                            <span
+                                                                style={{
+                                                                    overflow: "hidden",
+                                                                    textOverflow: "ellipsis",
+                                                                    whiteSpace: "nowrap",
+                                                                }}
+                                                            >
+                                                                {cat}
+                                                            </span>
+                                                            <span style={{ opacity: 0.6 }}>
+                                                                ({list.length})
+                                                            </span>
+                                                        </span>
+                                                        <span style={{ opacity: 0.7 }}>
+                                                            {catOpen ? "▾" : "▸"}
+                                                        </span>
+                                                    </summary>
 
-                                                            <Btn onClick={() => requestDelete({ type: "node", id: n.id })}>✕</Btn>
-                                                        </div>
+                                                    <div
+                                                        style={{
+                                                            marginLeft: 10,
+                                                            marginTop: 6,
+                                                            display: "flex",
+                                                            flexDirection: "column",
+                                                            gap: 4,
+                                                        }}
+                                                    >
+                                                        {list.map((n) => (
+                                                            <div
+                                                                key={n.id}
+                                                                ref={(el) => {
+                                                                    if (el)
+                                                                        nodeRowRefs.current.set(
+                                                                            n.id,
+                                                                            el,
+                                                                        );
+                                                                    else
+                                                                        nodeRowRefs.current.delete(
+                                                                            n.id,
+                                                                        );
+                                                                }}
+                                                                style={{
+                                                                    display: "flex",
+                                                                    alignItems: "center",
+                                                                    justifyContent: "space-between",
+                                                                    border: focusedRoom && selected?.type === "node" && selected?.id === n.id
+                                                                        ? "1px solid rgba(56,189,248,0.55)"
+                                                                        : "1px solid rgba(255,255,255,0.08)",
+                                                                    borderRadius: 10,
+                                                                    padding: "5px 7px",
+                                                                    background:
+                                                                        selected?.type === "node" &&
+                                                                        selected?.id === n.id
+                                                                            ? "rgba(0,225,255,0.14)"
+                                                                            : "rgba(255,255,255,0.04)",
+                                                                }}
+                                                            >
+                                                                <div
+                                                                    style={{
+                                                                        display: "flex",
+                                                                        alignItems: "center",
+                                                                        gap: 6,
+                                                                        minWidth: 0,
+                                                                    }}
+                                                                >
+                                                                    <span
+                                                                        style={{
+                                                                            width: 10,
+                                                                            height: 10,
+                                                                            borderRadius: 3,
+                                                                            background:
+                                                                                n.color ||
+                                                                                clusterColor(
+                                                                                    n.cluster,
+                                                                                ),
+                                                                        }}
+                                                                    />
+                                                                    <a
+                                                                        onClick={(e) => {
+                                                                            e.preventDefault();
+                                                                            setSelected({
+                                                                                type: "node",
+                                                                                id: n.id,
+                                                                            });
+                                                                        }}
+                                                                        style={{
+                                                                            color: "#fff",
+                                                                            cursor: "pointer",
+                                                                            textDecoration:
+                                                                                "none",
+                                                                            overflow: "hidden",
+                                                                            textOverflow:
+                                                                                "ellipsis",
+                                                                            whiteSpace:
+                                                                                "nowrap",
+                                                                        }}
+                                                                    >
+                                                                        {n.label}
+                                                                    </a>
+                                                                    {n.kind === "switch" && (
+                                                                        <span
+                                                                            style={{
+                                                                                opacity: 0.7,
+                                                                                fontSize: 11,
+                                                                            }}
+                                                                        >
+                                                                            (switch)
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div
+                                                                    style={{
+                                                                        display: "flex",
+                                                                        alignItems: "center",
+                                                                        gap: 6,
+                                                                    }}
+                                                                >
+                                                                    <IconBtn
+                                                                        label="⚭"
+                                                                        title="Link from this node"
+                                                                        onClick={() =>
+                                                                            quickLink(
+                                                                                n.id,
+                                                                            )
+                                                                        }
+                                                                    />
+                                                                    <IconBtn
+                                                                        label="⧉"
+                                                                        title="Duplicate"
+                                                                        onClick={() =>
+                                                                            duplicateNode(
+                                                                                n.id,
+                                                                            )
+                                                                        }
+                                                                    />
+                                                                    {n.light?.type !==
+                                                                        "none" && (
+                                                                            <Checkbox
+                                                                                checked={
+                                                                                    !!n.light
+                                                                                        .enabled
+                                                                                }
+                                                                                onChange={(
+                                                                                    v,
+                                                                                ) =>
+                                                                                    setNode(
+                                                                                        n.id,
+                                                                                        {
+                                                                                            light: {
+                                                                                                ...(n.light ||
+                                                                                                    {}),
+                                                                                                enabled:
+                                                                                                v,
+                                                                                            },
+                                                                                        },
+                                                                                    )
+                                                                                }
+                                                                                label="light"
+                                                                            />
+                                                                        )}
+
+                                                                    <Btn
+                                                                        onClick={() =>
+                                                                            requestDelete(
+                                                                                {
+                                                                                    type: "node",
+                                                                                    id: n.id,
+                                                                                },
+                                                                            )
+                                                                        }
+                                                                    >
+                                                                        ✕
+                                                                    </Btn>
+                                                                </div>
+                                                            </div>
+                                                        ))}
                                                     </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    );
-                                })}
-                            </div>
+                                                </details>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            </details>
                         </div>
                     );
                 })}
@@ -4468,86 +9133,8 @@ export default function Interactive3DNodeShowcase() {
             </Panel>
         );
     };
-    const DecksPanel = () => {
-        const byDeck = useMemo(() => {
-            const map = {};
-            decks.forEach((d) => (map[d.id] = { deck: d, rooms: [], nodes: [] }));
-            // Rooms directly assigned to a deck
-            rooms.forEach((r) => {
-                if (r.deckId && map[r.deckId]) map[r.deckId].rooms.push(r);
-            });
-            // Nodes: either directly assigned OR inside a room that’s on the deck
-            const roomDeck = Object.fromEntries(rooms.map((r) => [r.id, r.deckId || null]));
-            nodes.forEach((n) => {
-                const did = n.deckId || roomDeck[n.roomId] || null;
-                if (did && map[did]) map[did].nodes.push(n);
-            });
-            return Object.values(map);
-        }, [decks, rooms, nodes]);
 
-        return (
-            <Panel title="Decks">
-                <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                    <Btn onClick={addDeck}>+ Add Deck</Btn>
-                </div>
-                {byDeck.length === 0 && <div style={{opacity:0.8}}>No decks yet. Click “Add Deck”.</div>}
-                {byDeck.map(({ deck, rooms, nodes }) => (
-                    <div key={deck.id} style={{ borderTop: "1px dashed rgba(255,255,255,0.1)", paddingTop: 8, marginTop: 8 }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                            <input
-                                defaultValue={deck.name}
-                                onBlur={(e) => {
-                                    const v = e.target.value.trim();
-                                    if (v && v !== deck.name) setDeck(deck.id, { name: v });
-                                }}
-                                onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                        e.preventDefault();
-                                        e.currentTarget.blur(); // commits via onBlur
-                                    }
-                                }}
-                                spellCheck={false}
-                                autoComplete="off"
-                            />
-
-                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                                <Checkbox
-                                    checked={deck.visible !== false}
-                                    onChange={(v) => setDeck(deck.id, { visible: v })}   // wrapped -> no jump
-                                    label={deck.visible !== false ? "visible" : "hidden"}
-                                />
-
-                                <Btn onClick={() => deleteDeck(deck.id)}>Delete</Btn>   // wrapped -> no jump
-                            </div>
-                        </div>
-
-                        <div style={{ fontSize: 12, opacity: 0.9, marginTop: 6 }}>
-                            <div style={{ marginBottom: 4, fontWeight: 800 }}>Rooms ({rooms.length})</div>
-                            {rooms.length === 0 ? (
-                                <div style={{ opacity: 0.7, marginBottom: 6 }}>—</div>
-                            ) : rooms.map((r) => (
-                                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                                    <a onClick={() => setSelected({ type: "room", id: r.id })} style={{ cursor: "pointer" }}>{r.name}</a>
-                                </div>
-                            ))}
-
-                            <div style={{ marginTop: 8, marginBottom: 4, fontWeight: 800 }}>Nodes ({nodes.length})</div>
-                            {nodes.length === 0 ? (
-                                <div style={{ opacity: 0.7 }}>—</div>
-                            ) : nodes.map((n) => (
-                                <div key={n.id} style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                                    <a onClick={() => setSelected({ type: "node", id: n.id })} style={{ cursor: "pointer" }}>
-                                        {n.label}
-                                    </a>
-                                    <span style={{ opacity: 0.7, fontSize: 11 }}>{n.cluster}</span>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                ))}
-            </Panel>
-        );
-    };
+    // DecksPanel is now provided via a stable wrapper (DecksPanelInner).
 
     const FlowDefaultsPanel = () => (
         <Panel title="Flow / Link Defaults">
@@ -5161,745 +9748,184 @@ export default function Interactive3DNodeShowcase() {
 
 
 
-    const ActionsPanel = () => {
-        const [working, setWorking] = useState({ label: "", stepType: "toggleLight", nodeId: "", value: "waves" });
-        const [justAddedId, setJustAddedId] = useState(null);
-        const [justAddedLabel, setJustAddedLabel] = useState("");
-
-        const stepTypeOptions = [
-            { value: "toggleLight", label: "Toggle Light" },
-            { value: "toggleGlow", label: "Toggle Glow" },
-            { value: "setSignalStyle", label: "Set Signal Style" },
-            { value: "textBox", label: "Text Box" },
-            { value: "textBoxFade", label: "Text Box Fade (manual)" }, // manual fade / show / hide
-            { value: "setWireframe",  label: "Wireframe On/Off (Global)" },
-            { value: "cameraMove", label: "Camera Move / Track" },
-            { value: "hudFade", label: "HUD: Fade Button" },   // <-- new
-
-        ];
-
-        // helpers that preserve left panel scroll
-        const patchAction = (id, patch) =>
-            keepLeftScroll(() => setActions(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a)));
-
-        const deleteAction = (id) =>
-            keepLeftScroll(() => setActions(prev => prev.filter(a => a.id !== id)));
-
-        const duplicateAction = (id) =>
-            keepLeftScroll(() => setActions(prev => prev.map(a => {
-                if (a.id !== id) return a;
-                const copy = JSON.parse(JSON.stringify(a));
-                copy.id = uuid();
-                copy.label = `${a.label || "Action"} Copy`;
-                return copy;
-            })));
-
-        const addAction = (e) => {
-            e?.preventDefault?.();
-
-            // Compute id + label once so we can highlight + message
-            const newId = uuid();
-            const newLabel = working.label || `Action ${actions.length + 1}`;
-
-            keepLeftScroll(() =>
-                setActions(prev => [
-                    ...prev,
-                    { id: newId, label: newLabel, showOnHUD: true, steps: [] }
-                ])
-            );
-
-            setWorking(w => ({ ...w, label: "" }));
-            setJustAddedId(newId);
-            setJustAddedLabel(newLabel);
-
-            // Fade the highlight after a short delay
-            setTimeout(() => {
-                setJustAddedId((current) => (current === newId ? null : current));
-            }, 1000);
-        };
-
-
-        const addStep = (actId, tpl) =>
-            keepLeftScroll(() =>
-                setActions(prev => prev.map(a =>
-                    a.id === actId
-                        ? { ...a, steps: [...a.steps, tpl || { type: "toggleLight", nodeId: null }] }
-                        : a
-                ))
-            );
-        const hudActions = actions.filter((a) => (a.showOnHUD ?? true) === true);
-        const addChildStep = (actId, parentIdx, tpl) =>
-            keepLeftScroll(() =>
-                setActions(prev => prev.map(a => {
-                    if (a.id !== actId) return a;
-                    const steps = a.steps.map((s, i) => {
-                        if (i !== parentIdx) return s;
-                        const children = Array.isArray(s.children) ? [...s.children] : [];
-                        children.push(
-                            tpl || { type: "toggleLight", nodeId: null, delay: 0 }
-                        );
-                        return { ...s, children };
-                    });
-                    return { ...a, steps };
-                }))
-            );
-
-        const patchChildStep = (actId, parentIdx, childIdx, patch) =>
-            keepLeftScroll(() =>
-                setActions(prev => prev.map(a => {
-                    if (a.id !== actId) return a;
-                    const steps = a.steps.map((s, i) => {
-                        if (i !== parentIdx) return s;
-                        const children = (s.children || []).map((c, j) =>
-                            j === childIdx ? { ...c, ...patch } : c
-                        );
-                        return { ...s, children };
-                    });
-                    return { ...a, steps };
-                }))
-            );
-
-        const delChildStep = (actId, parentIdx, childIdx) =>
-            keepLeftScroll(() =>
-                setActions(prev => prev.map(a => {
-                    if (a.id !== actId) return a;
-                    const steps = a.steps.map((s, i) => {
-                        if (i !== parentIdx) return s;
-                        const children = (s.children || []).filter((_, j) => j !== childIdx);
-                        return { ...s, children };
-                    });
-                    return { ...a, steps };
-                }))
-            );
-
-        const moveChildStep = (actId, parentIdx, childIdx, dir) =>
-            keepLeftScroll(() =>
-                setActions(prev => prev.map(a => {
-                    if (a.id !== actId) return a;
-                    const steps = a.steps.map((s, i) => {
-                        if (i !== parentIdx) return s;
-                        const children = [...(s.children || [])];
-                        const j = childIdx + dir;
-                        if (j < 0 || j >= children.length) return s;
-                        [children[childIdx], children[j]] = [children[j], children[childIdx]];
-                        return { ...s, children };
-                    });
-                    return { ...a, steps };
-                }))
-            );
-
-        const patchStep = (actId, idx, patch) =>
-            keepLeftScroll(() =>
-                setActions(prev => prev.map(a => {
-                    if (a.id !== actId) return a;
-                    const steps = a.steps.map((s, i) => i === idx ? { ...s, ...patch } : s);
-                    return { ...a, steps };
-                }))
-            );
-
-        const delStep = (actId, idx) =>
-            keepLeftScroll(() =>
-                setActions(prev => prev.map(a =>
-                    a.id === actId
-                        ? { ...a, steps: a.steps.filter((_, i) => i !== idx) }
-                        : a
-                ))
-            );
-// Small numeric input helper reused in node inspector (shape, textbox, etc.)
-
-
-        const moveStep = (actId, idx, dir) =>
-            keepLeftScroll(() =>
-                setActions(prev => prev.map(a => {
-                    if (a.id !== actId) return a;
-                    const steps = [...a.steps];
-                    const j = idx + dir;
-                    if (j < 0 || j >= steps.length) return a;
-                    [steps[idx], steps[j]] = [steps[j], steps[idx]];
-                    return { ...a, steps };
-                }))
-            );
-
-        return (
-            <Panel title="Actions / On-screen Buttons">
-                <div style={{ display: "grid", gap: 10 }}>
-                    {/* New action header */}
-                    <form
-                        onSubmit={addAction}
-                        style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}
-                    >
-                        <label style={{ flex: 1, minWidth: 140 }}>
-                            Name
-                            <Input
-                                value={working.label}
-                                onChange={(e) => setWorking((w) => ({ ...(w || {}), label: e.target.value }))}
-                                placeholder="New action name…"
-                            />
-
-                        </label>
-                        <Btn type="submit" variant="primary" glow>+ Add Action</Btn>
-                    </form>
-                    {justAddedLabel && (
-                        <div style={{ fontSize: 11, opacity: 0.85, color: "#a6d4ff", marginTop: -4 }}>
-                            Added “{justAddedLabel}” at the bottom of the list.
-                        </div>
-                    )}
-
-                    {/* Actions list */}
-                    <div style={{ display: "grid", gap: 8 }}>
-                        {actions.length === 0 && (
-                            <div style={{ opacity: 0.7, fontSize: 12 }}>No actions yet. Create one above.</div>
-                        )}
-
-                        {actions.map((a) => (
-                            <div
-                                key={a.id}
-                                style={{
-                                    border: "1px solid rgba(255,255,255,0.14)",
-                                    borderRadius: 12,
-                                    padding: 10,
-                                    marginBottom: 10
-                                }}
-                            >
-                                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
-                                    <label>
-                                        Label
-                                        <Input
-                                            value={a.label}
-                                            onChange={(e) => patchAction(a.id, { label: e.target.value })}
-                                        />
-                                    </label>
-                                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                                        <Checkbox
-                                            checked={(a.showOnHUD ?? true) === true}
-                                            onChange={(v) => patchAction(a.id, { showOnHUD: v })}
-                                            label="Show on HUD"
-                                        />
-                                        <Btn onClick={(e) => { e.preventDefault(); runAction(a); }}>Run</Btn>
-                                        <Btn onClick={(e) => { e.preventDefault(); duplicateAction(a.id); }}>Duplicate</Btn>
-                                        <Btn onClick={(e) => { e.preventDefault(); deleteAction(a.id); }}>Delete</Btn>
-                                    </div>
-                                </div>
-
-                                {/* steps */}
-                                {/* steps */}
-                                <div style={{ marginTop: 8 }}>
-                                    {a.steps.length === 0 && (
-                                        <div style={{ opacity: 0.7, fontSize: 12 }}>No steps yet.</div>
-                                    )}
-
-                                    {a.steps.map((s, i) => {
-                                        const isCamera = s.type === "cameraMove";
-                                        const isWire   = s.type === "setWireframe";
-                                        const isHudFade = s.type === "hudFade";
-
-                                        return (
-                                            <div
-                                                key={i}
-                                                style={{
-                                                    marginBottom: 8,
-                                                    padding: 6,
-                                                    borderRadius: 10,
-                                                    background: "rgba(255,255,255,0.02)",
-                                                    border: "1px solid rgba(255,255,255,0.08)",
-                                                }}
-                                            >
-                                                {/* Main step row */}
-                                                <div
-                                                    style={{
-                                                        display: "grid",
-                                                        gridTemplateColumns: "1.2fr 1.4fr 1.6fr auto",
-                                                        gap: 6,
-                                                        alignItems: "end",
-                                                    }}
-                                                >
-                                                    {/* Type */}
-                                                    <label>
-                                                        Type
-                                                        <Select
-                                                            value={s.type}
-                                                            onChange={(e) => {
-                                                                const type = e.target.value;
-                                                                const patch = { type };
-                                                                if (type === "cameraMove") {
-                                                                    patch.nodeId = null;
-                                                                    patch.fromPresetId = s.fromPresetId || "";
-                                                                    patch.toPresetId = s.toPresetId || "";
-                                                                    patch.delay = s.delay ?? 0;
-                                                                    patch.duration = s.duration ?? 1.5;
-                                                                } else if (type === "setWireframe") {
-                                                                    patch.nodeId = null;
-                                                                    patch.value = s.value || "on";
-                                                                    patch.delay = s.delay ?? 0;
-                                                                    patch.duration = undefined;
-                                                                    patch.fromPresetId = undefined;
-                                                                    patch.toPresetId = undefined;
-                                                                } else if (type === "setTextBox") {              // 👈 NEW
-                                                                    // Node-targeted; keep nodeId, just give it a value
-                                                                    patch.value = s.value || "on";              // "on" | "off"
-                                                                }
-
-                                                                patchStep(a.id, i, patch);
-                                                            }}
-                                                        >
-                                                            {stepTypeOptions.map((opt) => (
-                                                                <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                                            ))}
-                                                        </Select>
-                                                    </label>
-
-                                                    {/* Target (node or camera from-view) */}
-                                                    {isCamera ? (
-                                                        <label>
-                                                            From View
-                                                            <Select
-                                                                value={s.fromPresetId || ""}
-                                                                onChange={(e) => patchStep(a.id, i, { fromPresetId: e.target.value || "" })}
-                                                            >
-                                                                <option value="">(current)</option>
-                                                                {cameraPresets.map((p) => (
-                                                                    <option key={p.id} value={p.id}>{p.name}</option>
-                                                                ))}
-                                                            </Select>
-                                                        </label>
-                                                    ) : isWire ? (
-                                                        <label>
-                                                            Target
-                                                            <div
-                                                                style={{
-                                                                    fontSize: 12,
-                                                                    opacity: 0.8,
-                                                                    padding: "7px 10px",
-                                                                    borderRadius: 10,
-                                                                    border: "1px solid rgba(255,255,255,0.12)",
-                                                                    background: "rgba(255,255,255,0.04)",
-                                                                }}
-                                                            >
-                                                                Global: Wireframe
-                                                            </div>
-                                                        </label>
-                                                    ) : isHudFade ? (
-                                                        <label>
-                                                            Target Button
-                                                            <Select
-                                                                value={s.hudTargetId || ""}
-                                                                onChange={(e) =>
-                                                                    patchStep(a.id, i, {
-                                                                        hudTargetId: e.target.value || "",
-                                                                    })
-                                                                }
-                                                            >
-                                                                <option value="">(none)</option>
-                                                                {actions
-                                                                    .filter((act) => act.showOnHUD ?? true)
-                                                                    .map((act) => (
-                                                                        <option key={act.id} value={act.id}>
-                                                                            {act.label || "(unnamed button)"}
-                                                                        </option>
-                                                                    ))}
-                                                            </Select>
-                                                        </label>
-                                                    ) : (
-                                                        <label>
-                                                            Target Node
-                                                            <Select
-                                                                value={s.nodeId || ""}
-                                                                onChange={(e) => patchStep(a.id, i, { nodeId: e.target.value || null })}
-                                                            >
-                                                                <option value="">(none)</option>
-                                                                {nodes.map((n) => (
-                                                                    <option key={n.id} value={n.id}>{n.label}</option>
-                                                                ))}
-                                                            </Select>
-                                                        </label>
-                                                    )}
-
-                                                    {/* Value / timing */}
-                                                    {isCamera ? (
-                                                        <div style={{ display: "grid", gap: 4 }}>
-                                                            <label>
-                                                                To View
-                                                                <Select
-                                                                    value={s.toPresetId || ""}
-                                                                    onChange={(e) =>
-                                                                        patchStep(a.id, i, { toPresetId: e.target.value || "" })
-                                                                    }
-                                                                >
-                                                                    <option value="">(pick a view)</option>
-                                                                    {cameraPresets.map((p) => (
-                                                                        <option key={p.id} value={p.id}>
-                                                                            {p.name}
-                                                                        </option>
-                                                                    ))}
-                                                                </Select>
-                                                            </label>
-                                                            <div style={{ display: "flex", gap: 4 }}>
-                                                                <label style={{ flex: 1 }}>
-                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Delay (s)</div>
-                                                                    <Input
-                                                                        type="number"
-                                                                        step="0.1"
-                                                                        value={s.delay ?? 0}
-                                                                        onChange={(e) =>
-                                                                            patchStep(a.id, i, { delay: Number(e.target.value) || 0 })
-                                                                        }
-                                                                    />
-                                                                </label>
-                                                                <label style={{ flex: 1 }}>
-                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Duration (s)</div>
-                                                                    <Input
-                                                                        type="number"
-                                                                        step="0.1"
-                                                                        value={s.duration ?? 1.5}
-                                                                        onChange={(e) =>
-                                                                            patchStep(a.id, i, { duration: Number(e.target.value) || 0 })
-                                                                        }
-                                                                    />
-                                                                </label>
-                                                            </div>
-                                                        </div>
-                                                    ) : (
-                                                        <div style={{ display: "grid", gap: 4 }}>
-                                                            {/* Shared delay for non-camera steps */}
-                                                            <label>
-                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Delay (s)</div>
-                                                                <Input
-                                                                    type="number"
-                                                                    step="0.1"
-                                                                    value={s.delay ?? 0}
-                                                                    onChange={(e) =>
-                                                                        patchStep(a.id, i, { delay: Number(e.target.value) || 0 })
-                                                                    }
-                                                                />
-                                                            </label>
-
-                                                            {/* Signal style value */}
-                                                            {s.type === "setSignalStyle" && (
-                                                                <label>
-                                                                    Value
-                                                                    <Select
-                                                                        value={s.value || "waves"}
-                                                                        onChange={(e) =>
-                                                                            patchStep(a.id, i, { value: e.target.value })
-                                                                        }
-                                                                    >
-                                                                        <option value="waves">waves</option>
-                                                                        <option value="rays">rays</option>
-                                                                        <option value="none">none</option>
-                                                                    </Select>
-                                                                </label>
-                                                            )}
-
-                                                            {/* HUD fade controls (mode + duration) */}
-                                                            {s.type === "hudFade" && (
-                                                                <div style={{ display: "flex", gap: 6 }}>
-                                                                    <label style={{ flex: 1 }}>
-                                                                        Fade
-                                                                        <Select
-                                                                            value={s.hudMode || "out"}
-                                                                            onChange={(e) =>
-                                                                                patchStep(a.id, i, {
-                                                                                    hudMode: e.target.value || "out",
-                                                                                })
-                                                                            }
-                                                                        >
-                                                                            <option value="in">Fade In</option>
-                                                                            <option value="out">Fade Out</option>
-                                                                        </Select>
-                                                                    </label>
-                                                                    <label style={{ flex: 1 }}>
-                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Duration (s)</div>
-                                                                        <Input
-                                                                            type="number"
-                                                                            step="0.1"
-                                                                            value={s.hudDuration ?? 0.35}
-                                                                            onChange={(e) =>
-                                                                                patchStep(a.id, i, {
-                                                                                    hudDuration: Number(e.target.value) || 0.35,
-                                                                                })
-                                                                            }
-                                                                        />
-                                                                    </label>
-                                                                </div>
-                                                            )}
-
-                                                            {/* TextBox mode selector */}
-                                                            {s.type === "textBox" && (
-                                                                <label>
-                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Text Box Action</div>
-                                                                    <Select
-                                                                        value={s.mode || "toggle"}
-                                                                        onChange={(e) =>
-                                                                            patchStep(a.id, i, { mode: e.target.value })
-                                                                        }
-                                                                    >
-                                                                        <option value="toggle">Toggle on/off</option>
-                                                                        <option value="on">Force ON</option>
-                                                                        <option value="off">Force OFF</option>
-                                                                        <option value="fade">Timed fade (use node timers)</option>
-                                                                    </Select>
-                                                                </label>
-                                                            )}
-
-
-                                                            {s.type === "textBoxFade" && (
-                                                                <>
-                                                                    <label>
-                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Fade Type</div>
-                                                                        <Select
-                                                                            value={s.fadeMode || "in"}
-                                                                            onChange={(e) =>
-                                                                                patchStep(a.id, i, { fadeMode: e.target.value })
-                                                                            }
-                                                                        >
-                                                                            <option value="in">Fade In (stay visible)</option>
-                                                                            <option value="out">Fade Out (hide)</option>
-                                                                            <option value="show">Show instantly</option>
-                                                                            <option value="hide">Hide instantly</option>
-                                                                        </Select>
-                                                                    </label>
-                                                                    <label>
-                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Duration (s)</div>
-                                                                        <Input
-                                                                            type="number"
-                                                                            step="0.1"
-                                                                            value={s.duration ?? ""}
-                                                                            onChange={(e) =>
-                                                                                patchStep(a.id, i, {
-                                                                                    duration:
-                                                                                        e.target.value === ""
-                                                                                            ? ""
-                                                                                            : Number(e.target.value) || 0,
-                                                                                })
-                                                                            }
-                                                                        />
-                                                                    </label>
-                                                                </>
-                                                            )}
-                                                            {isWire && (
-                                                                <label>
-                                                                    Wireframe
-                                                                    <Select
-                                                                        value={s.value || "on"}
-                                                                        onChange={(e) => patchStep(a.id, i, { value: e.target.value })}
-                                                                    >
-                                                                        <option value="on">On</option>
-                                                                        <option value="off">Off</option>
-                                                                    </Select>
-                                                                </label>
-                                                            )}
-                                                            {s.type === "setTextBox" && (
-                                                                <label>
-                                                                    Text Box
-                                                                    <Select
-                                                                        value={s.value || "on"}
-                                                                        onChange={(e) => patchStep(a.id, i, { value: e.target.value })}
-                                                                    >
-                                                                        <option value="on">On</option>
-                                                                        <option value="off">Off</option>
-                                                                    </Select>
-                                                                </label>
-                                                            )}
-                                                        </div>
-                                                    )}
-
-                                                    {/* Step controls */}
-                                                    <div style={{ display: "flex", gap: 6 }}>
-                                                        <Btn onClick={(e) => { e.preventDefault(); moveStep(a.id, i, -1); }}>↑</Btn>
-                                                        <Btn onClick={(e) => { e.preventDefault(); moveStep(a.id, i, +1); }}>↓</Btn>
-                                                        <Btn onClick={(e) => { e.preventDefault(); delStep(a.id, i); }}>✕</Btn>
-                                                    </div>
-                                                </div>
-
-                                                {/* Sub-steps */}
-                                                {Array.isArray(s.children) && s.children.length > 0 && (
-                                                    <div
-                                                        style={{
-                                                            marginTop: 6,
-                                                            marginLeft: 8,
-                                                            paddingLeft: 8,
-                                                            borderLeft: "1px dashed rgba(255,255,255,0.3)",
-                                                            display: "grid",
-                                                            gap: 4,
-                                                        }}
-                                                    >
-                                                        {s.children.map((c, ci) => {
-                                                            const cIsWire = c.type === "setWireframe";
-                                                            const cIsTextBox = c.type === "setTextBox";   // 👈 NEW
-
-                                                            return (
-                                                                <div
-                                                                    key={ci}
-                                                                    style={{
-                                                                        display: "grid",
-                                                                        gridTemplateColumns: "1.3fr 1.4fr 1.4fr auto",
-                                                                        gap: 6,
-                                                                        alignItems: "end",
-                                                                    }}
-                                                                >
-                                                                    {/* Child Type */}
-                                                                    <label>
-                                                                        Type
-                                                                        <Select
-                                                                            value={c.type}
-                                                                            onChange={(e) => {
-                                                                                const type = e.target.value;
-                                                                                const patch = { type };
-                                                                                if (type === "setWireframe") {
-                                                                                    patch.nodeId = null;
-                                                                                    patch.value = c.value || "on";
-                                                                                } else if (type === "setTextBox") {      // 👈 NEW
-                                                                                    patch.value = c.value || "on";
-                                                                                }
-
-                                                                                patchChildStep(a.id, i, ci, patch);
-                                                                            }}
-                                                                        >
-                                                                            {stepTypeOptions
-                                                                                .filter((opt) => opt.value !== "cameraMove")
-                                                                                .map((opt) => (
-                                                                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                                                                ))}
-                                                                        </Select>
-                                                                    </label>
-
-                                                                    {/* Child target */}
-                                                                    {cIsWire ? (
-                                                                        <label>
-                                                                            Target
-                                                                            <div
-                                                                                style={{
-                                                                                    fontSize: 12,
-                                                                                    opacity: 0.8,
-                                                                                    padding: "5px 8px",
-                                                                                    borderRadius: 8,
-                                                                                    border: "1px solid rgba(255,255,255,0.12)",
-                                                                                    background: "rgba(255,255,255,0.03)",
-                                                                                }}
-                                                                            >
-                                                                                Global: Wireframe
-                                                                            </div>
-                                                                        </label>
-                                                                    ) : (
-                                                                        <label>
-                                                                            Target Node
-                                                                            <Select
-                                                                                value={c.nodeId || ""}
-                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { nodeId: e.target.value || null })}
-                                                                            >
-                                                                                <option value="">(none)</option>
-                                                                                {nodes.map((n) => (
-                                                                                    <option key={n.id} value={n.id}>{n.label}</option>
-                                                                                ))}
-                                                                            </Select>
-                                                                        </label>
-                                                                    )}
-
-                                                                    {/* Child delay + value */}
-                                                                    <div style={{ display: "grid", gap: 4 }}>
-                                                                        <label>
-                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Delay (s)</div>
-                                                                            <Input
-                                                                                type="number"
-                                                                                step="0.1"
-                                                                                value={c.delay ?? 0}
-                                                                                onChange={(e) =>
-                                                                                    patchChildStep(a.id, i, ci, { delay: Number(e.target.value) || 0 })
-                                                                                }
-                                                                            />
-                                                                        </label>
-
-                                                                        {c.type === "setSignalStyle" && (
-                                                                            <label>
-                                                                                Value
-                                                                                <Select
-                                                                                    value={c.value || "waves"}
-                                                                                    onChange={(e) => patchChildStep(a.id, i, ci, { value: e.target.value })}
-                                                                                >
-                                                                                    <option value="waves">waves</option>
-                                                                                    <option value="rays">rays</option>
-                                                                                    <option value="none">none</option>
-                                                                                </Select>
-                                                                            </label>
-                                                                        )}
-
-                                                                        {cIsWire && (
-                                                                            <label>
-                                                                                Wireframe
-                                                                                <Select
-                                                                                    value={c.value || "on"}
-                                                                                    onChange={(e) =>
-                                                                                        patchChildStep(a.id, i, ci, { value: e.target.value })
-                                                                                    }
-                                                                                >
-                                                                                    <option value="on">On</option>
-                                                                                    <option value="off">Off</option>
-                                                                                </Select>
-                                                                            </label>
-                                                                        )}
-                                                                        {cIsTextBox && (                               // 👈 NEW
-                                                                            <label>
-                                                                                Text Box
-                                                                                <Select
-                                                                                    value={c.value || "on"}
-                                                                                    onChange={(e) =>
-                                                                                        patchChildStep(a.id, i, ci, { value: e.target.value })
-                                                                                    }
-                                                                                >
-                                                                                    <option value="on">On</option>
-                                                                                    <option value="off">Off</option>
-                                                                                </Select>
-                                                                            </label>
-                                                                        )}
-                                                                    </div>
-
-                                                                    {/* Child controls */}
-                                                                    <div style={{ display: "flex", gap: 4 }}>
-                                                                        <Btn onClick={(e) => { e.preventDefault(); moveChildStep(a.id, i, ci, -1); }}>↑</Btn>
-                                                                        <Btn onClick={(e) => { e.preventDefault(); moveChildStep(a.id, i, ci, +1); }}>↓</Btn>
-                                                                        <Btn onClick={(e) => { e.preventDefault(); delChildStep(a.id, i, ci); }}>✕</Btn>
-                                                                    </div>
-                                                                </div>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                )}
-
-                                                {/* Add sub-step button */}
-                                                <div style={{ marginTop: 6 }}>
-                                                    <Btn
-                                                        onClick={(e) => {
-                                                            e.preventDefault();
-                                                            addChildStep(a.id, i, { type: "toggleLight", nodeId: null, delay: 0 });
-                                                        }}
-                                                        style={{ fontSize: 11, padding: "4px 8px" }}
-                                                    >
-                                                        + Add Sub-step
-                                                    </Btn>
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-
-                                    {/* Add step button for this action */}
-                                    <div style={{ marginTop: 6 }}>
-                                        <Btn
-                                            onClick={(e) => {
-                                                e.preventDefault();
-                                                addStep(a.id, { type: "toggleLight", nodeId: null, delay: 0 });
-                                            }}
-                                        >
-                                            + Add Step
-                                        </Btn>
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            </Panel>
-        );
+    // Actions panel: stable component wrapper to prevent unmount/remount while editing
+    const actionsPanelCtxRef = useRef(null);
+    actionsPanelCtxRef.current = {
+        actions,
+        setActions,
+        nodes,
+        cameraPresets,
+        runAction,
+        keepLeftScroll,
     };
+
+    const ActionsPanel = useMemo(() => {
+        return function ActionsPanelWrapper() {
+            return <ActionsPanelInner ctx={actionsPanelCtxRef.current} />;
+        };
+    }, []);
+
+
+
+    // Decks panel: stable component wrapper to prevent unmount/remount while editing
+    const decksPanelCtxRef = useRef(null);
+    decksPanelCtxRef.current = {
+        decks,
+        rooms,
+        nodes,
+        links,
+        addDeck,
+        setDeck,
+        deleteDeck,
+        setSelected,
+        deckAddModeId,
+        setDeckAddModeId,
+        deckAddLast,
+        setDeckAddLast,
+        addRoomToDeck,
+        addNodeToDeck,
+        removeRoomFromDeck,
+        removeNodeFromDeck,
+        keepLeftScroll,
+    };
+
+    const DecksPanel = useMemo(() => {
+        return function DecksPanelWrapper() {
+            return <DecksPanelInner ctx={decksPanelCtxRef.current} />;
+        };
+    }, []);
+
+
+
+// NOTE: TopBar is hoisted to module scope to prevent unmount/remount during slider drags.
+    // Pass everything it needs via a single ctx object.
+    const topBarCtx = {
+        // Header / counts / logo
+        projectName,
+        setProjectName,
+        rooms,
+        nodes,
+        links,
+        logoHot,
+        setLogoHot,
+        logoFlash,
+        goToSelectedViewFromLogo,
+
+        // Project / file
+        prodMode,
+        setProdMode,
+        fileRef,
+        importPackage,
+        onModelFiles,
+        exportZip,
+        openMergeDialog,
+        modelBlob,
+
+        // Undo / redo
+        undo,
+        redo,
+        canUndo,
+        canRedo,
+
+        // Views
+        cameraSnapshotRef,
+        cameraPresets,
+        setCameraPresets,
+        cameraPresetId,
+        setCameraPresetId,
+
+        // Model / products
+        currentModelId,
+        setCurrentModelId,
+        modelVisible,
+        setModelVisible,
+        setProductsOpen,
+        modelScale,
+        setModelScale,
+        productScale,
+        setProductScale,
+        productUnits,
+        setProductUnits,
+
+        // Quick scene config
+        wireOpacity,
+        setWireOpacity,
+        wireDetail,
+        setWireDetail,
+        roomOpacity,
+        setRoomOpacity,
+        bg,
+        setBg,
+
+        // Scene toggles
+        wireframe,
+        setWireframe,
+        showLights,
+        setShowLights,
+        showLightBounds,
+        setShowLightBounds,
+        showGround,
+        setShowGround,
+        animate,
+        setAnimate,
+        labelsOn,
+        setLabelsOn,
+
+        // Reveal FX
+        wireStroke,
+        setWireStroke,
+        revealOpen,
+        setRevealOpen,
+        roomOperatorMode,
+        toggleRoomOperatorMode,
+
+        // Transform / selection
+        moveMode,
+        setMoveMode,
+        selectionMode,
+        setSelectionMode,
+        transformMode,
+        setTransformMode,
+        selected,
+        setSelected,
+        multiSel,
+        setMultiSel,
+        setSelectedBreakpoint,
+        setLinkFromId,
+        setMode,
+
+        // Snapping
+        snapRoomsEnabled,
+        setSnapRoomsEnabled,
+        snapRoomsDistance,
+        setSnapRoomsDistance,
+
+        // Globals
+        showDimsGlobal,
+        setShowDimsGlobal,
+        photoDefault,
+        setPhotoDefault,
+        alwaysShow3DInfo,
+        setAlwaysShow3DInfo,
+
+        // Pictures
+        picturesOpen,
+        setPicturesOpen,
+        importedPictures,
+        setImportedPictures,
+        picturesInputRef,
+        importPicturesFromFiles,
+        setPictureVisible,
+        setPictureSolid,
+        setPictureScale,
+        setPictureOpacity,
+        setPicturePosition,
+        setPictureRotation,
+        deletePicture,
+        pictureValuesClipboardRef,
+        setPictureClipboardTick,
+    };
+
 
 
     return (
@@ -5908,6 +9934,7 @@ export default function Interactive3DNodeShowcase() {
 
             {!prodMode && (
                 <TopBar
+                    ctx={topBarCtx}
                     shadowsOn={shadowsOn}
                     setShadowsOn={setShadowsOn}
                     uiStart={uiStart}
@@ -5923,6 +9950,9 @@ export default function Interactive3DNodeShowcase() {
                 uiStart={uiStart}
                 uiStop={uiStop}
                 stopAnchorDefault={stopAnchorDefault}
+                selected={selected}
+                roomsNodesSubtitle={roomsNodesSubtitle}
+                linksSubtitle={linksSubtitle}
                 placement={placement}
                 setPlacement={setPlacement}
                 LegendTree={LegendTree}
@@ -5955,6 +9985,8 @@ export default function Interactive3DNodeShowcase() {
                 setAnimate={setAnimate}
                 labelsOn={labelsOn}
                 setLabelsOn={setLabelsOn}
+                hudButtonsVisible={hudButtonsVisible}
+                setHudButtonsVisible={setHudButtonsVisible}
             />
 
 
@@ -5993,15 +10025,17 @@ export default function Interactive3DNodeShowcase() {
             {selectedNode && <ProductHUD node={selectedNode} />}
 
             {/* On-screen Actions (Grid Layout layer) */}
-            <HudButtonsLayer
-                actions={actions}
-                setActions={setActions}
-                runAction={runAction}
-                key={hudVersion}
-                uiHidden={prodMode}
-                actionsHud={actionsHud}
-                setActionsHud={setActionsHud}
-            />
+            {hudButtonsVisible && (
+                <HudButtonsLayer
+                    actions={actions}
+                    setActions={setActions}
+                    runAction={runAction}
+                    key={hudVersion}
+                    uiHidden={prodMode}
+                    actionsHud={actionsHud}
+                    setActionsHud={setActionsHud}
+                />
+            )}
 
 
 
@@ -6091,9 +10125,14 @@ export default function Interactive3DNodeShowcase() {
                     <StableStartupCamera pose={activePose} applyKey={activePresetKey} />
                     <CameraPoseBridge startupPose={null} snapshotRef={cameraSnapshotRef} />
 
-                    <FloorplanPictures pictures={importedPictures} />
+                    <FloorplanPictures
+                        pictures={importedPictures}
+                        pictureRefs={pictureRefs}
+                        onAspect={setPictureAspect}
+                    />
 
                     <SceneInner
+                        pictureRefs={pictureRefs}
                         modelDescriptor={modelDescriptor}
                         perf={perf}
                         uiHidden={prodMode}
@@ -6121,8 +10160,11 @@ export default function Interactive3DNodeShowcase() {
                         transformMode={transformMode}
                         onRoomDragPack={onRoomDragPack}
                         onRoomDragApply={onRoomDragApply}
+                        onRoomScalePack={onRoomScalePack}
+                        onRoomScaleApply={onRoomScaleApply}
                         placement={placement}
                         onPlace={onPlace}
+                        multiPivotOverride={multiPivotOverride}
                         showLights={showLights}
                         showLightBounds={showLightBounds}
                         showGround={showGround}
@@ -6158,7 +10200,7 @@ export default function Interactive3DNodeShowcase() {
                     <Preload all />
 
                     {/* Render node signal effects */}
-                    {renderNodes.filter((n) => !n.hidden && n.role !== "none").map((n) => (
+                    {visibleSignalNodes.map((n) => (
                         signalMap[n.id] && (
                             <NodeSignals
                                 key={`sig-${n.id}`}
@@ -6173,6 +10215,321 @@ export default function Interactive3DNodeShowcase() {
                     ))}
                 </Canvas>
             </div>
+
+            {/* Merge modal */}
+            {mergeOpen && (
+                <div
+                    style={{
+                        position: "fixed",
+                        inset: 0,
+                        background: "rgba(0,0,0,0.62)",
+                        display: "grid",
+                        placeItems: "center",
+                        zIndex: 1100,
+                    }}
+                    onMouseDown={() => {
+                        // click outside closes
+                        setMergeOpen(false);
+                    }}
+                >
+                    <div
+                        onMouseDown={(e) => e.stopPropagation()}
+                        style={{
+                            width: 860,
+                            maxWidth: "94vw",
+                            background: "#0f1524",
+                            border: "1px solid rgba(255,255,255,0.14)",
+                            borderRadius: 16,
+                            boxShadow: "0 28px 80px rgba(0,0,0,0.55)",
+                            color: "#fff",
+                            overflow: "hidden",
+                        }}
+                    >
+                        <div
+                            style={{
+                                padding: 16,
+                                borderBottom: "1px solid rgba(255,255,255,0.12)",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: 12,
+                            }}
+                        >
+                            <div style={{ fontWeight: 900, letterSpacing: 0.2 }}>Merge Backup</div>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                <Btn
+                                    onClick={() => mergeFileRef.current?.click()}
+                                    title="Select a backup .zip or .json"
+                                    variant={mergeIncoming ? "ghost" : "primary"}
+                                >
+                                    {mergeIncoming ? "Change file" : "Select file"}
+                                </Btn>
+                                <Btn onClick={() => setMergeOpen(false)}>Close</Btn>
+                            </div>
+                        </div>
+
+                        <input
+                            ref={mergeFileRef}
+                            type="file"
+                            accept=".zip,.json"
+                            style={{ position: "absolute", left: -9999, width: 1, height: 1, opacity: 0 }}
+                            onChange={async (e) => {
+                                const f = e.target.files?.[0];
+                                if (!f) return;
+                                try {
+                                    await loadMergeFile(f);
+                                } catch (err) {
+                                    console.error("Merge file load failed", err);
+                                    alert("Could not read merge file: " + (err?.message || String(err)));
+                                }
+                                e.target.value = "";
+                            }}
+                        />
+
+                        <div style={{ padding: 16, display: "grid", gap: 14 }}>
+                            {!mergeIncoming && (
+                                <div
+                                    style={{
+                                        padding: 14,
+                                        border: "1px dashed rgba(148,163,184,0.55)",
+                                        borderRadius: 14,
+                                        background: "rgba(2,6,23,0.35)",
+                                        color: "rgba(226,238,255,0.9)",
+                                    }}
+                                >
+                                    Select a backup export first. We’ll preview what would be added/changed and then you can merge.
+                                </div>
+                            )}
+
+                            {mergePlan && (
+                                <div
+                                    style={{
+                                        padding: 14,
+                                        border: "1px solid rgba(255,255,255,0.12)",
+                                        borderRadius: 14,
+                                        background: "rgba(2,6,23,0.35)",
+                                        display: "grid",
+                                        gap: 10,
+                                    }}
+                                >
+                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                                        <div style={{ opacity: 0.92 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.75 }}>File</div>
+                                            <div style={{ fontWeight: 700 }}>{mergePlan.meta.fileName}</div>
+                                        </div>
+                                        <div style={{ opacity: 0.92 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.75 }}>Project</div>
+                                            <div style={{ fontWeight: 700 }}>{mergePlan.meta.projectName || "(unnamed)"}</div>
+                                        </div>
+                                        <div style={{ opacity: 0.92 }}>
+                                            <div style={{ fontSize: 12, opacity: 0.75 }}>Format</div>
+                                            <div style={{ fontWeight: 700 }}>{mergePlan.meta.version ? `v${mergePlan.meta.version}` : "(legacy)"}</div>
+                                        </div>
+                                    </div>
+
+                                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                        <MergeToggle
+                                            label={mergeFlags.addNew ? "Add additions ✓" : "Add additions"}
+                                            on={mergeFlags.addNew}
+                                            onClick={() => setMergeFlags((f) => ({ ...f, addNew: !f.addNew }))}
+                                            title="Add items that don’t exist in the current canvas"
+                                            style={{ minWidth: 124 }}
+                                        />
+                                        <MergeToggle
+                                            label={mergeFlags.overwrite ? "Overwrite changes ✓" : "Overwrite changes"}
+                                            on={mergeFlags.overwrite}
+                                            onClick={() => setMergeFlags((f) => ({ ...f, overwrite: !f.overwrite }))}
+                                            title="Overwrite existing items that differ"
+                                            style={{ minWidth: 148 }}
+                                        />
+                                        <span style={{ fontSize: 12, opacity: 0.75, alignSelf: "center" }}>
+                                            Identical values are always skipped.
+                                        </span>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div style={{ display: "grid", gap: 10 }}>
+                                <div style={{ fontSize: 12, opacity: 0.8, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase" }}>
+                                    What to merge
+                                </div>
+                                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                    <MergeToggle label="Graph" on={mergeOptions.graph} onClick={() => setMergeOptions((o) => ({ ...o, graph: !o.graph }))} title="Rooms / Nodes / Links" style={{ minWidth: 70 }} />
+                                    <MergeToggle label="Decks" on={mergeOptions.decks} onClick={() => setMergeOptions((o) => ({ ...o, decks: !o.decks }))} title="Deck definitions" style={{ minWidth: 70 }} />
+                                    <MergeToggle label="Groups" on={mergeOptions.groups} onClick={() => setMergeOptions((o) => ({ ...o, groups: !o.groups }))} title="Groups" style={{ minWidth: 74 }} />
+                                    <MergeToggle label="Actions" on={mergeOptions.actions} onClick={() => setMergeOptions((o) => ({ ...o, actions: !o.actions }))} title="Actions" style={{ minWidth: 74 }} />
+                                    <MergeToggle label="Pictures" on={mergeOptions.pictures} onClick={() => setMergeOptions((o) => ({ ...o, pictures: !o.pictures }))} title="Reference pictures" style={{ minWidth: 82 }} />
+                                    <MergeToggle label="Settings" on={mergeOptions.settings} onClick={() => setMergeOptions((o) => ({ ...o, settings: !o.settings }))} title="View, editor, camera, link defaults" style={{ minWidth: 82 }} />
+                                    <MergeToggle label="HUD" on={mergeOptions.hud} onClick={() => setMergeOptions((o) => ({ ...o, hud: !o.hud }))} title="Bottom HUD layout/styles" style={{ minWidth: 64 }} />
+                                    <MergeToggle label="Prefs" on={mergeOptions.prefs} onClick={() => setMergeOptions((o) => ({ ...o, prefs: !o.prefs }))} title="epic3d.* localStorage prefs" style={{ minWidth: 64 }} />
+                                    <MergeToggle label="Products" on={mergeOptions.products} onClick={() => setMergeOptions((o) => ({ ...o, products: !o.products }))} title="Product DB" style={{ minWidth: 82 }} />
+                                    <MergeToggle label="Model" on={mergeOptions.model} onClick={() => setMergeOptions((o) => ({ ...o, model: !o.model }))} title="Bundled model / static model id" style={{ minWidth: 70 }} />
+                                </div>
+                            </div>
+
+                            {mergePlan && (
+                                <div
+                                    style={{
+                                        padding: 14,
+                                        border: "1px solid rgba(255,255,255,0.12)",
+                                        borderRadius: 14,
+                                        background: "rgba(2,6,23,0.35)",
+                                        display: "grid",
+                                        gap: 10,
+                                    }}
+                                >
+                                    <div style={{ fontSize: 12, opacity: 0.8, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase" }}>
+                                        Preview
+                                    </div>
+
+                                    {mergePlan.graph && (
+                                        <div style={{ display: "grid", gap: 6 }}>
+                                            <div style={{ fontWeight: 800, opacity: 0.92 }}>Graph</div>
+                                            {(["rooms", "nodes", "links"]).map((k) => {
+                                                const d = mergePlan.graph[k];
+                                                const willAdd = mergeFlags.addNew ? d.added : 0;
+                                                const willOverwrite = mergeFlags.overwrite ? d.changed : 0;
+                                                return (
+                                                    <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                                        <span style={{ opacity: 0.9, textTransform: "capitalize" }}>{k}</span>
+                                                        <span style={{ opacity: 0.85 }}>
+                                                            incoming {d.totalIncoming} · same {d.same} · changed {d.changed} · new {d.added}
+                                                            <span style={{ opacity: 0.75 }}> — will add {willAdd}, overwrite {willOverwrite}</span>
+                                                        </span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+
+                                    {mergePlan.decks && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>Decks</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                incoming {mergePlan.decks.totalIncoming} · same {mergePlan.decks.same} · changed {mergePlan.decks.changed} · new {mergePlan.decks.added}
+                                                <span style={{ opacity: 0.75 }}> — will add {mergeFlags.addNew ? mergePlan.decks.added : 0}, overwrite {mergeFlags.overwrite ? mergePlan.decks.changed : 0}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {mergePlan.groups && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>Groups</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                incoming {mergePlan.groups.totalIncoming} · same {mergePlan.groups.same} · changed {mergePlan.groups.changed} · new {mergePlan.groups.added}
+                                                <span style={{ opacity: 0.75 }}> — will add {mergeFlags.addNew ? mergePlan.groups.added : 0}, overwrite {mergeFlags.overwrite ? mergePlan.groups.changed : 0}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {mergePlan.actions && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>Actions</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                incoming {mergePlan.actions.totalIncoming} · same {mergePlan.actions.same} · changed {mergePlan.actions.changed} · new {mergePlan.actions.added}
+                                                <span style={{ opacity: 0.75 }}> — will add {mergeFlags.addNew ? mergePlan.actions.added : 0}, overwrite {mergeFlags.overwrite ? mergePlan.actions.changed : 0}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {mergePlan.pictures && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>Pictures</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                incoming {mergePlan.pictures.totalIncoming} · same {mergePlan.pictures.same} · changed {mergePlan.pictures.changed} · new {mergePlan.pictures.added}
+                                                <span style={{ opacity: 0.75 }}> — will add {mergeFlags.addNew ? mergePlan.pictures.added : 0}, overwrite {mergeFlags.overwrite ? mergePlan.pictures.changed : 0}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {mergePlan.settings && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>Settings</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                sections changed: {mergePlan.settings.changedCount}
+                                                {mergePlan.settings.changedCount ? (
+                                                    <span style={{ opacity: 0.7 }}> ({mergePlan.settings.changedSections.join(", ")})</span>
+                                                ) : null}
+                                                <span style={{ opacity: 0.75 }}> — will apply {mergeFlags.overwrite ? mergePlan.settings.changedCount : 0}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {mergePlan.hud && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>HUD</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                {mergePlan.hud.hasIncoming ? `changed blocks: ${mergePlan.hud.changedBlocks}/4` : "(no HUD data in file)"}
+                                                <span style={{ opacity: 0.75 }}> — will apply {mergeFlags.overwrite ? mergePlan.hud.changedBlocks : 0}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {mergePlan.prefs && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>Prefs</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                incoming keys {mergePlan.prefs.totalIncoming} · same {mergePlan.prefs.same} · changed {mergePlan.prefs.changed} · new {mergePlan.prefs.added}
+                                                <span style={{ opacity: 0.75 }}> — will add {mergeFlags.addNew ? mergePlan.prefs.added : 0}, overwrite {mergeFlags.overwrite ? mergePlan.prefs.changed : 0}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {mergePlan.products && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>Products</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                incoming {mergePlan.products.totalIncoming} · same {mergePlan.products.same} · changed {mergePlan.products.changed} · new {mergePlan.products.added}
+                                                <span style={{ opacity: 0.75 }}> — will add {mergeFlags.addNew ? mergePlan.products.added : 0}, overwrite {mergeFlags.overwrite ? mergePlan.products.changed : 0}</span>
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {mergePlan.model && (
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13 }}>
+                                            <span style={{ opacity: 0.9 }}>Model</span>
+                                            <span style={{ opacity: 0.85 }}>
+                                                {mergePlan.model.hasBundledModel
+                                                    ? "Bundled model in file"
+                                                    : (mergePlan.model.incomingStaticId ? `Static model: ${mergePlan.model.incomingStaticId}` : "(no model info)")}
+                                                <span style={{ opacity: 0.75 }}> — will apply {(mergeFlags.overwrite || (mergeFlags.addNew && !modelBlob && !modelDescriptor)) ? "maybe" : "no"}</span>
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        <div
+                            style={{
+                                padding: 16,
+                                borderTop: "1px solid rgba(255,255,255,0.12)",
+                                display: "flex",
+                                justifyContent: "flex-end",
+                                gap: 8,
+                            }}
+                        >
+                            <Btn onClick={() => setMergeOpen(false)}>Cancel</Btn>
+                            <Btn
+                                variant="primary"
+                                glow
+                                disabled={!mergeIncoming}
+                                onClick={async () => {
+                                    try {
+                                        await applyMerge();
+                                    } catch (err) {
+                                        console.error("Merge failed", err);
+                                        alert("Merge failed: " + (err?.message || String(err)));
+                                    }
+                                }}
+                                title={!mergeIncoming ? "Select a file first" : "Merge the selected backup"}
+                            >
+                                Merge
+                            </Btn>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Confirm delete modal */}
             {confirm.open && (

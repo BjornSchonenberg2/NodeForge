@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useEffect, useLayoutEffect } from "react";
+import React, { useMemo, useRef, useEffect, useLayoutEffect, useState } from "react";
 import { OrbitControls, TransformControls, Grid, ContactShadows , Environment} from "@react-three/drei";
 import { useThree, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
@@ -10,9 +10,33 @@ import Node3D from "./nodes/Node3D.jsx";
 import Link3D from "./links/Link3D.jsx";
 import InteractionLayer from "./interaction/InteractionLayer.jsx";
 
+
+// -------- Node flow anchor spread (endpoint fan-out) --------
+const __TAU = Math.PI * 2;
+function __hashAngle(id) {
+    const s = String(id ?? "");
+    // FNV-1a 32-bit hash
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+    }
+    const u = (h >>> 0) / 4294967295;
+    return u * __TAU;
+}
+
+function __endpointOffsetXZ(node, idx, count) {
+    const r = Number(node?.flowAnchor ?? node?.anchorSpread ?? 0);
+    if (!Number.isFinite(r) || r <= 0 || !count || count <= 1) return [0, 0, 0];
+    const base = __hashAngle(node?.id || "");
+    const a = base + (idx / count) * __TAU;
+    return [Math.cos(a) * r, 0, Math.sin(a) * r];
+}
+
 export default function SceneInner({
                                        perf,
                                        // scene/model
+
                                        modelDescriptor,
                                        wireframe,
                                        wireOpacity = 1,
@@ -31,6 +55,8 @@ export default function SceneInner({
                                        links = [],
                                        hiddenDeckIds = [],
                                        hiddenRoomIds = [],
+                                       // pictures (for gizmo movement)
+                                       pictureRefs,
                                        // selection
                                        selected,
                                        setSelected,
@@ -44,6 +70,14 @@ export default function SceneInner({
                                        uiHidden = false,
                                        onEntityTransform,
                                        onEntityRotate,
+
+                                       // room pack operations
+                                       onRoomDragPack,
+                                       onRoomDragApply,
+                                       // NEW: room scale-all (room + contents)
+                                       onRoomScalePack,
+                                       onRoomScaleApply,
+
 
                                        // visuals
                                        showLights = true,
@@ -64,6 +98,7 @@ export default function SceneInner({
                                        // placement
                                        placement,
                                        onPlace,
+                                       multiPivotOverride,
 
                                        // animation toggle
                                        animate = true,
@@ -81,6 +116,35 @@ export default function SceneInner({
     const nodeMap = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
     const selectedNode = selected?.type === "node" ? nodeMap[selected?.id] : null;
     const selectedRoom = selected?.type === "room" ? rooms.find((r) => r.id === selected?.id) : null;
+    const selectedPictureId = selected?.type === "picture" ? selected?.id : null;
+
+    // Pictures are rendered outside this component; their refs may not be ready on the same render.
+    // Resolve the picture object asynchronously (next frame) so the gizmo can attach reliably.
+    const [pictureTarget, setPictureTarget] = useState(null);
+    useEffect(() => {
+        if (!selectedPictureId) {
+            setPictureTarget(null);
+            return;
+        }
+        let cancelled = false;
+        let raf = 0;
+        let tries = 0;
+        const resolve = () => {
+            if (cancelled) return;
+            tries += 1;
+            const obj = pictureRefs?.current?.[selectedPictureId]?.current || null;
+            if (obj) {
+                setPictureTarget(obj);
+                return;
+            }
+            if (tries < 12) raf = requestAnimationFrame(resolve);
+        };
+        raf = requestAnimationFrame(resolve);
+        return () => {
+            cancelled = true;
+            if (raf) cancelAnimationFrame(raf);
+        };
+    }, [selectedPictureId, pictureRefs]);
     const hiddenDeck = useMemo(() => new Set(hiddenDeckIds), [hiddenDeckIds]);
     const hiddenRooms = useMemo(() => new Set(hiddenRoomIds), [hiddenRoomIds]);
     // Bridge: prefer wireStroke prop; otherwise derive from legacy wireReveal UI
@@ -164,6 +228,42 @@ export default function SceneInner({
 // Use demo links only if none were provided via props
     const allLinks = useMemo(() => (links && links.length ? links : demoLinks), [links, demoLinks]);
 
+    // Per-node link slot indices (stable) used for flow anchor spreading at endpoints
+    const linkSlots = useMemo(() => {
+        const outBy = new Map();
+        const inBy = new Map();
+        (allLinks || []).forEach((l) => {
+            if (!l || !l.id) return;
+            const f = l.from;
+            const t = l.to;
+            if (f != null) {
+                if (!outBy.has(f)) outBy.set(f, []);
+                outBy.get(f).push(l.id);
+            }
+            if (t != null) {
+                if (!inBy.has(t)) inBy.set(t, []);
+                inBy.get(t).push(l.id);
+            }
+        });
+
+        const out = new Map();
+        const inn = new Map();
+
+        outBy.forEach((ids) => {
+            ids.sort();
+            const count = ids.length || 1;
+            ids.forEach((id, idx) => out.set(id, { idx, count }));
+        });
+
+        inBy.forEach((ids) => {
+            ids.sort();
+            const count = ids.length || 1;
+            ids.forEach((id, idx) => inn.set(id, { idx, count }));
+        });
+
+        return { out, inn };
+    }, [allLinks]);
+
     // ---------- drei controls & camera ----------
     const tcRef = useRef();
     const controlsRef = useRef();
@@ -180,16 +280,16 @@ export default function SceneInner({
             zoomToCursor: true,
 
             // NEW: smooth scroll-zoom tuning
-            scrollImpulse: 0.05,   // how strong each scroll tick is (higher = further)
+            scrollImpulse: 0.01,   // how strong each scroll tick is (higher = further)
             velLambda: 10,         // how fast zoom velocity decays (higher = snappier)
-            maxZoomVel: 100        // cap on zoom velocity (world units / second)
+            maxZoomVel: 20        // cap on zoom velocity (world units / second)
         },
 
         fly: {
             lambda: 16,
             speedMin: 0.1,
             speedMax: 200,
-            baseSpeed: 6,
+            baseSpeed: 30,
             sprintMult: 3,
             verticalMult: 1.0,
             adjustRate: 1.2,
@@ -431,9 +531,41 @@ export default function SceneInner({
 // WASD/QE keys + speed adjust keys (+ / - and numpad add/sub)
     const keys = useRef(new Set());
     useEffect(() => {
-        const down = (e) => { if (!isTyping() && !e.altKey) keys.current.add(e.code); };
-        const up   = (e) => { keys.current.delete(e.code); };
+        const bumpSpeed = (mult) => {
+            const f = CFG.current.fly;
+            const cur = s.current.flySpeedTarget ?? s.current.flySpeed ?? f.baseSpeed;
+            let next = cur * mult;
+            next = THREE.MathUtils.clamp(next, f.speedMin, f.speedMax);
+            s.current.flySpeedTarget = next;
+            // snap immediately so both WASD and wheel feel responsive
+            s.current.flySpeed = next;
+        };
+
+        const down = (e) => {
+            if (isTyping() || e.altKey) return;
+            // Don't hijack browser zoom shortcuts
+            if (e.ctrlKey || e.metaKey) return;
+
+            const code = e.code;
+
+            const isPlus = code === "Equal" || code === "NumpadAdd" || e.key === "+";
+            const isMinus = code === "Minus" || code === "NumpadSubtract" || e.key === "-";
+
+            if ((isPlus || isMinus) && !e.repeat) {
+                e.preventDefault();
+                // Shift = bigger step
+                const step = e.shiftKey ? 1.35 : 1.15;
+                bumpSpeed(isPlus ? step : 1 / step);
+                return;
+            }
+
+            keys.current.add(code);
+        };
+
+        const up = (e) => { keys.current.delete(e.code); };
+
         const clearOnFocus = () => { if (isTyping()) keys.current.clear(); };
+
         window.addEventListener("keydown", down);
         window.addEventListener("keyup", up);
         window.addEventListener("focusin", clearOnFocus);
@@ -752,26 +884,10 @@ export default function SceneInner({
 
 
 
-        // --- Speed adjust keys (+ / -) ---
+        // --- Fly speed smoothing (speed target is adjusted by +/- key presses) ---
         {
             const f = CFG.current.fly;
-            const plusHeld = keys.current.has("Equal") || keys.current.has("NumpadAdd");       // '+' (or '=' key) & numpad
-            const minusHeld = keys.current.has("Minus") || keys.current.has("NumpadSubtract");  // '-' & numpad
-
             let target = s.current.flySpeedTarget ?? f.baseSpeed;
-
-            if (!isTyping()) {
-                if (plusHeld) {
-                    // multiplicative growth while held
-                    target *= (1 + f.adjustRate * dt);
-                }
-                if (minusHeld) {
-                    // multiplicative shrink while held
-                    target /= (1 + f.adjustRate * dt);
-                }
-            }
-
-            // clamp and smooth
             target = THREE.MathUtils.clamp(target, f.speedMin, f.speedMax);
             s.current.flySpeedTarget = target;
             s.current.flySpeed = dampScalar(s.current.flySpeed ?? target, target, f.speedSmooth, dt);
@@ -816,17 +932,6 @@ export default function SceneInner({
     });
 
     // gizmo dragging guard
-    useEffect(() => {
-        if (!tcRef.current) return;
-        const onDrag = (e) => {
-            const dragging = !!e.value;
-            dragState?.set?.(dragging);
-            if (missGuardRef) missGuardRef.current = performance.now();
-        };
-        tcRef.current.addEventListener("dragging-changed", onDrag);
-        return () => tcRef.current?.removeEventListener("dragging-changed", onDrag);
-    }, [dragState, missGuardRef]);
-
     // when hiding model, clear ref so it doesn't raycast
     useEffect(() => {
         if (!showModel && modelRef) modelRef.current = null;
@@ -852,12 +957,42 @@ export default function SceneInner({
             ? (placement?.snap ?? 0)    // unit steps
             : undefined;
 // ----- Multi-move support -----
+    // NOTE: Multi-move is driven via a virtual pivot (the selection centroid).
+    // The parent component already contains a stabilizer that snapshots all selected
+    // positions and applies a single delta. We delegate to it by emitting a single
+    // transform event for a "pivot" target (instead of per-entity incremental deltas).
     const multiRef = useRef(new THREE.Object3D());
+    const roomScaleRef = useRef(new THREE.Object3D());
     const lastPos = useRef(new THREE.Vector3());
 
 // Use refs so the "don't-sync pivot while dragging" guard flips immediately.
 // (React state can lag a frame, which is enough to cause huge deltas.)
     const tcDraggingRef = useRef(false);
+
+    // Keep latest selection/mode for TransformControls drag start/end hooks without re-registering listeners.
+    const tcDragCtxRef = useRef(null);
+
+    // NOTE: the "dragging-changed" listener must be attached *after* TransformControls mounts.
+    // TransformControls is conditional; if we attach the listener while tcRef.current is null,
+    // the effect won't re-run, and our pack snapshots (scale/translate) never get taken.
+
+    // Align room-scale proxy to the selected room (so scaling happens in room-local axes)
+    useEffect(() => {
+        const o = roomScaleRef.current;
+        if (!o) return;
+
+        if (selectedRoom && transformMode === "scale" && !selectedRoom.locked) {
+            const c = selectedRoom.center || [0, 0, 0];
+            const rot = selectedRoom.rotation || [0, 0, 0];
+
+            o.position.set(c[0] || 0, c[1] || 0, c[2] || 0);
+            o.rotation.set(rot[0] || 0, rot[1] || 0, rot[2] || 0);
+
+            // Proxy scale is managed by TransformControls; we reset it on drag start/end.
+            o.updateMatrixWorld();
+        }
+    }, [selectedRoom?.id, selectedRoom?.center, selectedRoom?.rotation, selectedRoom?.locked, transformMode]);
+
 
 // Stable multi-drag snapshot (baseline pivot + start positions for each selected entity)
     const multiDragRef = useRef({
@@ -1031,12 +1166,36 @@ export default function SceneInner({
 
 
     const multiCentroid = useMemo(() => {
+        const pos = multiPivotOverride?.pos;
+        if (Array.isArray(pos) && pos.length >= 3 && [pos[0], pos[1], pos[2]].every(Number.isFinite)) {
+            return new THREE.Vector3(pos[0], pos[1], pos[2]);
+        }
+
         if (!multiPositions.length) return null;
         const s = new THREE.Vector3();
         multiPositions.forEach((v) => s.add(v));
         s.multiplyScalar(1 / multiPositions.length);
         return s;
-    }, [multiPositions]);
+    }, [
+        multiPositions,
+        multiPivotOverride?.pos?.[0],
+        multiPivotOverride?.pos?.[1],
+        multiPivotOverride?.pos?.[2],
+    ]);
+
+
+
+    // Refresh drag context each render (used by TransformControls 'dragging-changed')
+    tcDragCtxRef.current = {
+        transformMode,
+        selectedRoom,
+        uniqueSelectedMulti,
+        multiCentroid,
+        onRoomDragPack,
+        onRoomScalePack,
+        onEntityTransform,
+        onEntityRotate,
+    };
 
     useLayoutEffect(() => {
         if (!multiCentroid) return;
@@ -1048,6 +1207,8 @@ export default function SceneInner({
         if (![multiCentroid.x, multiCentroid.y, multiCentroid.z].every(Number.isFinite)) return;
 
         multiRef.current.position.copy(multiCentroid);
+        multiRef.current.rotation.set(0, 0, 0);
+
         lastPos.current.copy(multiCentroid);
     }, [multiCentroid?.x, multiCentroid?.y, multiCentroid?.z, dragState?.active]);
 
@@ -1091,25 +1252,117 @@ export default function SceneInner({
 
         // ----- Single room (only if not locked) -----
         if (selectedRoom?.id && !selectedRoom.locked) {
+            if (transformMode === "scale") return roomScaleRef.current;
             return roomRefs.current[selectedRoom.id]?.current || null;
+        }
+
+        // ----- Single picture (gizmo translate) -----
+        if (selectedPictureId) {
+            return pictureTarget;
         }
 
         return null;
     }, [
         roomOperatorMode,
         moveMode,
+        transformMode,
         selectedMulti,
         selectedBreakpoint?.linkId,
         selectedBreakpoint?.index,
         selectedNode?.id,
         selectedRoom?.id,
+        selectedPictureId,
         rooms,
+        pictureRefs,
+        pictureTarget,
     ]);
+
+    // Attach TransformControls dragging hooks *after* it mounts.
+    // (TransformControls is conditional; if tcRef.current is null when an effect runs,
+    //  we must re-run once the control exists, otherwise pack snapshots never happen.)
+    const tcEnabled = !!(moveMode && !roomOperatorMode && tcTarget);
+    useEffect(() => {
+        if (!tcEnabled) return;
+
+        const tc = tcRef.current;
+        if (!tc) return;
+
+        const onDrag = (e) => {
+            const dragging = !!e?.value;
+
+            // Always mirror the drag flag for the parent (used to disable raycasting).
+            dragState?.set?.(dragging);
+
+            // Run our own start/end hooks if the component props aren't firing.
+            const ctx = tcDragCtxRef.current || {};
+            const o = tcRef.current?.object;
+
+            if (dragging && !tcDraggingRef.current) {
+                tcDraggingRef.current = true;
+
+                // Single-room translate: snapshot room + its contents so children move together
+                if (ctx.transformMode === "translate" && ctx.selectedRoom && !ctx.selectedRoom.locked) {
+                    const rr = roomRefs.current?.[ctx.selectedRoom.id]?.current || null;
+                    if (o && rr && o === rr) ctx.onRoomDragPack?.(ctx.selectedRoom);
+                }
+
+                // Single-room scale: snapshot room + contents baseline
+                if (ctx.transformMode === "scale" && ctx.selectedRoom && !ctx.selectedRoom.locked) {
+                    if (o && o === roomScaleRef.current) {
+                        o.scale.set(1, 1, 1);
+                        o.updateMatrixWorld();
+                        ctx.onRoomScalePack?.(ctx.selectedRoom.id);
+                    }
+                }
+
+                // Multi-move pivot init (prevents first-delta "jump")
+                const multiCount = ctx.uniqueSelectedMulti?.length || 0;
+                if (o && o === multiRef.current && multiCount > 1) {
+                    const mc = ctx.multiCentroid;
+                    if (mc && Number.isFinite(mc.x) && Number.isFinite(mc.y) && Number.isFinite(mc.z)) {
+                        o.position.copy(mc);
+                    }
+                    lastPos.current.copy(o.position);
+
+                    ctx.onEntityTransform?.({ type: "pivot", id: "__pivot__" }, [o.position.x, o.position.y, o.position.z]);
+                    if (ctx.transformMode === "rotate") {
+                        ctx.onEntityRotate?.({ type: "pivot", id: "__pivot__" }, [o.rotation.x, o.rotation.y, o.rotation.z]);
+                    }
+                }
+            } else if (!dragging && tcDraggingRef.current) {
+                tcDraggingRef.current = false;
+                multiDragRef.current.active = false;
+
+                // Reset room-scale proxy so the next drag starts from identity
+                if (roomScaleRef.current) {
+                    roomScaleRef.current.scale.set(1, 1, 1);
+                    roomScaleRef.current.updateMatrixWorld();
+                }
+            }
+
+            if (missGuardRef) missGuardRef.current = performance.now();
+        };
+
+        tc.addEventListener("dragging-changed", onDrag);
+        return () => {
+            tc.removeEventListener("dragging-changed", onDrag);
+        };
+    }, [tcEnabled, dragState, missGuardRef]);
 
 
 
     return (
         <>
+            {/*
+              Hidden scene anchors used by TransformControls.
+              These MUST be part of the scene graph so their matrixWorld stays valid;
+              otherwise TransformControls can output NaN / huge jumps for "virtual" objects
+              (which looks like selections flying away or resetting to the center).
+            */}
+            <primitive object={multiRef.current} visible={false} />
+            <primitive object={bpRef.current} visible={false} />
+            <primitive object={roomScaleRef.current} visible={false} />
+
             {/* Global lighting */}
             {showLights ? (
                 <>
@@ -1181,6 +1434,8 @@ export default function SceneInner({
                         dragging={dragState.active}
                         selected={(selected?.type === "room" && selected.id === r.id) || selectedMultiSet.has(`room:${r.id}`)}
                         onPointerDown={(id, e) => {
+                            const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                            if (!isLeft) return;
                             // ---------- EXCLUSIVE SELECTION MODE ----------
                             // If a node is currently selected, do NOT allow rooms to be selected.
                             if (selected?.type === "node") return;
@@ -1232,6 +1487,8 @@ export default function SceneInner({
 
                         selected={(selected?.type === "node" && selected.id === n.id) || selectedMultiSet.has(`node:${n.id}`)}
                         onPointerDown={(id, e) => {
+                            const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                            if (!isLeft) return;
                             if (dragState?.active) return;
                             if (onNodePointerDown) onNodePointerDown(id, e);
                             else setSelected?.({ type: "node", id });
@@ -1258,12 +1515,38 @@ export default function SceneInner({
                 const a = nodeMap[l.from];
                 const b = nodeMap[l.to];
                 if (!a || !b) return null;
-                // ... your established / hidden checks ...
+                const aHidden =
+                    (a.deckId && hiddenDeck.has(a.deckId)) ||
+                    (a.roomId && hiddenRooms.has(a.roomId));
+                const bHidden =
+                    (b.deckId && hiddenDeck.has(b.deckId)) ||
+                    (b.roomId && hiddenRooms.has(b.roomId));
+                if (aHidden || bHidden) return null;
+
+                const outSlot = linkSlots.out.get(l.id) || { idx: 0, count: 1 };
+                const inSlot = linkSlots.inn.get(l.id) || { idx: 0, count: 1 };
+
+                const ao = __endpointOffsetXZ(a, outSlot.idx, outSlot.count);
+                const bo = __endpointOffsetXZ(b, inSlot.idx, inSlot.count);
+
+                const aPos = a.position || [0, 0, 0];
+                const bPos = b.position || [0, 0, 0];
+
+                const start = [
+                    (aPos[0] || 0) + ao[0],
+                    (aPos[1] || 0) + ao[1],
+                    (aPos[2] || 0) + ao[2],
+                ];
+                const end = [
+                    (bPos[0] || 0) + bo[0],
+                    (bPos[1] || 0) + bo[1],
+                    (bPos[2] || 0) + bo[2],
+                ];
 
                 const points = [
-                    a.position,
+                    start,
                     ...(Array.isArray(l.breakpoints) ? l.breakpoints : []),
-                    b.position,
+                    end,
                 ];
                 if (points.length < 2) return null;
 
@@ -1277,18 +1560,53 @@ export default function SceneInner({
 
                 const isSelected = selected?.type === "link" && selected.id === l.id;
 
+                // 👉 NEW: for animated/curve styles, optionally treat breakpoints as ONE continuous path
+                const curveStyles = new Set(["sweep", "particles", "wavy", "icons", "epic"]);
+                const curvePathMode = l.pathMode ?? l.sweep?.pathMode ?? "auto"; // "auto" | "single" | "segments"
+                const wantSinglePath =
+                    segCount > 1 &&
+                    curveStyles.has(l.style) &&
+                    curvePathMode !== "segments" &&
+                    (curvePathMode === "single" || curvePathMode === "auto");
+
+                if (wantSinglePath) {
+                    return (
+                        <Link3D
+                            key={`${l.id}-path`}
+                            link={l}
+                            from={start}
+                            to={end}
+                            points={points}
+                            cableOffsets={cableOffsets}
+                            selected={isSelected}
+                            onPointerDown={(e) => {
+                                const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                                if (!isLeft) return;
+                                e.stopPropagation();
+                                setSelected?.({ type: "link", id: l.id });
+                            }}
+                            animate={animate}
+                        />
+                    );
+                }
+
+                // Legacy / per-segment rendering (still used for solid/cable/dashed etc)
                 return points.slice(0, -1).map((p, idx) => (
                     <Link3D
                         key={`${l.id}-seg-${idx}`}
                         link={l}
                         from={p}
                         to={points[idx + 1]}
-                        // NEW:
                         segmentIndex={idx}
                         segmentCount={segCount}
                         cableOffsets={cableOffsets}
                         selected={isSelected}
-                        onPointerDown={() => setSelected?.({ type: "link", id: l.id })}
+                        onPointerDown={(e) => {
+                            const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+                            if (!isLeft) return;
+                            e.stopPropagation();
+                            setSelected?.({ type: "link", id: l.id });
+                        }}
                         animate={animate}
                     />
                 ));
@@ -1302,36 +1620,50 @@ export default function SceneInner({
                 <TransformControls
                     ref={tcRef}
                     object={tcTarget}
-                    mode={transformMode}
+                    mode={selectedPictureId ? "translate" : transformMode}
                     onDragStart={() => {
                         tcDraggingRef.current = true;
                         dragState?.set?.(true);
 
                         const o = tcRef.current?.object;
+
+                        // Single-room translate: snapshot room + its contents so children move together
+                        if (transformMode === "translate" && selectedRoom && !selectedRoom.locked) {
+                            const rr = roomRefs.current?.[selectedRoom.id]?.current || null;
+                            if (o && rr && o === rr) onRoomDragPack?.(selectedRoom);
+                        }
+
+                        // Single-room scale: snapshot room + contents baseline
+                        if (transformMode === "scale" && selectedRoom && !selectedRoom.locked && o === roomScaleRef.current) {
+                            // ensure proxy starts clean
+                            o.scale.set(1, 1, 1);
+                            o.updateMatrixWorld();
+                            onRoomScalePack?.(selectedRoom.id);
+                        }
                         const multiCount = uniqueSelectedMulti?.length || 0;
 
-                        // Build a stable snapshot for multi-drag.
+                        // Multi-move: snap the pivot to the latest centroid BEFORE we lock out centroid syncing.
+                        // This prevents the classic "first-delta jump" (teleport/reset-to-center) when the user
+                        // clicks "Move all" and drags immediately.
                         if (o && o === multiRef.current && multiCount > 1) {
-                            const starts = new Map();
-
-                            uniqueSelectedMulti.forEach((it) => {
-                                if (it.type === "node") {
-                                    const n = nodeMap[it.id];
-                                    if (Array.isArray(n?.position)) starts.set(`node:${it.id}`, [...n.position]);
-                                } else if (it.type === "room") {
-                                    const r0 = rooms.find((rr) => rr.id === it.id);
-                                    if (r0 && !r0.locked && Array.isArray(r0.center)) starts.set(`room:${it.id}`, [...r0.center]);
-                                }
-                            });
-
-                            multiDragRef.current.active = true;
-                            multiDragRef.current.baseline.copy(o.position);
-                            multiDragRef.current.starts = starts;
-
-                            // keep legacy lastPos in sync (fallback)
+                            if (multiCentroid &&
+                                Number.isFinite(multiCentroid.x) &&
+                                Number.isFinite(multiCentroid.y) &&
+                                Number.isFinite(multiCentroid.z)
+                            ) {
+                                o.position.copy(multiCentroid);
+                            }
                             lastPos.current.copy(o.position);
-                        } else {
-                            multiDragRef.current.active = false;
+
+                            // Initialize the parent's multi-move snapshot (dx=0 on start).
+                            onEntityTransform?.({ type: "pivot", id: "__pivot__" }, [o.position.x, o.position.y, o.position.z]);
+
+                            // If rotating, also init rotation snapshot (so the parent can compute a delta from a stable baseline).
+                            if (transformMode === "rotate") {
+                                onEntityRotate?.({ type: "pivot", id: "__pivot__" }, [o.rotation.x, o.rotation.y, o.rotation.z]);
+                            }
+
+                            if (missGuardRef) missGuardRef.current = performance.now();
                         }
                     }}
 
@@ -1339,6 +1671,13 @@ export default function SceneInner({
                         tcDraggingRef.current = false;
                         dragState?.set?.(false);
                         multiDragRef.current.active = false;
+
+                        // Reset room-scale proxy so the next drag starts from identity
+                        if (roomScaleRef.current) {
+                            roomScaleRef.current.scale.set(1, 1, 1);
+                            roomScaleRef.current.updateMatrixWorld();
+                        }
+
                         if (missGuardRef) missGuardRef.current = performance.now();
                     }}
 
@@ -1346,7 +1685,7 @@ export default function SceneInner({
                     rotationSnap={rSnap}
                     scaleSnap={sSnap}
                     size={1.0}
-                    space="world"
+                    space={transformMode === "scale" ? "local" : "world"}
                     onMouseDown={stop}
                     onMouseUp={stop}
                     onPointerDown={stop}
@@ -1358,39 +1697,21 @@ export default function SceneInner({
                         const p = obj.position;
                         const r = obj.rotation;
 
-                        // 1) Multi-move centroid
+                        // 1) Multi-move centroid (group pivot)
+                        // IMPORTANT: Delegate to the parent stabilizer by sending a single "pivot" transform.
+                        // Doing per-entity incremental deltas here can easily produce a huge first-delta and
+                        // make everything "fly" off-screen or reset toward origin.
                         if ((selectedMulti?.length || 0) > 1 && obj === multiRef.current) {
-                            const dx = p.x - lastPos.current.x;
-                            const dy = p.y - lastPos.current.y;
-                            const dz = p.z - lastPos.current.z;
-                            lastPos.current.set(p.x, p.y, p.z);
-
-                            selectedMulti.forEach((it) => {
-                                if (it.type === "node") {
-                                    const n = nodeMap[it.id];
-                                    if (!n || !Array.isArray(n.position)) return;
-                                    const np = [
-                                        n.position[0] + dx,
-                                        n.position[1] + dy,
-                                        n.position[2] + dz,
-                                    ];
-                                    onEntityTransform?.({ type: "node", id: it.id }, np);
-                                } else if (it.type === "room") {
-                                    const r0 = rooms.find((rr) => rr.id === it.id);
-                                    if (!r0 || r0.locked || !Array.isArray(r0.center)) return;
-                                    const rp = [
-                                        r0.center[0] + dx,
-                                        r0.center[1] + dy,
-                                        r0.center[2] + dz,
-                                    ];
-                                    onEntityTransform?.({ type: "room", id: it.id }, rp);
-                                }
-
-                            });
-
+                            if (transformMode === "rotate") {
+                                onEntityRotate?.({ type: "pivot", id: "__pivot__" }, [r.x, r.y, r.z]);
+                            } else {
+                                lastPos.current.set(p.x, p.y, p.z); // keep in sync for any legacy/fallback paths
+                                onEntityTransform?.({ type: "pivot", id: "__pivot__" }, [p.x, p.y, p.z]);
+                            }
                             if (missGuardRef) missGuardRef.current = performance.now();
                             return;
                         }
+
 
                         // 2) Single breakpoint – handle this BEFORE node/room
                         if (selectedBreakpoint && obj === bpRef.current) {
@@ -1403,7 +1724,27 @@ export default function SceneInner({
                             return;
                         }
 
-                        // 3) Single node / room
+                        // 3) Single picture – translate only
+                        if (selectedPictureId && pictureTarget && obj === pictureTarget) {
+                            onEntityTransform?.(
+                                { type: "picture", id: selectedPictureId },
+                                [p.x, p.y, p.z],
+                            );
+                            if (missGuardRef) missGuardRef.current = performance.now();
+                            return;
+                        }
+
+                        // 4) Single node / room
+                        // 3.5) Single room scale proxy (scale room + contents)
+                        if (transformMode === "scale" && selectedRoom && !selectedRoom.locked && obj === roomScaleRef.current) {
+                            const s = obj.scale;
+                            onRoomScaleApply?.(selectedRoom.id, [s.x, s.y, s.z]);
+                            if (missGuardRef) missGuardRef.current = performance.now();
+                            return;
+                        }
+
+
+                        // 4) Single node / room
                         if (selectedNode) {
                             onEntityTransform?.(
                                 { type: "node", id: selectedNode.id },
@@ -1414,14 +1755,19 @@ export default function SceneInner({
                                 [r.x, r.y, r.z],
                             );
                         } else if (selectedRoom && !selectedRoom.locked) {
-                            onEntityTransform?.(
-                                { type: "room", id: selectedRoom.id },
-                                [p.x, p.y, p.z],
-                            );
-                            onEntityRotate?.(
-                                { type: "room", id: selectedRoom.id },
-                                [r.x, r.y, r.z],
-                            );
+                            if (transformMode === "translate") {
+                                // Move room + its contents as a pack (keeps nodes in place within the room)
+                                onRoomDragApply?.(selectedRoom.id, [p.x, p.y, p.z]);
+                            } else {
+                                onEntityTransform?.(
+                                    { type: "room", id: selectedRoom.id },
+                                    [p.x, p.y, p.z],
+                                );
+                                onEntityRotate?.(
+                                    { type: "room", id: selectedRoom.id },
+                                    [r.x, r.y, r.z],
+                                );
+                            }
                         }
 
 
@@ -1481,6 +1827,7 @@ export default function SceneInner({
                 snap={placement?.snap ?? 0.25}
                 onPlace={onPlace}
                 modelRef={modelRef}
+                roomDrawMode={placement?.roomDrawMode || "single"}
             />
         </>
     );
