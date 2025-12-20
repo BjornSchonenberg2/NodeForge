@@ -833,7 +833,7 @@ const TopBar = React.memo(function TopBar({ ctx, shadowsOn, setShadowsOn, uiStar
                                 textOverflow: "ellipsis",
                             }}
                         >
-                            Node Forge 1.5
+                            Node Forge 2.0
                         </div>
                         <div
                             style={{
