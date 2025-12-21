@@ -5,12 +5,13 @@ import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { v4 as uuid } from "uuid";
 
-import { Html, Text, StatsGl, PerformanceMonitor, AdaptiveDpr, Preload, useTexture } from "@react-three/drei";
+import { Html, Text, StatsGl, PerformanceMonitor, AdaptiveDpr, Preload } from "@react-three/drei";
 
 import SceneInner from "./SceneInner.jsx";
 
 import logoImg from "./data/logo/logo.png";
 import { STATIC_MODELS } from "./data/models/registry";
+import { LOCAL_PICTURES, resolveLocalPictureSrc, LOCAL_PICTURES_DEBUG } from "./data/pictures/registry";
 
 import ProductManager from "./ui/ProductManager.jsx";
 import { Btn, IconBtn, Input, Select, Checkbox, Slider, Panel } from "./ui/Controls.jsx";
@@ -336,22 +337,263 @@ function SmoothNumberInputNullable({ value, min, max, step, onCommit, style, tit
 
 
 
-const FloorplanPicturePlane = React.forwardRef(function FloorplanPicturePlane(
+
+// ------------------------------------------------------------
+// Picture rendering safety:
+// - Local library images are webpack URLs (often /static/media/...)
+// - Imported images are data: URLs
+// Drei's useTexture will throw if given an empty/invalid URL.
+// We therefore validate src and skip rendering invalid pictures (and mark them hidden in state elsewhere).
+// ------------------------------------------------------------
+const isValidPictureSrc = (src) => {
+    if (!src || typeof src !== "string") return false;
+    if (/^(blob:|https?:)/i.test(src)) return true;
+    if (src.startsWith("/")) return true;
+    if (src.startsWith("static/")) return true;
+    if (src.startsWith("data:image/")) {
+        const idx = src.indexOf(",");
+        return idx >= 0 && src.length > idx + 8; // require some payload
+    }
+    // Anything else (relative) is still okay for webpack in dev
+    return true;
+}
+
+const getRuntimeBasePathForAssets = (() => {
+    let cached = null;
+    return () => {
+        if (cached !== null) return cached;
+        try {
+            const scripts = Array.from(document?.scripts || []);
+            const src =
+                scripts.map((s) => s?.src).find((u) => typeof u === "string" && u.includes("/static/js/")) ||
+                scripts.map((s) => s?.src).find((u) => typeof u === "string" && u.includes("/static/")) ||
+                "";
+            if (!src) {
+                cached = "";
+                return cached;
+            }
+            const u = new URL(src, window.location.href);
+            const p = u.pathname || "";
+            const idx = p.indexOf("/static/");
+            cached = idx > 0 ? p.slice(0, idx) : "";
+            return cached;
+        } catch {
+            cached = "";
+            return cached;
+        }
+    };
+})();
+
+const isProbablyWindowsPath = (s) =>
+    typeof s === "string" && (/^[a-zA-Z]:[\\/]/.test(s) || s.includes("\\"));
+
+const normalizePictureKey = (val) => {
+    if (!val || typeof val !== "string") return "";
+    let s = String(val).trim();
+
+    // Strip common URL-ish prefixes that are not meaningful as keys.
+    s = s.replace(/^file:\/\//i, "");
+
+    // If it's clearly a URL/data/blob, it's not a local-key.
+    if (/^(data:|blob:|https?:)/i.test(s)) return "";
+
+    // Windows / POSIX path basename
+    const parts = s.split(/[\\/]/).filter(Boolean);
+    let base = parts.length ? parts[parts.length - 1] : s;
+
+    // "./foo.png" -> "foo.png"
+    base = base.replace(/^\.\//, "");
+    return base;
+};
+
+const pictureSrcCandidates = (src) => {
+    const out = [];
+    const add = (u) => {
+        if (!u || typeof u !== "string") return;
+        if (!out.includes(u)) out.push(u);
+    };
+
+    if (!src || typeof src !== "string") return out;
+    const raw = String(src);
+
+    // If the src is a Windows path or a bare filename like "LowerDeckPSD.png",
+    // browsers cannot load it directly. Try resolving to a bundled local picture.
+    const key = normalizePictureKey(raw);
+    const looksLikeImageKey = !!(key && /\.(png|jpe?g|webp|gif|svg)$/i.test(key));
+    const resolvedLocal = looksLikeImageKey ? resolveLocalPictureSrc(key) : "";
+
+    const rawIsWindows = isProbablyWindowsPath(raw);
+    const rawIsBareFilename = looksLikeImageKey && !raw.includes("/") && !raw.includes("\\") && !raw.startsWith("static/") && !raw.startsWith("/");
+
+    // Prefer the resolved local URL first when the raw value is very unlikely to load.
+    if ((rawIsWindows || rawIsBareFilename) && resolvedLocal) add(resolvedLocal);
+
+    add(raw);
+
+    if (!(rawIsWindows || rawIsBareFilename) && resolvedLocal) add(resolvedLocal);
+
+    if (/^(data:|blob:|https?:)/i.test(raw)) return out;
+
+    const pubEnv = String(process.env.PUBLIC_URL || "").replace(/\/$/, "");
+    const base = pubEnv || (typeof window !== "undefined" ? getRuntimeBasePathForAssets() : "");
+
+    // If this is a plain CRA /static URL but the app is mounted under a base (e.g. /NodeForge), try prefixed.
+    if (raw.startsWith("/static/") && base) add(`${base}${raw}`);
+
+    // If we already have a base-prefixed /static URL, also try the root /static variant.
+    if (base && raw.startsWith(`${base}/static/`)) add(raw.slice(base.length));
+
+    // Bare "static/..." forms
+    if (raw.startsWith("static/")) {
+        add(`/${raw}`);
+        if (base) add(`${base}/${raw}`);
+    }
+
+    // If it's an absolute path but not /static, we can still try base-prefix in case routes mount under base.
+    if (raw.startsWith("/") && base && !raw.startsWith(`${base}/`)) add(`${base}${raw}`);
+
+    return out;
+};
+
+
+
+// ------------------------------------------------------------
+// Thumbnail + URL resolving helpers
+// - React re-renders can overwrite DOM-mutation fallbacks, so we keep fallback src in component state.
+// - When adding a local picture, we resolve to the first working URL candidate so the placed picture works reliably.
+// ------------------------------------------------------------
+const __pictureUrlResolveCache = new Map();
+
+const probeImageUrl = (url) =>
+    new Promise((resolve) => {
+        try {
+            const img = new Image();
+            img.onload = () => resolve(true);
+            img.onerror = () => resolve(false);
+            img.src = url;
+        } catch {
+            resolve(false);
+        }
+    });
+
+async function resolveWorkingPictureSrc(src) {
+    if (!src || typeof src !== "string") return "";
+    const key = String(src);
+    if (__pictureUrlResolveCache.has(key)) return __pictureUrlResolveCache.get(key);
+
+    const cands = pictureSrcCandidates(key);
+    for (const u of cands) {
+        if (!u) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const ok = await probeImageUrl(u);
+        if (ok) {
+            __pictureUrlResolveCache.set(key, u);
+            return u;
+        }
+    }
+
+    __pictureUrlResolveCache.set(key, key);
+    return key;
+}
+
+const SmartThumb = React.memo(function SmartThumb({ src, alt, style }) {
+    const baseSrc = typeof src === "string" ? src : "";
+    const cands = useMemo(() => pictureSrcCandidates(baseSrc), [baseSrc]);
+
+    const [cur, setCur] = useState(() => cands[0] || baseSrc);
+    const [failed, setFailed] = useState(false);
+    const idxRef = useRef(0);
+
+    useEffect(() => {
+        idxRef.current = 0;
+        setFailed(false);
+        setCur(cands[0] || baseSrc);
+    }, [baseSrc, cands]);
+
+    const onError = useCallback(() => {
+        const idx = idxRef.current;
+        if (idx < cands.length - 1) {
+            idxRef.current = idx + 1;
+            setCur(cands[idx + 1]);
+        } else {
+            setFailed(true);
+        }
+    }, [cands]);
+
+    return (
+        <img
+            src={cur}
+            alt={alt || ""}
+            onError={onError}
+            style={{
+                maxWidth: "100%",
+                maxHeight: "100%",
+                objectFit: "contain",
+                opacity: failed ? 0.25 : 1,
+                ...(style || {}),
+            }}
+        />
+    );
+});
+
+
+const FloorplanPicturePlaneInner = React.forwardRef(function FloorplanPicturePlaneInner(
     { id, src, scale = 1, opacity = 1, rotX = 0, rotY = 0, rotZ = 0, x = 0, y = 0.01, z = 0, order = 0, onAspect },
     ref,
 ) {
-    const tex = useTexture(src);
+    const candidates = useMemo(() => pictureSrcCandidates(src), [src]);
+    const [tex, setTex] = useState(null);
 
     useEffect(() => {
-        if (!tex) return;
-        try {
-            tex.colorSpace = THREE.SRGBColorSpace;
-        } catch {}
-        tex.wrapS = THREE.ClampToEdgeWrapping;
-        tex.wrapT = THREE.ClampToEdgeWrapping;
-        tex.anisotropy = 8;
-        tex.needsUpdate = true;
-    }, [tex]);
+        let cancelled = false;
+        let currentTex = null;
+
+        // dispose previous texture held in state
+        setTex((prev) => {
+            try { prev?.dispose?.(); } catch {}
+            return null;
+        });
+
+        const loader = new THREE.TextureLoader();
+        let idx = 0;
+
+        const tryLoad = () => {
+            if (cancelled) return;
+            const url = candidates[idx++];
+            if (!url) return;
+
+            loader.load(
+                url,
+                (t) => {
+                    if (cancelled) {
+                        try { t?.dispose?.(); } catch {}
+                        return;
+                    }
+                    currentTex = t;
+                    try {
+                        t.colorSpace = THREE.SRGBColorSpace;
+                    } catch {}
+                    t.wrapS = THREE.ClampToEdgeWrapping;
+                    t.wrapT = THREE.ClampToEdgeWrapping;
+                    t.anisotropy = 8;
+                    t.needsUpdate = true;
+                    setTex(t);
+                },
+                undefined,
+                () => {
+                    // try next candidate
+                    tryLoad();
+                },
+            );
+        };
+
+        tryLoad();
+
+        return () => {
+            cancelled = true;
+            try { currentTex?.dispose?.(); } catch {}
+        };
+    }, [candidates]);
 
     const aspect = useMemo(() => {
         const img = tex?.image;
@@ -368,12 +610,12 @@ const FloorplanPicturePlane = React.forwardRef(function FloorplanPicturePlane(
         onAspect(id, aspect);
     }, [onAspect, id, aspect]);
 
+    if (!tex) return null;
+
     const s = clamp(Number(scale) || 1, 0.01, 500);
     const w = FLOORPLAN_BASE_SIZE * s;
     const h = w * aspect;
 
-    // Rotation is user-facing degrees. Base orientation lays the image flat on XZ.
-    // Tip: rotY rotates on the ground (most common). rotX/rotZ will tilt the plane.
     const rx = THREE.MathUtils.degToRad(Number(rotX) || 0);
     const ry = THREE.MathUtils.degToRad(Number(rotY) || 0);
     const rz = THREE.MathUtils.degToRad(Number(rotZ) || 0);
@@ -381,12 +623,13 @@ const FloorplanPicturePlane = React.forwardRef(function FloorplanPicturePlane(
         const op = Number(opacity);
         return Number.isFinite(op) ? clamp(op, 0, 1) : 1;
     })();
+
     return (
         <mesh
             ref={ref}
             rotation={[-Math.PI / 2 + rx, ry, rz]}
             position={[Number(x) || 0, Number(y) || 0, Number(z) || 0]}
-            raycast={() => null} // do NOT block scene interactions
+            raycast={() => null}
         >
             <planeGeometry args={[w, h]} />
             <meshBasicMaterial
@@ -404,11 +647,17 @@ const FloorplanPicturePlane = React.forwardRef(function FloorplanPicturePlane(
     );
 });
 
+const FloorplanPicturePlane = React.forwardRef(function FloorplanPicturePlane(props, ref) {
+    const src = props?.src;
+    if (!isValidPictureSrc(src)) return null;
+    return <FloorplanPicturePlaneInner {...props} ref={ref} />;
+});
+
 function FloorplanPictures({ pictures, pictureRefs, onAspect }) {
     const visible = useMemo(
         () =>
             (Array.isArray(pictures) ? pictures : [])
-                .filter((p) => p && p.src && p.visible)
+                .filter((p) => p && p.src && isValidPictureSrc(p.src) && p.visible)
                 .map((p, i) => ({ ...p, _i: i })),
         [pictures],
     );
@@ -564,6 +813,14 @@ const TopBar = React.memo(function TopBar({ ctx, shadowsOn, setShadowsOn, uiStar
         setPicturesOpen,
         importedPictures,
         setImportedPictures,
+        picturesTab,
+        setPicturesTab,
+        picturesSearch,
+        setPicturesSearch,
+        localPicturesSearch,
+        setLocalPicturesSearch,
+        localPictures,
+        addLocalPicture,
         picturesInputRef,
         importPicturesFromFiles,
         setPictureVisible,
@@ -833,7 +1090,7 @@ const TopBar = React.memo(function TopBar({ ctx, shadowsOn, setShadowsOn, uiStar
                                 textOverflow: "ellipsis",
                             }}
                         >
-                            Node Forge 2.0
+                            Node Forge 3.0
                         </div>
                         <div
                             style={{
@@ -1223,49 +1480,91 @@ const TopBar = React.memo(function TopBar({ ctx, shadowsOn, setShadowsOn, uiStar
                         onPointerMoveCapture={(e) => e.stopPropagation()}
                         onPointerDown={(e) => e.stopPropagation()}
                     >
-                        <Panel title="Imported pictures">
+                        <Panel title="Pictures">
                             <div style={{ display: "grid", gap: 10, minWidth: 520, maxWidth: 820 }}>
-                                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                                    <Btn
-                                        variant="primary"
-                                        onClick={() => picturesInputRef.current?.click()}
-                                        style={{ height: 28, padding: "0 10px" }}
-                                        title="Add one or more images"
-                                    >
-                                        Add…
-                                    </Btn>
-                                    <Btn
-                                        variant="ghost"
-                                        onClick={() => setImportedPictures([])}
-                                        disabled={!importedPictures?.length}
-                                        style={{ height: 28, padding: "0 10px" }}
-                                        title="Remove all imported pictures"
-                                    >
-                                        Clear all
-                                    </Btn>
-                                    <span style={{ fontSize: 11, opacity: 0.75 }}>
-                                        Tip: pictures are flat ground planes. Enable <b>Solid</b> to use them as decks (nodes/rooms can't go below). Use <b>Move</b> to drag via gizmo.
-                                    </span>
+                                <div style={{ display: "grid", gap: 8 }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                        <Btn
+                                            variant="primary"
+                                            onClick={() => picturesInputRef.current?.click()}
+                                            style={{ height: 28, padding: "0 10px" }}
+                                            title="Import one or more images from disk"
+                                        >
+                                            Import (Disk)…
+                                        </Btn>
 
-                                    <input
-                                        ref={picturesInputRef}
-                                        type="file"
-                                        accept="image/*"
-                                        multiple
-                                        style={{
-                                            position: "absolute",
-                                            left: -9999,
-                                            width: 1,
-                                            height: 1,
-                                            opacity: 0,
-                                        }}
-                                        onChange={async (e) => {
-                                            const files = e.target.files;
-                                            if (!files || !files.length) return;
-                                            await importPicturesFromFiles(files);
-                                            e.target.value = "";
-                                        }}
-                                    />
+                                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                            <Btn
+                                                variant={picturesTab === "placed" ? "primary" : "ghost"}
+                                                onClick={() => setPicturesTab("placed")}
+                                                style={{ height: 28, padding: "0 10px" }}
+                                                title="Pictures already placed in this scene"
+                                            >
+                                                Placed{importedPictures?.length ? ` (${importedPictures.length})` : ""}
+                                            </Btn>
+                                            <Btn
+                                                variant={picturesTab === "local" ? "primary" : "ghost"}
+                                                onClick={() => setPicturesTab("local")}
+                                                style={{ height: 28, padding: "0 10px" }}
+                                                title="Add from the bundled library (src/data/pictures)"
+                                            >
+                                                Local add{localPictures?.length ? ` (${localPictures.length})` : ""}
+                                            </Btn>
+                                        </div>
+
+                                        <Btn
+                                            variant="ghost"
+                                            onClick={() => setImportedPictures([])}
+                                            disabled={!importedPictures?.length}
+                                            style={{ height: 28, padding: "0 10px" }}
+                                            title="Remove all placed pictures"
+                                        >
+                                            Clear all
+                                        </Btn>
+
+                                        <div style={{ flex: 1 }} />
+
+                                        <Input
+                                            value={picturesTab === "local" ? localPicturesSearch : picturesSearch}
+                                            onChange={(e) => {
+                                                const v = e?.target?.value ?? "";
+                                                if (picturesTab === "local") setLocalPicturesSearch(v);
+                                                else setPicturesSearch(v);
+                                            }}
+                                            placeholder={picturesTab === "local" ? "Search local library…" : "Search placed pictures…"}
+                                            style={{ width: 240, height: 28 }}
+                                        />
+
+                                        <input
+                                            ref={picturesInputRef}
+                                            type="file"
+                                            accept="image/*"
+                                            multiple
+                                            style={{
+                                                position: "absolute",
+                                                left: -9999,
+                                                width: 1,
+                                                height: 1,
+                                                opacity: 0,
+                                            }}
+                                            onChange={async (e) => {
+                                                const files = e.target.files;
+                                                if (!files || !files.length) return;
+                                                await importPicturesFromFiles(files);
+                                                e.target.value = "";
+                                                setPicturesTab("placed");
+                                            }}
+                                        />
+                                    </div>
+
+                                    <div style={{ fontSize: 11, opacity: 0.75 }}>
+                                        Tip: pictures are flat ground planes. Enable <b>Solid</b> to use them as decks (nodes/rooms can't go below). Use <b>Move</b> to drag via gizmo.
+                                        {picturesTab === "local" ? (
+                                            <span style={{ marginLeft: 8, opacity: 0.75 }}>
+                (If you add files to <b>src/data/pictures</b>, restart the dev server to refresh the library.)
+            </span>
+                                        ) : null}
+                                    </div>
                                 </div>
 
                                 <div
@@ -1277,326 +1576,446 @@ const TopBar = React.memo(function TopBar({ ctx, shadowsOn, setShadowsOn, uiStar
                                         paddingRight: 6,
                                     }}
                                 >
-                                    {!importedPictures?.length ? (
-                                        <div style={{ fontSize: 12, opacity: 0.75 }}>
-                                            No pictures imported yet.
+
+                                    {picturesTab === "local" ? (
+                                        <div style={{ display: "grid", gap: 10 }}>
+                                            {!localPictures?.length ? (
+                                                <div style={{ fontSize: 12, opacity: 0.75, display: "grid", gap: 6 }}>
+                                                    <div>
+                                                        No local pictures found in <b>src/data/pictures</b>.
+                                                    </div>
+                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>
+                                                        Debug: webpack discovered <b>{LOCAL_PICTURES_DEBUG?.webpackCount ?? 0}</b> files
+                                                        {LOCAL_PICTURES_DEBUG?.webpackSample?.length ? (
+                                                            <span>
+                                                                {" "}({LOCAL_PICTURES_DEBUG.webpackSample.slice(0, 3).join(", ")}…)
+                                                            </span>
+                                                        ) : null}
+                                                        {" "}— vite discovered <b>{LOCAL_PICTURES_DEBUG?.viteCount ?? 0}</b> files
+                                                        {" "}— resolved <b>{LOCAL_PICTURES_DEBUG?.resolvedCount ?? (localPictures?.length ?? 0)}</b> usable.
+                                                    </div>
+                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>
+                                                        If webpackCount is 0, CRA is not seeing the images at build time. Double-check the files are under
+                                                        {" "}<b>src/data/pictures</b> (not <b>public</b> and not outside <b>src</b>), and restart the dev server.
+                                                    </div>
+                                                    {(LOCAL_PICTURES_DEBUG?.webpackCount ?? 0) > 0 && (LOCAL_PICTURES_DEBUG?.resolvedCount ?? 0) === 0 ? (
+                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>
+                                                            Webpack sees files, but none resolved to a usable URL. This usually means the asset loader is exporting a
+                                                            non-string shape; update <b>src/data/pictures/registry.js</b> to extract URLs from <code>default</code>/<code>src</code>/<code>url</code>.
+                                                        </div>
+                                                    ) : null}
+                                                </div>
+                                            ) : (
+                                                <div
+                                                    style={{
+                                                        display: "grid",
+                                                        gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+                                                        gap: 10,
+                                                    }}
+                                                >
+                                                    {localPictures
+                                                        .filter((it) => {
+                                                            const q = (localPicturesSearch || "").trim().toLowerCase();
+                                                            if (!q) return true;
+                                                            return String(it?.name || "").toLowerCase().includes(q);
+                                                        })
+                                                        .map((it) => (
+                                                            <div
+                                                                key={it.key}
+                                                                role="button"
+                                                                tabIndex={0}
+                                                                onClick={() => {
+                                                                    void addLocalPicture(it);
+                                                                    setPicturesTab("placed");
+                                                                }}
+                                                                onKeyDown={(e) => {
+                                                                    if (e.key === "Enter" || e.key === " ") {
+                                                                        e.preventDefault();
+                                                                        void addLocalPicture(it);
+                                                                        setPicturesTab("placed");
+                                                                    }
+                                                                }}
+                                                                style={{
+                                                                    cursor: "pointer",
+                                                                    padding: 8,
+                                                                    borderRadius: 12,
+                                                                    border: "1px solid rgba(148,163,184,0.28)",
+                                                                    background: "rgba(10,16,30,0.45)",
+                                                                    display: "grid",
+                                                                    gap: 8,
+                                                                }}
+                                                                title="Click to add to scene"
+                                                            >
+                                                                <div
+                                                                    style={{
+                                                                        height: 90,
+                                                                        borderRadius: 10,
+                                                                        overflow: "hidden",
+                                                                        background: "rgba(2,6,23,0.6)",
+                                                                        display: "flex",
+                                                                        alignItems: "center",
+                                                                        justifyContent: "center",
+                                                                    }}
+                                                                >
+                                                                    <SmartThumb src={it.src} alt={it.name} />
+                                                                </div>
+                                                                <div
+                                                                    style={{
+                                                                        fontSize: 11,
+                                                                        opacity: 0.9,
+                                                                        whiteSpace: "nowrap",
+                                                                        overflow: "hidden",
+                                                                        textOverflow: "ellipsis",
+                                                                    }}
+                                                                >
+                                                                    {it.name}
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                </div>
+                                            )}
                                         </div>
                                     ) : (
-                                        importedPictures
-                                            .slice()
-                                            .reverse()
-                                            .map((p) => {
-                                                const hasClipboard = !!pictureValuesClipboardRef.current;
-                                                const snapNodeId =
-                                                    (selected?.type === "node" && selected.id) ||
-                                                    (Array.isArray(multiSel) ? multiSel.find((it) => it?.type === "node")?.id : null);
-                                                const snapRoomId =
-                                                    (selected?.type === "room" && selected.id) ||
-                                                    (Array.isArray(multiSel) ? multiSel.find((it) => it?.type === "room")?.id : null);
-                                                const snapNode = snapNodeId ? nodes.find((n) => n.id === snapNodeId) : null;
-                                                const snapRoom = snapRoomId ? rooms.find((r) => r.id === snapRoomId) : null;
+                                        !importedPictures?.length ? (
+                                            <div style={{ fontSize: 12, opacity: 0.75 }}>
+                                                No pictures imported yet.
+                                            </div>
+                                        ) : (
+                                            importedPictures
+                                                .slice()
+                                                .filter((p) => {
+                                                    const q = (picturesSearch || "").trim().toLowerCase();
+                                                    if (!q) return true;
+                                                    return String(p?.name || "").toLowerCase().includes(q);
+                                                })
+                                                .reverse()
+                                                .map((p) => {
+                                                    const hasClipboard = !!pictureValuesClipboardRef.current;
+                                                    const snapNodeId =
+                                                        (selected?.type === "node" && selected.id) ||
+                                                        (Array.isArray(multiSel) ? multiSel.find((it) => it?.type === "node")?.id : null);
+                                                    const snapRoomId =
+                                                        (selected?.type === "room" && selected.id) ||
+                                                        (Array.isArray(multiSel) ? multiSel.find((it) => it?.type === "room")?.id : null);
+                                                    const snapNode = snapNodeId ? nodes.find((n) => n.id === snapNodeId) : null;
+                                                    const snapRoom = snapRoomId ? rooms.find((r) => r.id === snapRoomId) : null;
 
-                                                return (
-                                                    <div
-                                                        key={p.id}
-                                                        style={{
-                                                            display: "grid",
-                                                            gridTemplateColumns: "120px 1fr 420px 180px",
-                                                            alignItems: "start",
-                                                            gap: 10,
-                                                            padding: "8px 10px",
-                                                            borderRadius: 10,
-                                                            border: "1px solid rgba(148,163,184,0.35)",
-                                                            background: "rgba(10,16,30,0.55)",
-                                                        }}
-                                                    >
-                                                        <div style={{ display: "grid", gap: 6 }}>
-                                                            <Checkbox
-                                                                checked={!!p.visible}
-                                                                onChange={(v) => setPictureVisible(p.id, v)}
-                                                                label="Show"
-                                                                style={{ fontSize: 11 }}
-                                                            />
-                                                            <Checkbox
-                                                                checked={!!p.solid}
-                                                                onChange={(v) => setPictureSolid(p.id, v)}
-                                                                label="Solid"
-                                                                style={{ fontSize: 11 }}
-                                                                title="When enabled (and Show is on), nodes/rooms can't go below this picture plane"
-                                                            />
-                                                        </div>
-
+                                                    return (
                                                         <div
-                                                            title={p.name}
+                                                            key={p.id}
                                                             style={{
-                                                                overflow: "hidden",
-                                                                textOverflow: "ellipsis",
-                                                                whiteSpace: "nowrap",
-                                                                fontSize: 12,
-                                                                opacity: 0.92,
+                                                                display: "grid",
+                                                                gridTemplateColumns: "120px 1fr 420px 180px",
+                                                                alignItems: "start",
+                                                                gap: 10,
+                                                                padding: "8px 10px",
+                                                                borderRadius: 10,
+                                                                border: "1px solid rgba(148,163,184,0.35)",
+                                                                background: "rgba(10,16,30,0.55)",
                                                             }}
                                                         >
-                                                            {p.name || "(unnamed)"}
-                                                        </div>
+                                                            <div style={{ display: "grid", gap: 6 }}>
 
-                                                        <div style={{ display: "grid", gap: 8 }}>
-                                                            {/* Scale */}
-                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Scale</span>
-                                                                <div style={{ flex: 1, minWidth: 120 }}>
-                                                                    <SmoothRange
-                                                                        min={0.01}
-                                                                        max={500}
-                                                                        step={0.25}
+                                                                <div
+                                                                    style={{
+                                                                        height: 72,
+                                                                        borderRadius: 10,
+                                                                        overflow: "hidden",
+                                                                        background: "rgba(2,6,23,0.55)",
+                                                                        display: "flex",
+                                                                        alignItems: "center",
+                                                                        justifyContent: "center",
+                                                                        border: "1px solid rgba(148,163,184,0.18)",
+                                                                    }}
+                                                                >
+                                                                    <SmartThumb src={p.src} alt={p.name} />
+                                                                </div>
+                                                                <Checkbox
+                                                                    checked={!!p.visible}
+                                                                    onChange={(v) => setPictureVisible(p.id, v)}
+                                                                    label="Show"
+                                                                    style={{ fontSize: 11 }}
+                                                                />
+                                                                <Checkbox
+                                                                    checked={!!p.solid}
+                                                                    onChange={(v) => setPictureSolid(p.id, v)}
+                                                                    label="Solid"
+                                                                    style={{ fontSize: 11 }}
+                                                                    title="When enabled (and Show is on), nodes/rooms can't go below this picture plane"
+                                                                />
+                                                            </div>
+
+                                                            <div
+                                                                title={p.name}
+                                                                style={{
+                                                                    overflow: "hidden",
+                                                                    textOverflow: "ellipsis",
+                                                                    whiteSpace: "nowrap",
+                                                                    fontSize: 12,
+                                                                    opacity: 0.92,
+                                                                }}
+                                                            >
+                                                                {p.name || "(unnamed)"}
+                                                            </div>
+
+                                                            <div style={{ display: "grid", gap: 8 }}>
+                                                                {/* Scale */}
+                                                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                                    <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Scale</span>
+                                                                    <div style={{ flex: 1, minWidth: 120 }}>
+                                                                        <SmoothRange
+                                                                            min={0.01}
+                                                                            max={500}
+                                                                            step={0.25}
+                                                                            value={Number(p.scale) || 1}
+                                                                            onChange={(v) => setPictureScale(p.id, v)}
+                                                                            title="Scale"
+                                                                        />
+                                                                    </div>
+                                                                    <SmoothNumberInput
                                                                         value={Number(p.scale) || 1}
-                                                                        onChange={(v) => setPictureScale(p.id, v)}
+                                                                        step="0.1"
+                                                                        min="0.01"
+                                                                        max="500"
+                                                                        onCommit={(v) => setPictureScale(p.id, v)}
+                                                                        style={{ width: 78, height: 28, textAlign: "center" }}
                                                                         title="Scale"
                                                                     />
                                                                 </div>
-                                                                <SmoothNumberInput
-                                                                    value={Number(p.scale) || 1}
-                                                                    step="0.1"
-                                                                    min="0.01"
-                                                                    max="500"
-                                                                    onCommit={(v) => setPictureScale(p.id, v)}
-                                                                    style={{ width: 78, height: 28, textAlign: "center" }}
-                                                                    title="Scale"
-                                                                />
-                                                            </div>
-                                                            {/* Opacity */}
-                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Opacity</span>
-                                                                <div style={{ flex: 1, minWidth: 120 }}>
-                                                                    <SmoothRange
-                                                                        min={0}
-                                                                        max={1}
-                                                                        step={0.01}
+                                                                {/* Opacity */}
+                                                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                                    <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Opacity</span>
+                                                                    <div style={{ flex: 1, minWidth: 120 }}>
+                                                                        <SmoothRange
+                                                                            min={0}
+                                                                            max={1}
+                                                                            step={0.01}
+                                                                            value={(() => { const op = Number(p.opacity); return Number.isFinite(op) ? clamp(op, 0, 1) : 1; })()}
+                                                                            onChange={(v) => setPictureOpacity(p.id, v)}
+                                                                            title="Opacity"
+                                                                        />
+                                                                    </div>
+                                                                    <SmoothNumberInput
                                                                         value={(() => { const op = Number(p.opacity); return Number.isFinite(op) ? clamp(op, 0, 1) : 1; })()}
-                                                                        onChange={(v) => setPictureOpacity(p.id, v)}
+                                                                        step="0.01"
+                                                                        min="0"
+                                                                        max="1"
+                                                                        onCommit={(v) => setPictureOpacity(p.id, v)}
+                                                                        style={{ width: 78, height: 28, textAlign: "center" }}
                                                                         title="Opacity"
                                                                     />
                                                                 </div>
-                                                                <SmoothNumberInput
-                                                                    value={(() => { const op = Number(p.opacity); return Number.isFinite(op) ? clamp(op, 0, 1) : 1; })()}
-                                                                    step="0.01"
-                                                                    min="0"
-                                                                    max="1"
-                                                                    onCommit={(v) => setPictureOpacity(p.id, v)}
-                                                                    style={{ width: 78, height: 28, textAlign: "center" }}
-                                                                    title="Opacity"
-                                                                />
-                                                            </div>
-                                                            {/* Position XYZ */}
-                                                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Pos</span>
-                                                                <span style={{ fontSize: 11, opacity: 0.7 }}>X</span>
-                                                                <SmoothNumberInput
-                                                                    value={Number(p.x) || 0}
-                                                                    step="0.05"
-                                                                    min="-5000"
-                                                                    max="5000"
-                                                                    onCommit={(v) => setPicturePosition(p.id, { x: v })}
-                                                                    style={{ width: 74, height: 28, textAlign: "center" }}
-                                                                    title="X"
-                                                                />
-                                                                <span style={{ fontSize: 11, opacity: 0.7 }}>Y</span>
-                                                                <SmoothNumberInput
-                                                                    value={Number(p.y) || 0}
-                                                                    step="0.01"
-                                                                    min="-500"
-                                                                    max="500"
-                                                                    onCommit={(v) => setPicturePosition(p.id, { y: v })}
-                                                                    style={{ width: 74, height: 28, textAlign: "center" }}
-                                                                    title="Y"
-                                                                />
-                                                                <span style={{ fontSize: 11, opacity: 0.7 }}>Z</span>
-                                                                <SmoothNumberInput
-                                                                    value={Number(p.z) || 0}
-                                                                    step="0.05"
-                                                                    min="-5000"
-                                                                    max="5000"
-                                                                    onCommit={(v) => setPicturePosition(p.id, { z: v })}
-                                                                    style={{ width: 74, height: 28, textAlign: "center" }}
-                                                                    title="Z"
-                                                                />
-                                                            </div>
-
-                                                            {/* Quick rotate (degrees on Y / yaw) */}
-                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Rotate</span>
-                                                                <div style={{ flex: 1, minWidth: 120 }}>
-                                                                    <SmoothRange
-                                                                        min={-180}
-                                                                        max={180}
-                                                                        step={1}
-                                                                        value={Number(p.rotY) || 0}
-                                                                        onChange={(v) => setPictureRotation(p.id, { rotY: v })}
-                                                                        title="Rotate Y (deg)"
-                                                                    />
-                                                                </div>
-                                                                <SmoothNumberInput
-                                                                    value={Number(p.rotY) || 0}
-                                                                    step="1"
-                                                                    min="-360"
-                                                                    max="360"
-                                                                    onCommit={(v) => setPictureRotation(p.id, { rotY: v })}
-                                                                    style={{ width: 78, height: 28, textAlign: "center" }}
-                                                                    title="Rotation (deg)"
-                                                                />
-                                                            </div>
-
-                                                            {/* Advanced XYZ rotation (degrees) */}
-                                                            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                                                                <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>XYZ</span>
-                                                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                                                {/* Position XYZ */}
+                                                                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                                                    <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Pos</span>
                                                                     <span style={{ fontSize: 11, opacity: 0.7 }}>X</span>
                                                                     <SmoothNumberInput
-                                                                        value={Number(p.rotX) || 0}
-                                                                        step="1"
-                                                                        min="-360"
-                                                                        max="360"
-                                                                        onCommit={(v) => setPictureRotation(p.id, { rotX: v })}
-                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
-                                                                        title="Rotate X (deg)"
+                                                                        value={Number(p.x) || 0}
+                                                                        step="0.05"
+                                                                        min="-5000"
+                                                                        max="5000"
+                                                                        onCommit={(v) => setPicturePosition(p.id, { x: v })}
+                                                                        style={{ width: 74, height: 28, textAlign: "center" }}
+                                                                        title="X"
                                                                     />
                                                                     <span style={{ fontSize: 11, opacity: 0.7 }}>Y</span>
+                                                                    <SmoothNumberInput
+                                                                        value={Number(p.y) || 0}
+                                                                        step="0.01"
+                                                                        min="-500"
+                                                                        max="500"
+                                                                        onCommit={(v) => setPicturePosition(p.id, { y: v })}
+                                                                        style={{ width: 74, height: 28, textAlign: "center" }}
+                                                                        title="Y"
+                                                                    />
+                                                                    <span style={{ fontSize: 11, opacity: 0.7 }}>Z</span>
+                                                                    <SmoothNumberInput
+                                                                        value={Number(p.z) || 0}
+                                                                        step="0.05"
+                                                                        min="-5000"
+                                                                        max="5000"
+                                                                        onCommit={(v) => setPicturePosition(p.id, { z: v })}
+                                                                        style={{ width: 74, height: 28, textAlign: "center" }}
+                                                                        title="Z"
+                                                                    />
+                                                                </div>
+
+                                                                {/* Quick rotate (degrees on Y / yaw) */}
+                                                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                                    <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>Rotate</span>
+                                                                    <div style={{ flex: 1, minWidth: 120 }}>
+                                                                        <SmoothRange
+                                                                            min={-180}
+                                                                            max={180}
+                                                                            step={1}
+                                                                            value={Number(p.rotY) || 0}
+                                                                            onChange={(v) => setPictureRotation(p.id, { rotY: v })}
+                                                                            title="Rotate Y (deg)"
+                                                                        />
+                                                                    </div>
                                                                     <SmoothNumberInput
                                                                         value={Number(p.rotY) || 0}
                                                                         step="1"
                                                                         min="-360"
                                                                         max="360"
                                                                         onCommit={(v) => setPictureRotation(p.id, { rotY: v })}
-                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
-                                                                        title="Rotate Y (deg)"
-                                                                    />
-                                                                    <span style={{ fontSize: 11, opacity: 0.7 }}>Z</span>
-                                                                    <SmoothNumberInput
-                                                                        value={Number(p.rotZ) || 0}
-                                                                        step="1"
-                                                                        min="-360"
-                                                                        max="360"
-                                                                        onCommit={(v) => setPictureRotation(p.id, { rotZ: v })}
-                                                                        style={{ width: 64, height: 28, textAlign: "center" }}
-                                                                        title="Rotate Z (deg)"
+                                                                        style={{ width: 78, height: 28, textAlign: "center" }}
+                                                                        title="Rotation (deg)"
                                                                     />
                                                                 </div>
-                                                                <span style={{ fontSize: 10, opacity: 0.55 }}>(X/Z tilt the plane)</span>
+
+                                                                {/* Advanced XYZ rotation (degrees) */}
+                                                                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                                                    <span style={{ fontSize: 11, opacity: 0.75, minWidth: 46 }}>XYZ</span>
+                                                                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                                                        <span style={{ fontSize: 11, opacity: 0.7 }}>X</span>
+                                                                        <SmoothNumberInput
+                                                                            value={Number(p.rotX) || 0}
+                                                                            step="1"
+                                                                            min="-360"
+                                                                            max="360"
+                                                                            onCommit={(v) => setPictureRotation(p.id, { rotX: v })}
+                                                                            style={{ width: 64, height: 28, textAlign: "center" }}
+                                                                            title="Rotate X (deg)"
+                                                                        />
+                                                                        <span style={{ fontSize: 11, opacity: 0.7 }}>Y</span>
+                                                                        <SmoothNumberInput
+                                                                            value={Number(p.rotY) || 0}
+                                                                            step="1"
+                                                                            min="-360"
+                                                                            max="360"
+                                                                            onCommit={(v) => setPictureRotation(p.id, { rotY: v })}
+                                                                            style={{ width: 64, height: 28, textAlign: "center" }}
+                                                                            title="Rotate Y (deg)"
+                                                                        />
+                                                                        <span style={{ fontSize: 11, opacity: 0.7 }}>Z</span>
+                                                                        <SmoothNumberInput
+                                                                            value={Number(p.rotZ) || 0}
+                                                                            step="1"
+                                                                            min="-360"
+                                                                            max="360"
+                                                                            onCommit={(v) => setPictureRotation(p.id, { rotZ: v })}
+                                                                            style={{ width: 64, height: 28, textAlign: "center" }}
+                                                                            title="Rotate Z (deg)"
+                                                                        />
+                                                                    </div>
+                                                                    <span style={{ fontSize: 10, opacity: 0.55 }}>(X/Z tilt the plane)</span>
+                                                                </div>
+                                                            </div>
+
+                                                            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 6 }}>
+                                                                <Btn
+                                                                    variant="primary"
+                                                                    onClick={() => {
+                                                                        // ensure it exists in scene for gizmo
+                                                                        setPictureVisible(p.id, true);
+                                                                        setSelected({ type: "picture", id: p.id });
+                                                                        setMultiSel([]);
+                                                                        setMode("select");
+                                                                        setMoveMode(true);
+                                                                        setTransformMode("translate");
+                                                                    }}
+                                                                    style={{ height: 28, padding: "0 10px" }}
+                                                                    title="Move this picture with gizmo"
+                                                                >
+                                                                    Move
+                                                                </Btn>
+
+                                                                <Btn
+                                                                    variant="ghost"
+                                                                    onClick={() => deletePicture(p.id)}
+                                                                    style={{ height: 28, padding: "0 10px" }}
+                                                                    title="Delete"
+                                                                >
+                                                                    Del
+                                                                </Btn>
+
+                                                                <Btn
+                                                                    variant="ghost"
+                                                                    disabled={!snapNode}
+                                                                    onClick={() => {
+                                                                        if (!snapNode?.position) return;
+                                                                        setPicturePosition(p.id, { x: snapNode.position[0], z: snapNode.position[2] });
+                                                                        const yaw = Number(snapNode?.rotation?.[1]) || 0;
+                                                                        setPictureRotation(p.id, { rotY: THREE.MathUtils.radToDeg(yaw) });
+                                                                    }}
+                                                                    style={{ height: 28, padding: "0 10px" }}
+                                                                    title="Snap this picture to selected node"
+                                                                >
+                                                                    Snap N
+                                                                </Btn>
+
+                                                                <Btn
+                                                                    variant="ghost"
+                                                                    disabled={!snapRoom}
+                                                                    onClick={() => {
+                                                                        if (!snapRoom?.center) return;
+                                                                        setPicturePosition(p.id, { x: snapRoom.center[0], z: snapRoom.center[2] });
+                                                                        const yaw = Number(snapRoom?.rotation?.[1]) || 0;
+                                                                        setPictureRotation(p.id, { rotY: THREE.MathUtils.radToDeg(yaw) });
+                                                                    }}
+                                                                    style={{ height: 28, padding: "0 10px" }}
+                                                                    title="Snap this picture to selected room"
+                                                                >
+                                                                    Snap R
+                                                                </Btn>
+
+                                                                <Btn
+                                                                    variant="ghost"
+                                                                    onClick={() => {
+                                                                        pictureValuesClipboardRef.current = {
+                                                                            scale: Number(p.scale) || 1,
+                                                                            opacity: (() => { const op = Number(p.opacity); return Number.isFinite(op) ? clamp(op, 0, 1) : 1; })(),
+                                                                            x: Number(p.x) || 0,
+                                                                            y: Number(p.y) || 0,
+                                                                            z: Number(p.z) || 0,
+                                                                            rotX: Number(p.rotX) || 0,
+                                                                            rotY: Number(p.rotY) || 0,
+                                                                            rotZ: Number(p.rotZ) || 0,
+                                                                            solid: !!p.solid,
+                                                                        };
+                                                                        setPictureClipboardTick((t) => t + 1);
+                                                                    }}
+                                                                    style={{ height: 28, padding: "0 10px" }}
+                                                                    title="Copy scale/pos/rot/solid"
+                                                                >
+                                                                    Copy
+                                                                </Btn>
+
+                                                                <Btn
+                                                                    variant="ghost"
+                                                                    disabled={!hasClipboard}
+                                                                    onClick={() => {
+                                                                        const clip = pictureValuesClipboardRef.current;
+                                                                        if (!clip) return;
+                                                                        setImportedPictures((prev) =>
+                                                                            (Array.isArray(prev) ? prev : []).map((pp) =>
+                                                                                pp.id === p.id
+                                                                                    ? {
+                                                                                        ...pp,
+                                                                                        scale: Number(clip.scale) || 1,
+                                                                                        x: Number(clip.x) || 0,
+                                                                                        y: Number(clip.y) || 0,
+                                                                                        z: Number(clip.z) || 0,
+                                                                                        rotX: Number(clip.rotX) || 0,
+                                                                                        rotY: Number(clip.rotY) || 0,
+                                                                                        rotZ: Number(clip.rotZ) || 0,
+                                                                                        solid: !!clip.solid,
+                                                                                    }
+                                                                                    : pp,
+                                                                            ),
+                                                                        );
+                                                                    }}
+                                                                    style={{ height: 28, padding: "0 10px" }}
+                                                                    title="Paste copied values onto this picture"
+                                                                >
+                                                                    Paste
+                                                                </Btn>
                                                             </div>
                                                         </div>
-
-                                                        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 6 }}>
-                                                            <Btn
-                                                                variant="primary"
-                                                                onClick={() => {
-                                                                    // ensure it exists in scene for gizmo
-                                                                    setPictureVisible(p.id, true);
-                                                                    setSelected({ type: "picture", id: p.id });
-                                                                    setMultiSel([]);
-                                                                    setMode("select");
-                                                                    setMoveMode(true);
-                                                                    setTransformMode("translate");
-                                                                }}
-                                                                style={{ height: 28, padding: "0 10px" }}
-                                                                title="Move this picture with gizmo"
-                                                            >
-                                                                Move
-                                                            </Btn>
-
-                                                            <Btn
-                                                                variant="ghost"
-                                                                onClick={() => deletePicture(p.id)}
-                                                                style={{ height: 28, padding: "0 10px" }}
-                                                                title="Delete"
-                                                            >
-                                                                Del
-                                                            </Btn>
-
-                                                            <Btn
-                                                                variant="ghost"
-                                                                disabled={!snapNode}
-                                                                onClick={() => {
-                                                                    if (!snapNode?.position) return;
-                                                                    setPicturePosition(p.id, { x: snapNode.position[0], z: snapNode.position[2] });
-                                                                    const yaw = Number(snapNode?.rotation?.[1]) || 0;
-                                                                    setPictureRotation(p.id, { rotY: THREE.MathUtils.radToDeg(yaw) });
-                                                                }}
-                                                                style={{ height: 28, padding: "0 10px" }}
-                                                                title="Snap this picture to selected node"
-                                                            >
-                                                                Snap N
-                                                            </Btn>
-
-                                                            <Btn
-                                                                variant="ghost"
-                                                                disabled={!snapRoom}
-                                                                onClick={() => {
-                                                                    if (!snapRoom?.center) return;
-                                                                    setPicturePosition(p.id, { x: snapRoom.center[0], z: snapRoom.center[2] });
-                                                                    const yaw = Number(snapRoom?.rotation?.[1]) || 0;
-                                                                    setPictureRotation(p.id, { rotY: THREE.MathUtils.radToDeg(yaw) });
-                                                                }}
-                                                                style={{ height: 28, padding: "0 10px" }}
-                                                                title="Snap this picture to selected room"
-                                                            >
-                                                                Snap R
-                                                            </Btn>
-
-                                                            <Btn
-                                                                variant="ghost"
-                                                                onClick={() => {
-                                                                    pictureValuesClipboardRef.current = {
-                                                                        scale: Number(p.scale) || 1,
-                                                                        opacity: (() => { const op = Number(p.opacity); return Number.isFinite(op) ? clamp(op, 0, 1) : 1; })(),
-                                                                        x: Number(p.x) || 0,
-                                                                        y: Number(p.y) || 0,
-                                                                        z: Number(p.z) || 0,
-                                                                        rotX: Number(p.rotX) || 0,
-                                                                        rotY: Number(p.rotY) || 0,
-                                                                        rotZ: Number(p.rotZ) || 0,
-                                                                        solid: !!p.solid,
-                                                                    };
-                                                                    setPictureClipboardTick((t) => t + 1);
-                                                                }}
-                                                                style={{ height: 28, padding: "0 10px" }}
-                                                                title="Copy scale/pos/rot/solid"
-                                                            >
-                                                                Copy
-                                                            </Btn>
-
-                                                            <Btn
-                                                                variant="ghost"
-                                                                disabled={!hasClipboard}
-                                                                onClick={() => {
-                                                                    const clip = pictureValuesClipboardRef.current;
-                                                                    if (!clip) return;
-                                                                    setImportedPictures((prev) =>
-                                                                        (Array.isArray(prev) ? prev : []).map((pp) =>
-                                                                            pp.id === p.id
-                                                                                ? {
-                                                                                    ...pp,
-                                                                                    scale: Number(clip.scale) || 1,
-                                                                                    x: Number(clip.x) || 0,
-                                                                                    y: Number(clip.y) || 0,
-                                                                                    z: Number(clip.z) || 0,
-                                                                                    rotX: Number(clip.rotX) || 0,
-                                                                                    rotY: Number(clip.rotY) || 0,
-                                                                                    rotZ: Number(clip.rotZ) || 0,
-                                                                                    solid: !!clip.solid,
-                                                                                }
-                                                                                : pp,
-                                                                        ),
-                                                                    );
-                                                                }}
-                                                                style={{ height: 28, padding: "0 10px" }}
-                                                                title="Paste copied values onto this picture"
-                                                            >
-                                                                Paste
-                                                            </Btn>
-                                                        </div>
-                                                    </div>
-                                                );
-                                            })
-                                    )}
+                                                    );
+                                                })
+                                        ))}
                                 </div>
                             </div>
                         </Panel>
@@ -3308,28 +3727,67 @@ export default function Interactive3DNodeShowcase() {
     // One-time normalization for older saved payloads
     // v2 schema adds: x,z,solid,aspect
     useEffect(() => {
+
         setImportedPictures((prev) => {
             const list = Array.isArray(prev) ? prev : [];
-            return list.map((p) => ({
-                ...p,
-                // default to visible ON unless explicitly false
-                visible: p?.visible !== false,
-                solid: !!p?.solid,
-                aspect: Number.isFinite(p?.aspect) && p.aspect > 0 ? p.aspect : 1,
-                scale: Number(p?.scale) || 1,
-                rotX: Number(p?.rotX) || 0,
-                rotY: Number(p?.rotY) || 0,
-                rotZ: Number(p?.rotZ) || 0,
-                // picture position is now real XYZ; older saves only had y
-                x: Number(p?.x) || 0,
-                y: Number(p?.y) || 0.01,
-                z: Number(p?.z) || 0,
-            }));
+            return list.map((p) => {let localKey =
+                p?.localKey ||
+                p?.local_picture_key ||
+                p?.localPictureKey ||
+                p?.localKeyPath ||
+                null;
+
+                const srcStr = typeof p?.src === "string" ? p.src : "";
+                const derivedKey = normalizePictureKey(localKey || srcStr);
+                if (!localKey && derivedKey) localKey = derivedKey;
+                if (localKey) localKey = normalizePictureKey(localKey) || localKey;
+
+                let src = srcStr;
+
+// Raw Windows filesystem paths can never be loaded by the browser. If we can't map them to a bundled
+// local picture, treat them as invalid so the scene doesn't silently "render nothing".
+                const srcLooksWindows = isProbablyWindowsPath(srcStr);
+
+                if (localKey) {
+                    const resolved = resolveLocalPictureSrc(localKey);
+                    if (resolved) src = resolved;
+                    else if (srcLooksWindows) src = "";
+                } else if (srcLooksWindows) {
+                    src = "";
+                }
+
+                // Guard against empty/broken data URLs that would crash drei's useTexture
+                const validSrc = isValidPictureSrc(src);
+
+                return {
+                    ...p,
+                    localKey: localKey || undefined,
+                    src: validSrc ? src : "",
+                    // default to visible ON unless explicitly false, but never render invalid sources
+                    visible: validSrc ? (p?.visible !== false) : false,
+                    solid: !!p?.solid,
+                    aspect: Number.isFinite(p?.aspect) && p.aspect > 0 ? p.aspect : 1,
+                    scale: Number(p?.scale) || 1,
+                    rotX: Number(p?.rotX) || 0,
+                    rotY: Number(p?.rotY) || 0,
+                    rotZ: Number(p?.rotZ) || 0,
+                    // picture position is now real XYZ; older saves only had y
+                    x: Number(p?.x) || 0,
+                    y: Number(p?.y) || 0.01,
+                    z: Number(p?.z) || 0,
+                    opacity: p?.opacity !== undefined ? p.opacity : 1,
+                };
+            });
         });
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     const picturesInputRef = useRef(null);
     const [picturesOpen, setPicturesOpen] = useState(false);
+
+    const [picturesTab, setPicturesTab] = useState("placed"); // "placed" | "local"
+    const [picturesSearch, setPicturesSearch] = useState("");
+    const [localPicturesSearch, setLocalPicturesSearch] = useState("");
+    const localPictures = useMemo(() => LOCAL_PICTURES, []);
 
     // Refs to picture meshes in the scene (used by TransformControls for gizmo movement)
     const pictureRefs = useRef({}); // { [pictureId]: React.RefObject<THREE.Mesh> }
@@ -3400,6 +3858,53 @@ export default function Interactive3DNodeShowcase() {
             return next;
         });
     }, [readFileAsDataURL]);
+
+
+
+
+    const addLocalPicture = useCallback(async (entry) => {
+        const localKeyRaw = entry?.key || entry?.path || entry?.name || "";
+        const localKey = normalizePictureKey(localKeyRaw) || localKeyRaw || "";
+        const resolved = (localKey && resolveLocalPictureSrc(localKey)) || entry?.src || "";
+        const rawSrc = typeof resolved === "string" ? resolved : "";
+
+        if (!isValidPictureSrc(rawSrc)) {
+            // eslint-disable-next-line no-console
+            console.warn("Local picture has invalid src; not adding.", entry);
+            return;
+        }
+
+        // Resolve to a working URL (tries /static, /NodeForge/static, etc.)
+        const best = await resolveWorkingPictureSrc(rawSrc);
+        const src = isValidPictureSrc(best) ? best : rawSrc;
+
+        setImportedPictures((prev) => {
+            const list = Array.isArray(prev) ? prev : [];
+            return [
+                ...list,
+                {
+                    id: uuid(),
+                    name:
+                        entry?.name ||
+                        (localKey ? String(localKey).split("/").pop() : "") ||
+                        `Picture ${list.length + 1}`,
+                    src,
+                    localKey: localKey || undefined,
+                    visible: true,
+                    solid: false,
+                    aspect: 1,
+                    scale: 1,
+                    x: 0,
+                    y: 0.01,
+                    z: 0,
+                    rotX: 0,
+                    rotY: 0,
+                    rotZ: 0,
+                    opacity: 1,
+                },
+            ];
+        });
+    }, [setImportedPictures]);
 
 
 
@@ -9913,6 +10418,14 @@ export default function Interactive3DNodeShowcase() {
         setPicturesOpen,
         importedPictures,
         setImportedPictures,
+        picturesTab,
+        setPicturesTab,
+        picturesSearch,
+        setPicturesSearch,
+        localPicturesSearch,
+        setLocalPicturesSearch,
+        localPictures,
+        addLocalPicture,
         picturesInputRef,
         importPicturesFromFiles,
         setPictureVisible,
