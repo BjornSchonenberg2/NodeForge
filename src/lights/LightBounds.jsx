@@ -1,4 +1,3 @@
-// src/lights/LightBounds.jsx
 import React, { useMemo } from "react";
 import * as THREE from "three";
 
@@ -25,9 +24,10 @@ function dirFromYawPitch(yawDeg = 0, pitchDeg = 0, basis = "forward") {
     const pitch = (Number(pitchDeg) * Math.PI) / 180;
     const e = new THREE.Euler(pitch, yaw, 0, "YXZ");
 
-    const base = String(basis).toLowerCase() === "down"
-        ? new THREE.Vector3(0, -1, 0)
-        : new THREE.Vector3(0, 0, -1);
+    const base =
+        String(basis).toLowerCase() === "down"
+            ? new THREE.Vector3(0, -1, 0)
+            : new THREE.Vector3(0, 0, -1);
 
     return base.applyEuler(e).normalize();
 }
@@ -38,7 +38,6 @@ export default function LightBounds({ node, globalOn }) {
 
     // Show bounds even if disabled (so you can still aim / debug)
     const show = !!(globalOn || light?.showBounds);
-    if (!show) return null;
 
     const isSpot = ltype === "spot";
     const isPoint = ltype === "point";
@@ -55,6 +54,9 @@ export default function LightBounds({ node, globalOn }) {
 
     // Aim visualization
     const targetV = useMemo(() => {
+        // Important: still call hooks even when hidden; just return a cheap value
+        if (!show) return new THREE.Vector3(0, 0, -safeDist);
+
         const t = parseVec3(light?.target ?? light?.pointAt);
         if (t && t.length() > 1e-6) return t;
 
@@ -66,6 +68,7 @@ export default function LightBounds({ node, globalOn }) {
         const aimDist = Math.max(0.001, Number(light?.aimDistance ?? safeDist));
         return dir.multiplyScalar(aimDist);
     }, [
+        show,
         light?.target,
         light?.pointAt,
         light?.yaw,
@@ -90,27 +93,30 @@ export default function LightBounds({ node, globalOn }) {
     }, [dir]);
 
     const coneGeom = useMemo(() => {
-        if (!isSpot) return null;
+        if (!show || !isSpot) return null;
         const height = safeDist;
         const r = Math.max(0.0001, radius);
         const g = new THREE.ConeGeometry(r, height, 32, 1, true);
         // apex at origin
         g.translate(0, -height / 2, 0);
         return g;
-    }, [isSpot, radius, safeDist]);
+    }, [show, isSpot, radius, safeDist]);
 
     const sphereGeom = useMemo(() => {
-        if (!isPoint) return null;
+        if (!show || !isPoint) return null;
         return new THREE.SphereGeometry(safeDist, 24, 16);
-    }, [isPoint, safeDist]);
+    }, [show, isPoint, safeDist]);
 
     const lineGeom = useMemo(() => {
-        if (!(isSpot || isDir)) return null;
+        if (!show || !(isSpot || isDir)) return null;
         const g = new THREE.BufferGeometry();
         const p = new Float32Array([0, 0, 0, targetV.x, targetV.y, targetV.z]);
         g.setAttribute("position", new THREE.BufferAttribute(p, 3));
         return g;
-    }, [isSpot, isDir, targetV.x, targetV.y, targetV.z]);
+    }, [show, isSpot, isDir, targetV.x, targetV.y, targetV.z]);
+
+    // ✅ Early return goes AFTER hooks
+    if (!show) return null;
 
     return (
         <group castShadow={false} receiveShadow={false} renderOrder={9999}>
