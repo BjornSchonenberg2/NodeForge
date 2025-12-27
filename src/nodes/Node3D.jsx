@@ -1,6 +1,7 @@
 // src/nodes/Node3D.jsx
-import React, { memo, forwardRef, useEffect, useMemo, useRef } from "react";
+import React, { memo, forwardRef, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import { useFrame } from "@react-three/fiber";
 import { Billboard, Text, Html } from "@react-three/drei";
 import RackListView from "../ui/RackListView.jsx";
 
@@ -37,13 +38,62 @@ function __getDiskPicsIndex() {
 }
 
 
-function dirFromYawPitch(yawDeg = 0, pitchDeg = -30) {
-    const yaw = (yawDeg * Math.PI) / 180;
-    const pitch = (pitchDeg * Math.PI) / 180;
+
+function dirFromYawPitch(yawDeg = 0, pitchDeg = 0, basis = "forward") {
+    const yaw = (Number(yawDeg) * Math.PI) / 180;
+    const pitch = (Number(pitchDeg) * Math.PI) / 180;
     const e = new THREE.Euler(pitch, yaw, 0, "YXZ");
-    return new THREE.Vector3(0, -1, 0).applyEuler(e).normalize();
+
+    // Historically this app used a DOWN (-Y) basis which made it impossible to aim upward.
+    // New default basis is FORWARD (-Z), which behaves like a conventional yaw/pitch camera.
+    const base = (String(basis).toLowerCase() === "down")
+        ? new THREE.Vector3(0, -1, 0)
+        : new THREE.Vector3(0, 0, -1);
+
+    return base.applyEuler(e).normalize();
 }
 
+function parseVec3(v) {
+    if (!v) return null;
+    // Array form: [x,y,z]
+    if (Array.isArray(v) && v.length >= 3) {
+        const x = Number(v[0]);
+        const y = Number(v[1]);
+        const z = Number(v[2]);
+        if ([x, y, z].every(Number.isFinite)) return [x, y, z];
+        return null;
+    }
+    // Object form: {x,y,z}
+    if (typeof v === "object") {
+        const x = Number(v.x);
+        const y = Number(v.y);
+        const z = Number(v.z);
+        if ([x, y, z].every(Number.isFinite)) return [x, y, z];
+    }
+    return null;
+}
+
+
+
+
+function clamp01(v) {
+    return Math.max(0, Math.min(1, v));
+}
+
+function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function lerpColorString(a, b, t) {
+    try {
+        const c0 = new THREE.Color(a || "#ffffff");
+        const c1 = new THREE.Color(b || a || "#ffffff");
+        c0.lerp(c1, clamp01(t));
+        return `#${c0.getHexString()}`;
+    } catch {
+        return a || "#ffffff";
+    }
+}
 function Dim({ a, b, text }) {
     const geo = useMemo(() => {
         const g = new THREE.BufferGeometry();
@@ -84,6 +134,7 @@ const Node3D = memo(
             productsVersion = 0,
             selected = false,
             onPointerDown,
+            onSwitchPress,
             dragging = false,
 
             // lights
@@ -221,66 +272,140 @@ const Node3D = memo(
 
         /* ---------- lights ---------- */
         const light = node?.light || null;
-        const enabled = light?.enabled ?? true;
-        const ltype = (light?.type || "point").toLowerCase();
+        const ltype = (light?.type || "none").toLowerCase();
+
+        // Important: keep light objects mounted while toggling enabled so SpotLight/DirectionalLight
+        // targets stay correct and don't get stuck pointing at the wrong place.
+        const hasLight = !!(showLights && light && ltype !== "none");
+        const wantsOn = light?.enabled ?? true;
+
         const color = light?.color || "#ffffff";
-        const intensity =
+
+        // Physical units (Canvas sets physicallyCorrectLights=true):
+        // - point/spot intensity: candela (cd)
+        // - directional intensity: lux (lx)
+        const userIntensity =
             light?.intensity ??
-            (ltype === "spot" ? 1200 : ltype === "dir" || ltype === "directional" ? 4 : 800);
-        const distance = light?.distance ?? (ltype === "spot" ? 10 : ltype === "point" ? 8 : 12);
+            (ltype === "spot" ? 1200 : ltype === "dir" || ltype === "directional" ? 30 : 800);
+
+        const distance = light?.distance ?? (ltype === "spot" ? 10 : ltype === "point" ? 8 : 0);
         const decay = light?.decay ?? 2;
-        const angle = light?.angle ?? 0.5;
-        const penumbra = light?.penumbra ?? 0.4;
-        const dir = useMemo(() => {
-            const yaw = light?.yaw ?? 0;
-            const pitch = light?.pitch ?? -30;
-            return dirFromYawPitch(yaw, pitch);
-        }, [light?.yaw, light?.pitch]);
+        const angle = light?.angle ?? 0.6;
+        const penumbra = light?.penumbra ?? 0.35;
 
-        const lightRef = useRef();
-        const targetRef = useRef();
-        const targetPos = useMemo(
-            () => [dir.x * distance, dir.y * distance, dir.z * distance],
-            [dir, distance]
-        );
+        // Optional: auto-compute intensity from a target illuminance (lux) at the target distance.
+        const autoIntensity = light?.autoIntensity ?? (ltype === "spot" || ltype === "point");
+        const targetLux = Number(light?.targetLux ?? (ltype === "dir" || ltype === "directional" ? 30 : 120));
 
+        const computedIntensity = useMemo(() => {
+            const ui = Number(userIntensity) || 0;
+            if (!autoIntensity) return ui;
+            if (ltype === "dir" || ltype === "directional") return Math.max(0, targetLux);
 
-        const targetLux = Number(light?.targetLux ?? 120); // tweak per light if you like
-        const effectiveIntensity = useMemo(() => {
-
-            if (light?.autoIntensity === false) return intensity;
+            // Center-beam approximation: E ≈ I / d^2  =>  I ≈ E * d^2
             const d = Math.max(0.001, Number(distance || 0));
-            const coneFactor = Math.max(0.35, Math.cos(Math.min(Math.max(angle, 0.05), 1.2)));
-            const I = targetLux * d * d;
-            const decayAdjust = Math.max(0.5, Number(decay || 2));
-            const blend = 0.75; // 75% auto, 25% user
-            return (1 - blend) * intensity + blend * (I * coneFactor / decayAdjust);
-        }, [light?.autoIntensity, intensity, targetLux, distance, angle, decay]);
+            return Math.max(0, targetLux) * d * d;
+        }, [autoIntensity, userIntensity, targetLux, distance, ltype]);
 
+        const aimMode = (light?.aimMode || (light?.target != null ? "target" : "yawPitch")).toLowerCase();
 
-        const hasLight = !!(
-            showLights &&
-            enabled &&
-            light &&
-            (ltype === "spot" || ltype === "point" || ltype === "dir" || ltype === "directional")
-        );
+        // Spot/Directional aim target in the node's LOCAL space (relative to the light position)
+        const targetPos = useMemo(() => {
+            const parsed = parseVec3(light?.target ?? light?.pointAt ?? null);
+            if (aimMode === "target" && parsed) return parsed;
+
+            // yaw/pitch fallback (legacy)
+            const yaw = Number(light?.yaw ?? 0);
+            const pitch = Number(light?.pitch ?? 0);
+            const basis = (light?.yawPitchBasis || "forward").toLowerCase();
+            const dir = dirFromYawPitch(yaw, pitch, basis);
+            const distForAim = Math.max(0.001, Number(light?.aimDistance ?? distance ?? 5));
+            return [dir.x * distForAim, dir.y * distForAim, dir.z * distForAim];
+        }, [
+            aimMode,
+            light?.target,
+            light?.pointAt,
+            light?.yaw,
+            light?.pitch,
+            light?.yawPitchBasis,
+            light?.aimDistance,
+            distance,
+        ]);
+
+        // Smooth on/off (dimmer)
+        const fadeIn = Math.max(0, Number(light?.fadeIn ?? 0.25));
+        const fadeOut = Math.max(0, Number(light?.fadeOut ?? 0.25));
+
+        const spotRef = useRef();
+        const pointRef = useRef();
+        const dirRef = useRef();
+        const targetRef = useRef();
+
+        const dimmerRef = useRef(wantsOn ? 1 : 0);
+        const intensityRef = useRef(computedIntensity);
+        useEffect(() => {
+            intensityRef.current = computedIntensity;
+        }, [computedIntensity]);
+
+        const wantsOnRef = useRef(wantsOn);
+        useEffect(() => {
+            const prev = wantsOnRef.current;
+            wantsOnRef.current = wantsOn;
+
+            // Optional integration events
+            if (typeof window !== "undefined" && prev !== wantsOn && node?.id) {
+                try {
+                    window.dispatchEvent(
+                        new CustomEvent(wantsOn ? "epic3d:light-on" : "epic3d:light-off", {
+                            detail: { nodeId: node.id, lightType: ltype },
+                        })
+                    );
+                } catch {}
+            }
+        }, [wantsOn, node?.id, ltype]);
 
         useEffect(() => {
-            const l = lightRef.current;
+            if (!hasLight) return;
+            const l = spotRef.current || dirRef.current;
             const t = targetRef.current;
             if (!l || !t) return;
 
-            // ensure target stays inside the same group and follows yaw/pitch
+            // Keep target inside the same group so it inherits node transforms.
             t.position.set(targetPos[0], targetPos[1], targetPos[2]);
             t.updateMatrixWorld(true);
 
-            // re-attach every time anything relevant changes
             l.target = t;
             l.updateMatrixWorld(true);
             if (l.shadow?.camera?.updateProjectionMatrix) {
                 l.shadow.camera.updateProjectionMatrix();
             }
-        }, [targetPos[0], targetPos[1], targetPos[2]]);
+        }, [hasLight, ltype, targetPos[0], targetPos[1], targetPos[2]]);
+
+        useFrame((_, dt) => {
+            if (!hasLight) return;
+            const l = spotRef.current || pointRef.current || dirRef.current;
+            if (!l) return;
+
+            const desired = wantsOnRef.current ? 1 : 0;
+            const cur = dimmerRef.current;
+            if (cur != desired) {
+                const dur = desired > cur ? fadeIn : fadeOut;
+                if (dur <= 0.0001) {
+                    dimmerRef.current = desired;
+                } else {
+                    const step = dt / dur;
+                    const next = cur + Math.sign(desired - cur) * step;
+                    dimmerRef.current = THREE.MathUtils.clamp(next, 0, 1);
+                }
+            }
+
+            const dim = dimmerRef.current;
+            l.intensity = (Number(intensityRef.current) || 0) * dim;
+        });
+
+        const shadowMapSize = Math.max(256, Math.min(4096, Number(light?.shadowMapSize ?? 1024)));
+        const shadowBias = Number(light?.shadowBias ?? -0.0002);
+        const shadowNormalBias = Number(light?.shadowNormalBias ?? 0.02);
 
         /* ---------- dimension helpers (hooks must be before any return) ---------- */
 
@@ -347,6 +472,142 @@ const Node3D = memo(
         const labelOutlineWidth = labelOutlineOn ? (node?.labelOutlineWidth ?? 0.005) : 0;
         const labelOutlineColor = labelOutlineOn ? (node?.labelOutlineColor ?? "#000000") : "#000000";
 
+        /* ---------- switch (pressable) ---------- */
+        const isSwitch = (node?.kind || "node") === "switch";
+        const sw = node?.switch || {};
+        const swButtonsCountRaw = (sw.buttonsCount ?? (Array.isArray(sw.buttons) ? sw.buttons.length : null) ?? 2);
+        const swButtonsCount = Math.max(1, Math.min(12, Math.floor(Number(swButtonsCountRaw) || 2)));
+
+        const swDims = useMemo(() => {
+            const s = shapeToRender || {};
+            const t = String(s.type || "sphere").toLowerCase();
+            if (t === "switch") {
+                return {
+                    ok: true,
+                    w: Number(s.w ?? 0.9) || 0.9,
+                    h: Number(s.h ?? 0.12) || 0.12,
+                    d: Number(s.d ?? 0.35) || 0.35,
+                };
+            }
+            if (t === "box" || t === "square") {
+                const sc = Array.isArray(s.scale) ? s.scale : [0.6, 0.3, 0.6];
+                return {
+                    ok: true,
+                    w: Number(sc[0] ?? 0.6) || 0.6,
+                    h: Number(sc[1] ?? 0.3) || 0.3,
+                    d: Number(sc[2] ?? 0.6) || 0.6,
+                };
+            }
+            return { ok: false, w: 0, h: 0, d: 0 };
+        }, [shapeToRender]);
+
+        const swPhysical = !!sw.physical;
+        const swPhysicalH = Math.max(0.001, Number(sw.physicalHeight ?? 0.028) || 0.028);
+        const swThickness = swPhysical ? swPhysicalH : 0.01;
+        const swMargin = Math.max(0, Number(sw.margin ?? 0.03) || 0);
+        const swGap = Math.max(0, Number(sw.gap ?? 0.02) || 0);
+        const swPressDepth = Math.max(0, Number(sw.pressDepth ?? 0.014) || 0);
+
+        // ✅ fluid press animation (same timing in + out)
+        const swPressAnimMs = Math.max(40, Math.floor(Number(sw.pressAnimMs ?? sw.pressMs ?? 160) || 160));
+        const swPressHoldMs = Math.max(0, Math.floor(Number(sw.pressHoldMs ?? 60) || 60));
+
+        const [swHoverIdx, setSwHoverIdx] = useState(-1);
+
+        // idx -> press amount [0..1]
+        const [swPressAmtByIdx, setSwPressAmtByIdx] = useState([]);
+        const swPressAnimRef = useRef(new Map()); // idx -> { t0, from, to, dur }
+        const swPressHoldTimeoutsRef = useRef([]);
+
+        useEffect(() => {
+            if (!isSwitch) return;
+            setSwPressAmtByIdx((prev) => {
+                const next = Array(swButtonsCount).fill(0);
+                for (let i = 0; i < Math.min(prev.length, next.length); i++) next[i] = prev[i];
+                return next;
+            });
+        }, [isSwitch, swButtonsCount]);
+
+        useEffect(() => {
+            return () => {
+                try {
+                    swPressHoldTimeoutsRef.current.forEach((t) => t && clearTimeout(t));
+                } catch {}
+                try { document.body.style.cursor = "auto"; } catch {}
+            };
+        }, []);
+
+        const __startPressAnim = (idx, to, durMs) => {
+            setSwPressAmtByIdx((prev) => {
+                const from = prev[idx] ?? 0;
+                swPressAnimRef.current.set(idx, {
+                    t0: performance.now(),
+                    from,
+                    to,
+                    dur: Math.max(1, durMs),
+                });
+                return prev;
+            });
+        };
+
+        useFrame(() => {
+            if (!isSwitch) return;
+            if (swPressAnimRef.current.size === 0) return;
+
+            const now = performance.now();
+
+            setSwPressAmtByIdx((prev) => {
+                let changed = false;
+                const next = prev.slice();
+
+                for (const [idx, a] of swPressAnimRef.current.entries()) {
+                    const t = clamp01((now - a.t0) / a.dur);
+                    const e = easeInOutCubic(t);
+                    const v = a.from + (a.to - a.from) * e;
+                    if (next[idx] !== v) {
+                        next[idx] = v;
+                        changed = true;
+                    }
+                    if (t >= 1) swPressAnimRef.current.delete(idx);
+                }
+
+                return changed ? next : prev;
+            });
+        });
+
+        const swButtonSpecs = useMemo(() => {
+            if (!isSwitch) return [];
+            if (!swDims.ok) return [];
+
+            const count = swButtonsCount;
+            const cols = count <= 3 ? count : count <= 8 ? 2 : 3;
+            const rows = Math.ceil(count / cols);
+
+            const availW = Math.max(0.01, swDims.w - swMargin * 2);
+            const availD = Math.max(0.01, swDims.d - swMargin * 2);
+
+            const cellW = Math.max(0.01, (availW - (cols - 1) * swGap) / cols);
+            const cellD = Math.max(0.01, (availD - (rows - 1) * swGap) / rows);
+
+            const out = [];
+            for (let i = 0; i < count; i++) {
+                const r = Math.floor(i / cols);
+                const c = i % cols;
+
+                const x = -availW * 0.5 + cellW * 0.5 + c * (cellW + swGap);
+                const z = -availD * 0.5 + cellD * 0.5 + r * (cellD + swGap);
+
+                out.push({
+                    idx: i,
+                    x,
+                    z,
+                    w: cellW,
+                    d: cellD,
+                });
+            }
+            return out;
+        }, [isSwitch, swDims, swButtonsCount, swMargin, swGap]);
+
         /* ---------- safe early return (after all hooks) ---------- */
         if (!visible) return null;
 
@@ -379,6 +640,163 @@ const Node3D = memo(
                         <GeometryForShape shape={shapeToRender} />
                         <meshStandardMaterial color={baseColor} roughness={0.35} metalness={0.05} />
                     </mesh>
+                )}
+
+                {/* Switch buttons */}
+                {isSwitch && !shapeHidden && swDims.ok && swButtonSpecs.length > 0 && (
+                    <group position={[0, swDims.h * 0.5 + swThickness * 0.5, 0]}>
+                        {swButtonSpecs.map((b) => {
+                            const btn = (Array.isArray(sw.buttons) ? sw.buttons[b.idx] : null) || {};
+                            const label = (btn.name ?? btn.label ?? `Btn ${b.idx + 1}`) || `Btn ${b.idx + 1}`;
+
+                            const idleColor = btn.color ?? sw.buttonColor ?? "#22314d";
+                            const pressedColor = btn.pressedColor ?? sw.pressedColor ?? "#101a2d";
+                            const hoverEmissive = btn.hoverEmissive ?? sw.hoverEmissive ?? "#ffffff";
+
+                            const textColor = btn.textColor ?? sw.textColor ?? "#e2e8f0";
+                            const textScale = Number(btn.textScale ?? sw.textScale ?? 1) || 1;
+
+                            const press01 = swPressAmtByIdx[b.idx] ?? 0;
+                            const isPressed = press01 > 0.001;
+                            const isHover = swHoverIdx === b.idx;
+
+                            const yOff = -swPressDepth * press01;
+
+                            // Text layout / orientation
+                            const textRotationDeg = Number(btn.textRotationDeg ?? sw.textRotationDeg ?? 0) || 0;
+                            const textAlign = (btn.textAlign ?? sw.textAlign ?? "center");
+                            const textOffset = (() => {
+                                const o = (btn.textOffset ?? sw.textOffset ?? { x: 0, y: 0 });
+                                if (Array.isArray(o) && o.length >= 2) return { x: Number(o[0]) || 0, y: Number(o[1]) || 0 };
+                                return { x: Number(o?.x) || 0, y: Number(o?.y) || 0 };
+                            })();
+                            const rotZ = (textRotationDeg * Math.PI) / 180;
+                            const anchorX = textAlign === "left" ? "left" : (textAlign === "right" ? "right" : "center");
+
+                            // Backlight + text glow (defaults can be overridden per button)
+                            const backlight = { ...(sw.backlight || {}), ...(btn.backlight || {}) };
+                            const textGlow = { ...(sw.textGlow || {}), ...(btn.textGlow || {}) };
+
+                            const fillColor = (press01 <= 0.0001)
+                                ? idleColor
+                                : (press01 >= 0.999 ? pressedColor : lerpColorString(idleColor, pressedColor, press01));
+
+                            const fs = Math.max(0.035, Math.min(0.12, Math.min(b.w, b.d) * 0.25 * textScale));
+
+                            const backEnabled = !!backlight.enabled;
+                            const backPad = Math.max(0, Number(backlight.padding ?? 0.012) || 0);
+                            const backAlpha = clamp01(
+                                (Number(backlight.opacity ?? 0.35) || 0.35) *
+                                (Number(backlight.intensity ?? 1.6) || 1.6) *
+                                (0.6 + 0.4 * press01)
+                            );
+                            const backColorNow = lerpColorString(
+                                backlight.color ?? "#00b7ff",
+                                backlight.pressedColor ?? (backlight.color ?? "#00b7ff"),
+                                press01
+                            );
+
+                            const glowEnabled = !!textGlow.enabled;
+                            const outlineWidth = glowEnabled
+                                ? (Number(textGlow.outlineWidth ?? 0.02) || 0.02) * (Number(textGlow.intensity ?? 1) || 1)
+                                : 0;
+                            const outlineOpacity = glowEnabled ? clamp01(Number(textGlow.outlineOpacity ?? 0.8) || 0.8) : 1;
+                            const outlineColor = glowEnabled
+                                ? lerpColorString(
+                                    textGlow.color ?? "#ffffff",
+                                    textGlow.pressedColor ?? (textGlow.color ?? "#ffffff"),
+                                    press01
+                                )
+                                : undefined;
+
+
+                            return (
+                                <group key={b.idx} position={[b.x, yOff, b.z]}>
+                                    {backEnabled && (
+                                        <mesh
+                                            position={[0, swThickness * 0.5 + 0.0012, 0]}
+                                            rotation={[-Math.PI / 2, 0, 0]}
+                                            renderOrder={9997}
+                                        >
+                                            <planeGeometry args={[b.w + backPad * 2, b.d + backPad * 2]} />
+                                            <meshBasicMaterial
+                                                transparent
+                                                depthWrite={false}
+                                                toneMapped={false}
+                                                blending={THREE.AdditiveBlending}
+                                                opacity={backAlpha}
+                                                color={backColorNow}
+                                            />
+                                        </mesh>
+                                    )}
+
+                                    <mesh
+                                        onPointerDown={(e) => {
+                                            e.stopPropagation();
+                                            if (dragging) return;
+
+                                            // fluid press-in + press-out
+                                            try {
+                                                const idx = b.idx;
+                                                const prev = swPressHoldTimeoutsRef.current[idx];
+                                                if (prev) clearTimeout(prev);
+
+                                                __startPressAnim(idx, 1, swPressAnimMs);
+                                                swPressHoldTimeoutsRef.current[idx] = setTimeout(() => {
+                                                    __startPressAnim(idx, 0, swPressAnimMs);
+                                                }, swPressAnimMs + swPressHoldMs);
+                                            } catch {}
+
+                                            // Trigger configured actions
+                                            onSwitchPress?.(node?.id, b.idx, e);
+
+                                            // Also select node (matches normal click behavior)
+                                            onPointerDown?.(node?.id, e);
+                                        }}
+                                        onPointerOver={(e) => {
+                                            e.stopPropagation();
+                                            setSwHoverIdx(b.idx);
+                                            try { document.body.style.cursor = "pointer"; } catch {}
+                                        }}
+                                        onPointerOut={(e) => {
+                                            e.stopPropagation();
+                                            setSwHoverIdx((cur) => (cur === b.idx ? -1 : cur));
+                                            try { document.body.style.cursor = "auto"; } catch {}
+                                        }}
+                                        castShadow={false}
+                                        receiveShadow={receiveShadow && shadowsOn}
+                                    >
+                                        <boxGeometry args={[b.w, swThickness, b.d]} />
+                                        <meshStandardMaterial
+                                            color={fillColor}
+                                            roughness={0.45}
+                                            metalness={0.05}
+                                            emissive={isHover ? hoverEmissive : "#000000"}
+                                            emissiveIntensity={isHover ? 0.18 : 0}
+                                        />
+                                    </mesh>
+
+                                    {/* Button label */}
+                                    {label && (
+                                        <Text
+                                            position={[textOffset.x || 0, swThickness * 0.5 + 0.0015, textOffset.y || 0]}
+                                            rotation={[-Math.PI / 2, 0, rotZ]}
+                                            fontSize={fs}
+                                            color={textColor}
+                                            anchorX={anchorX}
+                                            outlineWidth={outlineWidth}
+                                            outlineColor={outlineColor}
+                                            outlineOpacity={outlineOpacity}
+                                            anchorY="middle"
+                                            maxWidth={Math.max(0.1, b.w * 0.92)}
+                                        >
+                                            {label}
+                                        </Text>
+                                    )}
+                                </group>
+                            );
+                        })}
+                    </group>
                 )}
 
                 {/* selection halo */}
@@ -422,32 +840,47 @@ const Node3D = memo(
                         {ltype === "spot" && (
                             <>
                                 <spotLight
-                                    ref={lightRef}
+                                    ref={spotRef}
                                     color={color}
-                                    intensity={effectiveIntensity}
-                                    distance={Math.max(0.01, distance)}
-                                    decay={decay}
-                                    angle={angle}
-                                    penumbra={penumbra}
-                                    castShadow={lightCasts && shadowsOn}     // <-- per-node + global
-                                    shadow-normalBias={0.02}
+                                    intensity={0} // driven by dimmer in useFrame
+                                    distance={Math.max(0.01, Number(distance || 0))}
+                                    decay={Number(decay || 2)}
+                                    angle={Number(angle || 0.6)}
+                                    penumbra={Number(penumbra || 0.35)}
+                                    castShadow={lightCasts && shadowsOn}
+                                    shadow-mapSize={[shadowMapSize, shadowMapSize]}
+                                    shadow-bias={shadowBias}
+                                    shadow-normalBias={shadowNormalBias}
                                 />
                                 <object3D ref={targetRef} position={targetPos} />
                             </>
                         )}
+
                         {ltype === "point" && (
-                            <pointLight color={color}
-                                        intensity={intensity}
-                                        distance={distance}
-                                        decay={decay}
-                                        castShadow={lightCasts && shadowsOn}
-                                        shadow-mapSize={[1024, 1024]}
-                                        shadow-bias={-0.0002}
+                            <pointLight
+                                ref={pointRef}
+                                color={color}
+                                intensity={0} // driven by dimmer in useFrame
+                                distance={Number(distance || 0)}
+                                decay={Number(decay || 2)}
+                                castShadow={lightCasts && shadowsOn}
+                                shadow-mapSize={[shadowMapSize, shadowMapSize]}
+                                shadow-bias={shadowBias}
+                                shadow-normalBias={shadowNormalBias}
                             />
                         )}
+
                         {(ltype === "dir" || ltype === "directional") && (
                             <>
-                                <directionalLight ref={lightRef} color={color} intensity={intensity} castShadow={lightCasts && shadowsOn} />
+                                <directionalLight
+                                    ref={dirRef}
+                                    color={color}
+                                    intensity={0} // driven by dimmer in useFrame
+                                    castShadow={lightCasts && shadowsOn}
+                                    shadow-mapSize={[shadowMapSize, shadowMapSize]}
+                                    shadow-bias={shadowBias}
+                                    shadow-normalBias={shadowNormalBias}
+                                />
                                 <object3D ref={targetRef} position={targetPos} />
                             </>
                         )}

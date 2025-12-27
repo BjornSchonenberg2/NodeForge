@@ -1090,7 +1090,7 @@ const TopBar = React.memo(function TopBar({ ctx, shadowsOn, setShadowsOn, uiStar
                                 textOverflow: "ellipsis",
                             }}
                         >
-                            Node Forge 3.0
+                            Node Forge 4.0
                         </div>
                         <div
                             style={{
@@ -2460,7 +2460,10 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
     const {
         actions = [],
         setActions,
+        rooms = [],
         nodes = [],
+        links = [],
+        groups = [],
         cameraPresets = [],
         runAction,
         keepLeftScroll,
@@ -2476,6 +2479,8 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
     const [justAddedLabel, setJustAddedLabel] = useState('');
     const [openMap, setOpenMap] = useState(() => ({}));
 
+    const [actionSearch, setActionSearch] = useState("");
+
     const stepTypeOptions = useMemo(() => ([
         { value: 'toggleLight', label: 'Toggle Light' },
         { value: 'toggleGlow', label: 'Toggle Glow' },
@@ -2486,7 +2491,32 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
         { value: 'cameraMove', label: 'Camera Move / Track' },
         { value: 'hudFade', label: 'HUD: Fade Button' },
         { value: 'setTextBox', label: 'Text Box On/Off (Node)' },
+        { value: 'setRoomVisible', label: 'Room: Show/Hide/Toggle' },
+        { value: 'setGroupVisible', label: 'Group: Show/Hide/Toggle' },
+        { value: 'packetSend', label: 'Packet: Send / Start' },
+        { value: 'packetStop', label: 'Packet: Stop' },
     ]), []);
+
+    const linkLabelById = useMemo(() => {
+        const out = {};
+        for (const l of (links || [])) {
+            const fromName = nodes.find((n) => n.id === l.from)?.label || l.from;
+            const toName = nodes.find((n) => n.id === l.to)?.label || l.to;
+            out[l.id] = `${fromName} → ${toName}`;
+        }
+        return out;
+    }, [links, nodes]);
+
+    const filteredActions = useMemo(() => {
+        const q = (actionSearch || '').trim().toLowerCase();
+        if (!q) return actions;
+        return (actions || []).filter((a) => {
+            const lbl = (a.label || '').toLowerCase();
+            const id = (a.id || '').toLowerCase();
+            return lbl.includes(q) || id.includes(q);
+        });
+    }, [actions, actionSearch]);
+
 
     const patchAction = useCallback((id, patch) =>
             preserve(() => setActions(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a))),
@@ -2499,13 +2529,28 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
     );
 
     const duplicateAction = useCallback((id) =>
-            preserve(() => setActions(prev => prev.map(a => {
-                if (a.id !== id) return a;
-                const copy = JSON.parse(JSON.stringify(a));
-                copy.id = uuid();
-                copy.label = `${a.label || 'Action'} Copy`;
-                return copy;
-            }))),
+            preserve(() => {
+                let newId = null;
+                let newLabel = '';
+
+                setActions((prev) => {
+                    const idx = (prev || []).findIndex((a) => a.id === id);
+                    if (idx < 0) return prev;
+                    const base = prev[idx];
+                    const copy = JSON.parse(JSON.stringify(base));
+                    newId = uuid();
+                    copy.id = newId;
+                    copy.label = `${base.label || 'Action'} Copy`;
+                    newLabel = copy.label;
+                    return [...prev.slice(0, idx + 1), copy, ...prev.slice(idx + 1)];
+                });
+
+                if (newId) {
+                    setJustAddedId(newId);
+                    setJustAddedLabel(newLabel);
+                    setOpenMap((m) => ({ ...(m || {}), [newId]: true }));
+                }
+            }),
         [preserve, setActions]
     );
 
@@ -2646,6 +2691,45 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
         [preserve, setActions]
     );
 
+
+
+    const duplicateStep = useCallback(
+        (actId, idx) =>
+            preserve(() =>
+                setActions((prev) =>
+                    prev.map((a) => {
+                        if (a.id !== actId) return a;
+                        const steps = [...(a.steps || [])];
+                        if (idx < 0 || idx >= steps.length) return a;
+                        const copy = JSON.parse(JSON.stringify(steps[idx]));
+                        steps.splice(idx + 1, 0, copy);
+                        return { ...a, steps };
+                    })
+                )
+            ),
+        [preserve, setActions]
+    );
+
+    const duplicateChildStep = useCallback(
+        (actId, parentIdx, childIdx) =>
+            preserve(() =>
+                setActions((prev) =>
+                    prev.map((a) => {
+                        if (a.id !== actId) return a;
+                        const steps = (a.steps || []).map((s, i) => {
+                            if (i !== parentIdx) return s;
+                            const children = [...(s.children || [])];
+                            if (childIdx < 0 || childIdx >= children.length) return s;
+                            const copy = JSON.parse(JSON.stringify(children[childIdx]));
+                            children.splice(childIdx + 1, 0, copy);
+                            return { ...s, children };
+                        });
+                        return { ...a, steps };
+                    })
+                )
+            ),
+        [preserve, setActions]
+    );
     const stopToggle = useCallback((e) => {
         e?.preventDefault?.();
         e?.stopPropagation?.();
@@ -2657,6 +2741,22 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                  onPointerDownCapture={(e) => e.stopPropagation()}
                  onPointerMoveCapture={(e) => e.stopPropagation()}
             >
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}
+                >
+                    <div style={{ flex: 1, minWidth: 180 }}
+                    >
+                        <Input
+                            value={actionSearch}
+                            onChange={(e) => setActionSearch(e.target.value)}
+                            placeholder="Search actions…"
+                        />
+                    </div>
+                    <div style={{ fontSize: 11, opacity: 0.75, whiteSpace: 'nowrap' }}
+                    >
+                        Showing {filteredActions.length} / {actions.length}
+                    </div>
+                </div>
+
                 {/* Create */}
                 <div
                     style={{
@@ -2700,7 +2800,11 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                         <div style={{ opacity: 0.7, fontSize: 12 }}>No actions yet. Create one above.</div>
                     )}
 
-                    {actions.map((a) => {
+                    {actions.length > 0 && filteredActions.length === 0 && (
+                        <div style={{ opacity: 0.7, fontSize: 12 }}>No actions match “{actionSearch}”.</div>
+                    )}
+
+                    {filteredActions.map((a) => {
                         const isOpen = (openMap?.[a.id] ?? false) === true;
                         const highlight = a.id === justAddedId;
                         return (
@@ -2774,12 +2878,8 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                         onClick={stopToggle}
                                         onPointerDownCapture={(e) => e.stopPropagation()}
                                     >
-                                        <Btn onClick={(e) => { e.preventDefault(); runAction?.(a); }}>Run</Btn>
-                                        <Btn onClick={(e) => { e.preventDefault(); toggleOpen(a.id); }}
-                                             style={{ opacity: 0.9 }}
-                                        >
-                                            {isOpen ? 'Hide' : 'Edit'}
-                                        </Btn>
+                                        <IconBtn label="▶" title="Run" onClick={(e) => { e.preventDefault(); runAction?.(a); }} />
+                                        <IconBtn label={isOpen ? '▴' : '✎'} title={isOpen ? 'Collapse' : 'Edit'} onClick={(e) => { e.preventDefault(); toggleOpen(a.id); }} />
                                     </div>
                                 </div>
 
@@ -2800,8 +2900,8 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                             <div style={{ fontSize: 12, opacity: 0.9, fontWeight: 600 }}>Steps</div>
                                             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}
                                             >
-                                                <Btn onClick={(e) => { e.preventDefault(); duplicateAction(a.id); }}>Duplicate</Btn>
-                                                <Btn onClick={(e) => { e.preventDefault(); deleteAction(a.id); }}>Delete</Btn>
+                                                <IconBtn label="⧉" title="Duplicate button" onClick={(e) => { e.preventDefault(); duplicateAction(a.id); }} />
+                                                <IconBtn label="🗑️" title="Delete button" onClick={(e) => { e.preventDefault(); deleteAction(a.id); }} />
                                             </div>
                                         </div>
 
@@ -2816,6 +2916,11 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                 const isWire = s.type === 'setWireframe';
                                                 const isHudFade = s.type === 'hudFade';
                                                 const isTextBox = s.type === 'setTextBox';
+                                                const isRoomVis = s.type === 'setRoomVisible';
+                                                const isGroupVis = s.type === 'setGroupVisible';
+                                                const isPacketSend = s.type === 'packetSend';
+                                                const isPacketStop = s.type === 'packetStop';
+                                                const isPacket = isPacketSend || isPacketStop;
 
                                                 return (
                                                     <div
@@ -2857,6 +2962,77 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                             patch.toPresetId = undefined;
                                                                         } else if (type === 'setTextBox') {
                                                                             patch.value = s.value || 'on';
+                                                                        } else if (type === 'setRoomVisible') {
+                                                                            patch.nodeId = null;
+                                                                            patch.roomId = s.roomId || '';
+                                                                            patch.mode = s.mode || 'toggle';
+                                                                            patch.value = undefined;
+                                                                            patch.duration = undefined;
+                                                                            patch.fromPresetId = undefined;
+                                                                            patch.toPresetId = undefined;
+                                                                            patch.hudTargetId = undefined;
+                                                                            patch.hudMode = undefined;
+                                                                            patch.hudDuration = undefined;
+                                                                            patch.linkId = undefined;
+                                                                            patch.count = undefined;
+                                                                            patch.interval = undefined;
+                                                                            patch.loop = undefined;
+                                                                            patch.burstInterval = undefined;
+                                                                            patch.burstsLimit = undefined;
+                                                                            patch.clearExisting = undefined;
+                                                                            patch.stopLoopsOnly = undefined;
+                                                                            patch.clearInFlight = undefined;
+                                                                        } else if (type === 'setGroupVisible') {
+                                                                            patch.nodeId = null;
+                                                                            patch.roomId = undefined;
+                                                                            patch.groupId = s.groupId || '';
+                                                                            patch.mode = s.mode || 'toggle';
+                                                                            patch.value = undefined;
+                                                                            patch.duration = undefined;
+                                                                            patch.fromPresetId = undefined;
+                                                                            patch.toPresetId = undefined;
+                                                                            patch.hudTargetId = undefined;
+                                                                            patch.hudMode = undefined;
+                                                                            patch.hudDuration = undefined;
+                                                                            patch.linkId = undefined;
+                                                                            patch.count = undefined;
+                                                                            patch.interval = undefined;
+                                                                            patch.loop = undefined;
+                                                                            patch.burstInterval = undefined;
+                                                                            patch.burstsLimit = undefined;
+                                                                            patch.clearExisting = undefined;
+                                                                            patch.stopLoopsOnly = undefined;
+                                                                            patch.clearInFlight = undefined;
+                                                                        } else if (type === 'packetSend') {
+                                                                            patch.nodeId = null;
+                                                                            patch.linkId = s.linkId || '__ALL_PACKET__';
+                                                                            patch.delay = s.delay ?? 0;
+                                                                            patch.count = (s.count ?? 1);
+                                                                            patch.interval = (s.interval ?? 0.15);
+                                                                            patch.loop = !!s.loop;
+                                                                            patch.burstInterval = (s.burstInterval ?? 1.0);
+                                                                            patch.burstsLimit = (s.burstsLimit ?? 0);
+                                                                            patch.clearExisting = !!s.clearExisting;
+                                                                            patch.duration = undefined;
+                                                                            patch.fromPresetId = undefined;
+                                                                            patch.toPresetId = undefined;
+                                                                            patch.hudTargetId = undefined;
+                                                                            patch.hudMode = undefined;
+                                                                            patch.hudDuration = undefined;
+                                                                            patch.value = undefined;
+                                                                        } else if (type === 'packetStop') {
+                                                                            patch.nodeId = null;
+                                                                            patch.linkId = s.linkId || '__ALL_PACKET__';
+                                                                            patch.delay = s.delay ?? 0;
+                                                                            patch.stopLoopsOnly = !!s.stopLoopsOnly;
+                                                                            patch.clearInFlight = (s.clearInFlight ?? true);
+                                                                            patch.duration = undefined;
+                                                                            patch.fromPresetId = undefined;
+                                                                            patch.toPresetId = undefined;
+                                                                            patch.hudTargetId = undefined;
+                                                                            patch.hudMode = undefined;
+                                                                            patch.hudDuration = undefined;
+                                                                            patch.value = undefined;
                                                                         }
                                                                         patchStep(a.id, i, patch);
                                                                     }}
@@ -2905,6 +3081,46 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                             .map((act) => (
                                                                                 <option key={act.id} value={act.id}>{act.label || '(unnamed button)'}</option>
                                                                             ))}
+                                                                    </Select>
+                                                                </label>
+                                                            ) : isPacket ? (
+                                                                <label>
+                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Link</div>
+                                                                    <Select
+                                                                        value={s.linkId || '__ALL_PACKET__'}
+                                                                        onChange={(e) => patchStep(a.id, i, { linkId: e.target.value || '__ALL_PACKET__' })}
+                                                                    >
+                                                                        <option value='__ALL_PACKET__'>(all packet links)</option>
+                                                                        {(links || []).map((lnk) => (
+                                                                            <option key={lnk.id} value={lnk.id}>{linkLabelById?.[lnk.id] || lnk.id}</option>
+                                                                        ))}
+                                                                    </Select>
+                                                                </label>
+                                                            ) : isGroupVis ? (
+                                                                <label>
+                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Group</div>
+                                                                    <Select
+                                                                        value={s.groupId || ''}
+                                                                        onChange={(e) => patchStep(a.id, i, { groupId: e.target.value || '' })}
+                                                                    >
+                                                                        <option value=''> (none) </option>
+                                                                        <option value='__ALL__'>(all groups)</option>
+                                                                        {groups.map((gg) => (
+                                                                            <option key={gg.id} value={gg.id}>{gg.name || gg.id}</option>
+                                                                        ))}
+                                                                    </Select>
+                                                                </label>
+                                                            ) : isRoomVis ? (
+                                                                <label>
+                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Room</div>
+                                                                    <Select
+                                                                        value={s.roomId || ''}
+                                                                        onChange={(e) => patchStep(a.id, i, { roomId: e.target.value || '' })}
+                                                                    >
+                                                                        <option value=''> (none) </option>
+                                                                        {rooms.map((r) => (
+                                                                            <option key={r.id} value={r.id}>{r.name || r.id}</option>
+                                                                        ))}
                                                                     </Select>
                                                                 </label>
                                                             ) : (
@@ -2968,6 +3184,103 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                             onCommit={(v) => patchStep(a.id, i, { delay: v })}
                                                                         />
                                                                     </label>
+
+                                                                    {(isRoomVis || isGroupVis) && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Visibility</div>
+                                                                            <Select
+                                                                                value={s.mode || 'toggle'}
+                                                                                onChange={(e) => patchStep(a.id, i, { mode: e.target.value || 'toggle' })}
+                                                                            >
+                                                                                <option value='toggle'>Toggle</option>
+                                                                                <option value='show'>Show</option>
+                                                                                <option value='hide'>Hide</option>
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+
+                                                                    {isPacketSend && (
+                                                                        <div style={{ display: 'grid', gap: 6 }}>
+                                                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Count</div>
+                                                                                    <SmoothNumberInput
+                                                                                        step={1}
+                                                                                        value={s.count ?? 1}
+                                                                                        onCommit={(v) => patchStep(a.id, i, { count: Math.max(1, Math.round(Number(v) || 1)) })}
+                                                                                    />
+                                                                                </label>
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Interval (s)</div>
+                                                                                    <SmoothNumberInput
+                                                                                        step={0.05}
+                                                                                        value={s.interval ?? 0.15}
+                                                                                        onCommit={(v) => patchStep(a.id, i, { interval: Math.max(0, Number(v) || 0) })}
+                                                                                    />
+                                                                                </label>
+                                                                            </div>
+
+                                                                            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                <input
+                                                                                    type='checkbox'
+                                                                                    checked={!!s.loop}
+                                                                                    onChange={(e) => patchStep(a.id, i, { loop: e.target.checked })}
+                                                                                />
+                                                                                <span style={{ fontSize: 11, opacity: 0.85 }}>Loop</span>
+                                                                            </label>
+
+                                                                            {s.loop && (
+                                                                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Burst Interval (s)</div>
+                                                                                        <SmoothNumberInput
+                                                                                            step={0.1}
+                                                                                            value={s.burstInterval ?? 1.0}
+                                                                                            onCommit={(v) => patchStep(a.id, i, { burstInterval: Math.max(0, Number(v) || 0) })}
+                                                                                        />
+                                                                                    </label>
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Bursts Limit (0=∞)</div>
+                                                                                        <SmoothNumberInput
+                                                                                            step={1}
+                                                                                            value={s.burstsLimit ?? 0}
+                                                                                            onCommit={(v) => patchStep(a.id, i, { burstsLimit: Math.max(0, Math.round(Number(v) || 0)) })}
+                                                                                        />
+                                                                                    </label>
+                                                                                </div>
+                                                                            )}
+
+                                                                            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                <input
+                                                                                    type='checkbox'
+                                                                                    checked={!!s.clearExisting}
+                                                                                    onChange={(e) => patchStep(a.id, i, { clearExisting: e.target.checked })}
+                                                                                />
+                                                                                <span style={{ fontSize: 11, opacity: 0.85 }}>Clear existing packets on start</span>
+                                                                            </label>
+                                                                        </div>
+                                                                    )}
+
+                                                                    {isPacketStop && (
+                                                                        <div style={{ display: 'grid', gap: 6 }}>
+                                                                            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                <input
+                                                                                    type='checkbox'
+                                                                                    checked={!!s.stopLoopsOnly}
+                                                                                    onChange={(e) => patchStep(a.id, i, { stopLoopsOnly: e.target.checked })}
+                                                                                />
+                                                                                <span style={{ fontSize: 11, opacity: 0.85 }}>Stop loop only (let in-flight finish)</span>
+                                                                            </label>
+                                                                            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                <input
+                                                                                    type='checkbox'
+                                                                                    checked={(s.clearInFlight ?? true) !== false}
+                                                                                    onChange={(e) => patchStep(a.id, i, { clearInFlight: e.target.checked })}
+                                                                                />
+                                                                                <span style={{ fontSize: 11, opacity: 0.85 }}>Clear in-flight packets</span>
+                                                                            </label>
+                                                                        </div>
+                                                                    )}
 
                                                                     {s.type === 'setSignalStyle' && (
                                                                         <label>
@@ -3077,9 +3390,10 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
 
                                                             <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}
                                                             >
-                                                                <Btn onClick={(e) => { e.preventDefault(); moveStep(a.id, i, -1); }}>↑</Btn>
-                                                                <Btn onClick={(e) => { e.preventDefault(); moveStep(a.id, i, +1); }}>↓</Btn>
-                                                                <Btn onClick={(e) => { e.preventDefault(); delStep(a.id, i); }}>✕</Btn>
+                                                                <IconBtn label="↑" title="Move up" onClick={(e) => { e.preventDefault(); moveStep(a.id, i, -1); }} />
+                                                                <IconBtn label="↓" title="Move down" onClick={(e) => { e.preventDefault(); moveStep(a.id, i, +1); }} />
+                                                                <IconBtn label="⧉" title="Duplicate step" onClick={(e) => { e.preventDefault(); duplicateStep(a.id, i); }} />
+                                                                <IconBtn label="🗑️" title="Delete step" onClick={(e) => { e.preventDefault(); delStep(a.id, i); }} />
                                                             </div>
                                                         </div>
 
@@ -3089,6 +3403,11 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                 {(s.children || []).map((c, ci) => {
                                                                     const cIsWire = c.type === 'setWireframe';
                                                                     const cIsTextBox = c.type === 'setTextBox';
+                                                                    const cIsPacketSend = c.type === 'packetSend';
+                                                                    const cIsPacketStop = c.type === 'packetStop';
+                                                                    const cIsPacket = cIsPacketSend || cIsPacketStop;
+                                                                    const cIsRoomVis = c.type === 'setRoomVisible';
+                                                                    const cIsGroupVis = c.type === 'setGroupVisible';
                                                                     return (
                                                                         <div
                                                                             key={ci}
@@ -3115,6 +3434,51 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                                             patch.value = c.value || 'on';
                                                                                         } else if (type === 'setTextBox') {
                                                                                             patch.value = c.value || 'on';
+                                                                                        } else if (type === 'setRoomVisible') {
+                                                                                            patch.nodeId = null;
+                                                                                            patch.roomId = c.roomId || '';
+                                                                                            patch.mode = c.mode || 'toggle';
+                                                                                            patch.value = undefined;
+                                                                                            patch.linkId = undefined;
+                                                                                            patch.count = undefined;
+                                                                                            patch.interval = undefined;
+                                                                                            patch.loop = undefined;
+                                                                                            patch.burstInterval = undefined;
+                                                                                            patch.burstsLimit = undefined;
+                                                                                            patch.clearExisting = undefined;
+                                                                                            patch.stopLoopsOnly = undefined;
+                                                                                            patch.clearInFlight = undefined;
+                                                                                        } else if (type === 'setGroupVisible') {
+                                                                                            patch.nodeId = null;
+                                                                                            patch.groupId = c.groupId || '';
+                                                                                            patch.mode = c.mode || 'toggle';
+                                                                                            patch.value = undefined;
+                                                                                            patch.roomId = undefined;
+                                                                                            patch.linkId = undefined;
+                                                                                            patch.count = undefined;
+                                                                                            patch.interval = undefined;
+                                                                                            patch.loop = undefined;
+                                                                                            patch.burstInterval = undefined;
+                                                                                            patch.burstsLimit = undefined;
+                                                                                            patch.clearExisting = undefined;
+                                                                                            patch.stopLoopsOnly = undefined;
+                                                                                            patch.clearInFlight = undefined;
+                                                                                        } else if (type === 'packetSend') {
+                                                                                            patch.nodeId = null;
+                                                                                            patch.linkId = c.linkId || '__ALL_PACKET__';
+                                                                                            patch.delay = c.delay ?? 0;
+                                                                                            patch.count = (c.count ?? 1);
+                                                                                            patch.interval = (c.interval ?? 0.15);
+                                                                                            patch.loop = !!c.loop;
+                                                                                            patch.burstInterval = (c.burstInterval ?? 1.0);
+                                                                                            patch.burstsLimit = (c.burstsLimit ?? 0);
+                                                                                            patch.clearExisting = !!c.clearExisting;
+                                                                                        } else if (type === 'packetStop') {
+                                                                                            patch.nodeId = null;
+                                                                                            patch.linkId = c.linkId || '__ALL_PACKET__';
+                                                                                            patch.delay = c.delay ?? 0;
+                                                                                            patch.stopLoopsOnly = !!c.stopLoopsOnly;
+                                                                                            patch.clearInFlight = (c.clearInFlight ?? true);
                                                                                         }
                                                                                         patchChildStep(a.id, i, ci, patch);
                                                                                     }}
@@ -3138,6 +3502,46 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                                         border: '1px solid rgba(255,255,255,0.12)',
                                                                                         background: 'rgba(255,255,255,0.03)',
                                                                                     }}>Global: Wireframe</div>
+                                                                                </label>
+                                                                            ) : cIsPacket ? (
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Link</div>
+                                                                                    <Select
+                                                                                        value={c.linkId || '__ALL_PACKET__'}
+                                                                                        onChange={(e) => patchChildStep(a.id, i, ci, { linkId: e.target.value || '__ALL_PACKET__' })}
+                                                                                    >
+                                                                                        <option value='__ALL_PACKET__'>(all packet links)</option>
+                                                                                        {(links || []).map((lnk) => (
+                                                                                            <option key={lnk.id} value={lnk.id}>{linkLabelById?.[lnk.id] || lnk.id}</option>
+                                                                                        ))}
+                                                                                    </Select>
+                                                                                </label>
+                                                                            ) : cIsGroupVis ? (
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Group</div>
+                                                                                    <Select
+                                                                                        value={c.groupId || ''}
+                                                                                        onChange={(e) => patchChildStep(a.id, i, ci, { groupId: e.target.value || '' })}
+                                                                                    >
+                                                                                        <option value=''> (none) </option>
+                                                                                        <option value='__ALL_GROUP__'>(all groups)</option>
+                                                                                        {(groups || []).map((g) => (
+                                                                                            <option key={g.id} value={g.id}>{g.name || g.id}</option>
+                                                                                        ))}
+                                                                                    </Select>
+                                                                                </label>
+                                                                            ) : cIsRoomVis ? (
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Room</div>
+                                                                                    <Select
+                                                                                        value={c.roomId || ''}
+                                                                                        onChange={(e) => patchChildStep(a.id, i, ci, { roomId: e.target.value || '' })}
+                                                                                    >
+                                                                                        <option value=''> (none) </option>
+                                                                                        {rooms.map((r) => (
+                                                                                            <option key={r.id} value={r.id}>{r.name || r.id}</option>
+                                                                                        ))}
+                                                                                    </Select>
                                                                                 </label>
                                                                             ) : (
                                                                                 <label>
@@ -3164,6 +3568,103 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                                         onCommit={(v) => patchChildStep(a.id, i, ci, { delay: v })}
                                                                                     />
                                                                                 </label>
+
+                                                                                {(cIsRoomVis || cIsGroupVis) && (
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Visibility</div>
+                                                                                        <Select
+                                                                                            value={c.mode || 'toggle'}
+                                                                                            onChange={(e) => patchChildStep(a.id, i, ci, { mode: e.target.value || 'toggle' })}
+                                                                                        >
+                                                                                            <option value='toggle'>Toggle</option>
+                                                                                            <option value='show'>Show</option>
+                                                                                            <option value='hide'>Hide</option>
+                                                                                        </Select>
+                                                                                    </label>
+                                                                                )}
+
+                                                                                {cIsPacketSend && (
+                                                                                    <div style={{ display: 'grid', gap: 6 }}>
+                                                                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                                                                                            <label>
+                                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Count</div>
+                                                                                                <SmoothNumberInput
+                                                                                                    step={1}
+                                                                                                    value={c.count ?? 1}
+                                                                                                    onCommit={(v) => patchChildStep(a.id, i, ci, { count: Math.max(1, Math.round(Number(v) || 1)) })}
+                                                                                                />
+                                                                                            </label>
+                                                                                            <label>
+                                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Interval (s)</div>
+                                                                                                <SmoothNumberInput
+                                                                                                    step={0.05}
+                                                                                                    value={c.interval ?? 0.15}
+                                                                                                    onCommit={(v) => patchChildStep(a.id, i, ci, { interval: Math.max(0, Number(v) || 0) })}
+                                                                                                />
+                                                                                            </label>
+                                                                                        </div>
+
+                                                                                        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                            <input
+                                                                                                type='checkbox'
+                                                                                                checked={!!c.loop}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { loop: e.target.checked })}
+                                                                                            />
+                                                                                            <span style={{ fontSize: 11, opacity: 0.85 }}>Loop</span>
+                                                                                        </label>
+
+                                                                                        {c.loop && (
+                                                                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                                                                                                <label>
+                                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Burst Interval (s)</div>
+                                                                                                    <SmoothNumberInput
+                                                                                                        step={0.1}
+                                                                                                        value={c.burstInterval ?? 1.0}
+                                                                                                        onCommit={(v) => patchChildStep(a.id, i, ci, { burstInterval: Math.max(0, Number(v) || 0) })}
+                                                                                                    />
+                                                                                                </label>
+                                                                                                <label>
+                                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Bursts Limit (0=∞)</div>
+                                                                                                    <SmoothNumberInput
+                                                                                                        step={1}
+                                                                                                        value={c.burstsLimit ?? 0}
+                                                                                                        onCommit={(v) => patchChildStep(a.id, i, ci, { burstsLimit: Math.max(0, Math.round(Number(v) || 0)) })}
+                                                                                                    />
+                                                                                                </label>
+                                                                                            </div>
+                                                                                        )}
+
+                                                                                        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                            <input
+                                                                                                type='checkbox'
+                                                                                                checked={!!c.clearExisting}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { clearExisting: e.target.checked })}
+                                                                                            />
+                                                                                            <span style={{ fontSize: 11, opacity: 0.85 }}>Clear existing packets on start</span>
+                                                                                        </label>
+                                                                                    </div>
+                                                                                )}
+
+                                                                                {cIsPacketStop && (
+                                                                                    <div style={{ display: 'grid', gap: 6 }}>
+                                                                                        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                            <input
+                                                                                                type='checkbox'
+                                                                                                checked={!!c.stopLoopsOnly}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { stopLoopsOnly: e.target.checked })}
+                                                                                            />
+                                                                                            <span style={{ fontSize: 11, opacity: 0.85 }}>Stop loop only (let in-flight finish)</span>
+                                                                                        </label>
+                                                                                        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                            <input
+                                                                                                type='checkbox'
+                                                                                                checked={(c.clearInFlight ?? true) !== false}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { clearInFlight: e.target.checked })}
+                                                                                            />
+                                                                                            <span style={{ fontSize: 11, opacity: 0.85 }}>Clear in-flight packets</span>
+                                                                                        </label>
+                                                                                    </div>
+                                                                                )}
 
                                                                                 {c.type === 'setSignalStyle' && (
                                                                                     <label>
@@ -3208,9 +3709,10 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
 
                                                                             <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}
                                                                             >
-                                                                                <Btn onClick={(e) => { e.preventDefault(); moveChildStep(a.id, i, ci, -1); }}>↑</Btn>
-                                                                                <Btn onClick={(e) => { e.preventDefault(); moveChildStep(a.id, i, ci, +1); }}>↓</Btn>
-                                                                                <Btn onClick={(e) => { e.preventDefault(); delChildStep(a.id, i, ci); }}>✕</Btn>
+                                                                                <IconBtn label="↑" title="Move up" onClick={(e) => { e.preventDefault(); moveChildStep(a.id, i, ci, -1); }} />
+                                                                                <IconBtn label="↓" title="Move down" onClick={(e) => { e.preventDefault(); moveChildStep(a.id, i, ci, +1); }} />
+                                                                                <IconBtn label="⧉" title="Duplicate sub-step" onClick={(e) => { e.preventDefault(); duplicateChildStep(a.id, i, ci); }} />
+                                                                                <IconBtn label="🗑️" title="Delete sub-step" onClick={(e) => { e.preventDefault(); delChildStep(a.id, i, ci); }} />
                                                                             </div>
                                                                         </div>
                                                                     );
@@ -3718,6 +4220,154 @@ export default function Interactive3DNodeShowcase() {
             return [];
         }
     });
+
+
+    // ------------------------------------------------------------
+    // Picture "Deck" collisions (Solid pictures)
+    // If a picture is Visible + Solid, nodes/rooms cannot go below its plane
+    // when overlapping its XZ footprint.
+    // Hidden pictures are ignored.
+    // ------------------------------------------------------------
+    const pointInOBB2D = (x, z, obb) => {
+        const dx = x - obb.cx;
+        const dz = z - obb.cz;
+        const c = Math.cos(obb.angle);
+        const s = Math.sin(obb.angle);
+        // inverse rotate by angle
+        const lx = dx * c + dz * s;
+        const lz = -dx * s + dz * c;
+        return Math.abs(lx) <= obb.hx && Math.abs(lz) <= obb.hz;
+    };
+
+    const obbOverlap2D = (a, b) => {
+        // a,b: {cx,cz,hx,hz,angle}
+        const uA = [Math.cos(a.angle), Math.sin(a.angle)];
+        const vA = [-Math.sin(a.angle), Math.cos(a.angle)];
+        const uB = [Math.cos(b.angle), Math.sin(b.angle)];
+        const vB = [-Math.sin(b.angle), Math.cos(b.angle)];
+        const axes = [uA, vA, uB, vB];
+
+        for (const axis of axes) {
+            const ax = axis[0];
+            const az = axis[1];
+
+            const cA = a.cx * ax + a.cz * az;
+            const cB = b.cx * ax + b.cz * az;
+
+            const rA =
+                a.hx * Math.abs(uA[0] * ax + uA[1] * az) +
+                a.hz * Math.abs(vA[0] * ax + vA[1] * az);
+            const rB =
+                b.hx * Math.abs(uB[0] * ax + uB[1] * az) +
+                b.hz * Math.abs(vB[0] * ax + vB[1] * az);
+
+            if (Math.abs(cA - cB) > rA + rB) return false;
+        }
+        return true;
+    };
+
+    const getNodeHalfHeight = (node) => {
+        const sh = node?.shape || {};
+        if (sh.type === "sphere") {
+            const r = Number(sh.radius);
+            return Number.isFinite(r) && r > 0 ? r : 0.28;
+        }
+        if (Number.isFinite(sh.h)) {
+            return Math.max(0.01, Number(sh.h) / 2);
+        }
+        // fallback
+        return 0.28;
+    };
+
+    const clampNodeToPictureDecks = useCallback(
+        (node, pos) => {
+            const p = Array.isArray(pos)
+                ? [pos[0] ?? 0, pos[1] ?? 0, pos[2] ?? 0]
+                : (pos?.toArray ? pos.toArray() : [pos?.x ?? 0, pos?.y ?? 0, pos?.z ?? 0]);
+
+            const pics = (Array.isArray(importedPictures) ? importedPictures : []).filter(
+                (pic) => pic && pic.src && pic.visible && pic.solid,
+            );
+            if (!pics.length) return p;
+
+            const hh = getNodeHalfHeight(node);
+            let [x, y, z] = p;
+            let minY = -Infinity;
+
+            for (const pic of pics) {
+                const s = clamp(Number(pic.scale) || 1, 0.01, 500);
+                const w = FLOORPLAN_BASE_SIZE * s;
+                const aspect = Number.isFinite(pic.aspect) && pic.aspect > 0 ? pic.aspect : 1;
+                const h = w * aspect;
+                const obb = {
+                    cx: Number(pic.x) || 0,
+                    cz: Number(pic.z) || 0,
+                    hx: w / 2,
+                    hz: h / 2,
+                    angle: THREE.MathUtils.degToRad(Number(pic.rotY) || 0),
+                };
+
+                if (!pointInOBB2D(x, z, obb)) continue;
+
+                const deckY = Number(pic.y) || 0;
+                minY = Math.max(minY, deckY + hh);
+            }
+
+            if (Number.isFinite(minY) && minY !== -Infinity && y < minY) y = minY;
+            return [x, y, z];
+        },
+        [importedPictures],
+    );
+
+    const clampRoomToPictureDecks = useCallback(
+        (room, centerPos) => {
+            const c = Array.isArray(centerPos)
+                ? [centerPos[0] ?? 0, centerPos[1] ?? 0, centerPos[2] ?? 0]
+                : (centerPos?.toArray ? centerPos.toArray() : [centerPos?.x ?? 0, centerPos?.y ?? 0, centerPos?.z ?? 0]);
+
+            const pics = (Array.isArray(importedPictures) ? importedPictures : []).filter(
+                (pic) => pic && pic.src && pic.visible && pic.solid,
+            );
+            if (!pics.length) return c;
+
+            const size = room?.size || [1, 1, 1];
+            const hy = (Number(size[1]) || 1) / 2;
+
+            const roomObb = {
+                cx: c[0],
+                cz: c[2],
+                hx: (Number(size[0]) || 1) / 2,
+                hz: (Number(size[2]) || 1) / 2,
+                angle: Number(room?.rotation?.[1]) || 0,
+            };
+
+            let y = c[1];
+            let minCenterY = -Infinity;
+
+            for (const pic of pics) {
+                const s = clamp(Number(pic.scale) || 1, 0.01, 500);
+                const w = FLOORPLAN_BASE_SIZE * s;
+                const aspect = Number.isFinite(pic.aspect) && pic.aspect > 0 ? pic.aspect : 1;
+                const h = w * aspect;
+                const picObb = {
+                    cx: Number(pic.x) || 0,
+                    cz: Number(pic.z) || 0,
+                    hx: w / 2,
+                    hz: h / 2,
+                    angle: THREE.MathUtils.degToRad(Number(pic.rotY) || 0),
+                };
+
+                if (!obbOverlap2D(roomObb, picObb)) continue;
+                const deckY = Number(pic.y) || 0;
+                minCenterY = Math.max(minCenterY, deckY + hy);
+            }
+
+            if (Number.isFinite(minCenterY) && minCenterY !== -Infinity && y < minCenterY) y = minCenterY;
+            return [c[0], y, c[2]];
+        },
+        [importedPictures],
+    );
+
     useEffect(() => {
         try {
             localStorage.setItem(PICTURES_KEY, JSON.stringify(importedPictures || []));
@@ -4023,6 +4673,26 @@ export default function Interactive3DNodeShowcase() {
         localStorage.setItem("epic3d.modelScale.v1", String(modelScale));
     }, [modelScale]);
 
+    const [modelPosition, setModelPosition] = useState(() => {
+        if (typeof window === "undefined") return [0, 0, 0];
+        try {
+            const raw = window.localStorage.getItem("epic3d.modelPosition.v1");
+            if (raw) {
+                const v = JSON.parse(raw);
+                if (Array.isArray(v) && v.length >= 3) {
+                    return [Number(v[0]) || 0, Number(v[1]) || 0, Number(v[2]) || 0];
+                }
+            }
+        } catch {}
+        return [0, 0, 0];
+    });
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        try {
+            window.localStorage.setItem("epic3d.modelPosition.v1", JSON.stringify(modelPosition));
+        } catch {}
+    }, [modelPosition]);
+
     useEffect(() => localStorage.setItem("epic3d.productScale.v1", String(productScale)), [productScale]);
     useEffect(() => localStorage.setItem("epic3d.showDimsGlobal.v1", showDimsGlobal ? "1" : "0"), [showDimsGlobal]);
     useEffect(() => localStorage.setItem("epic3d.photoDefault.v1", photoDefault ? "1" : "0"), [photoDefault]);
@@ -4060,6 +4730,93 @@ export default function Interactive3DNodeShowcase() {
             },
         ];
     });
+
+
+    // Clamp node motion within its parent room bounds (optional per-room setting)
+    const clampNodeToRoomBounds = useCallback(
+        (node, pos) => {
+            const p = Array.isArray(pos)
+                ? [pos[0] ?? 0, pos[1] ?? 0, pos[2] ?? 0]
+                : (pos?.toArray ? pos.toArray() : [pos?.x ?? 0, pos?.y ?? 0, pos?.z ?? 0]);
+
+            if (!node?.roomId) return p;
+
+            const room = rooms.find((r) => r.id === node.roomId);
+            if (!room) return p;
+
+            // IMPORTANT: never return undefined
+            if (room.locked) return p;
+
+            const cfg = room.nodeBounds || {};
+            if (!cfg.enabled) return p;
+
+            const shape = cfg.shape || "box";
+
+            // numeric + safe padding
+            const padding = Number(cfg.padding ?? 0) || 0;
+
+            const center = room.center || [0, 0, 0];
+            const roomSize = room.size || [3, 1.6, 2.2];
+
+            const [cx, cy, cz] = center;
+            const [rw, rh, rd] = roomSize;
+
+            // Use configured bounds if present, otherwise fall back to room size
+            const width  = Number.isFinite(cfg.width)  ? cfg.width  : rw;
+            const height = Number.isFinite(cfg.height) ? cfg.height : rh;
+            const depth  = Number.isFinite(cfg.depth)  ? cfg.depth  : rd;
+
+            // Inner (playable) box, shrunk by padding on all sides
+            const innerW = Math.max(0, width  - padding * 2);
+            const innerH = Math.max(0, height - padding * 2);
+            const innerD = Math.max(0, depth  - padding * 2);
+
+            let [x, y, z] = p;
+
+            // Degenerate – just stick to center in XZ, clamp Y to room height
+            if (innerW <= 0 || innerD <= 0 || innerH <= 0) {
+                const minY0 = cy - rh / 2;
+                const maxY0 = cy + rh / 2;
+                const yClamped = Math.max(minY0, Math.min(maxY0, y));
+                return [cx, yClamped, cz];
+            }
+
+            // Clamp Y inside the inner height volume
+            const minY = cy - innerH / 2;
+            const maxY = cy + innerH / 2;
+            y = Math.max(minY, Math.min(maxY, y));
+
+            if (shape === "circle") {
+                // Circle in XZ with optional custom radius
+                let radius = Number(cfg.radius);
+                if (!Number.isFinite(radius) || radius <= 0) {
+                    radius = Math.min(innerW, innerD) / 2;
+                }
+                if (radius <= 0) return [cx, y, cz];
+
+                const dx = x - cx;
+                const dz = z - cz;
+                const dist = Math.sqrt(dx * dx + dz * dz);
+                if (dist > radius && dist > 1e-4) {
+                    const k = radius / dist;
+                    x = cx + dx * k;
+                    z = cz + dz * k;
+                }
+            } else {
+                // Box in XZ
+                const minX = cx - innerW / 2;
+                const maxX = cx + innerW / 2;
+                const minZ = cz - innerD / 2;
+                const maxZ = cz + innerD / 2;
+                x = Math.max(minX, Math.min(maxX, x));
+                z = Math.max(minZ, Math.min(maxZ, z));
+            }
+
+            return [x, y, z];
+        },
+        [rooms]
+    );
+
 
     // ------------------------------------------------------------
     // Room snapping (optional): when moving rooms near each other,
@@ -4159,6 +4916,45 @@ export default function Interactive3DNodeShowcase() {
                 glow: 0.4,
                 shape: { type: "switch", w: 1.1, h: 0.12, d: 0.35 },
                 light: { type: "none", enabled: false },
+                switch: {
+                    buttonsCount: 2,
+                    physical: false,
+                    physicalHeight: 0.028,
+                    margin: 0.03,
+                    gap: 0.02,
+                    pressDepth: 0.014,
+                    pressAnimMs: 160,
+                    pressHoldMs: 60,
+                    pressMs: 140,
+                    textColor: "#e2e8f0",
+                    textScale: 1,
+                    textRotationDeg: 0,
+                    textAlign: "center",
+                    textOffset: { x: 0, y: 0 },
+                    backlight: {
+                        enabled: false,
+                        color: "#00b7ff",
+                        pressedColor: "#00b7ff",
+                        intensity: 1.6,
+                        opacity: 0.35,
+                        padding: 0.012,
+                    },
+                    textGlow: {
+                        enabled: false,
+                        color: "#ffffff",
+                        pressedColor: "#ffffff",
+                        intensity: 1,
+                        outlineWidth: 0.02,
+                        outlineOpacity: 0.8,
+                    },
+                    buttonColor: "#22314d",
+                    pressedColor: "#101a2d",
+                    hoverEmissive: "#ffffff",
+                    buttons: [
+                        { name: "On", actionIds: [] },
+                        { name: "Off", actionIds: [] },
+                    ],
+                },
                 anim: {},
                 signal: { style: "rays", speed: 1.2, size: 1 },
             },
@@ -4256,6 +5052,68 @@ export default function Interactive3DNodeShowcase() {
             }));
         }
     }, [nodes, rooms]);
+
+    // --- Group CRUD helpers (used by Groups – Members panel) ---
+    const renameGroup = useCallback((gid, name) => {
+        if (!gid) return;
+        keepLeftScroll(() => {
+            setGroups((prev) => prev.map((g) => (g.id === gid ? { ...g, name } : g)));
+        });
+    }, []);
+
+    const deleteGroup = useCallback((gid) => {
+        if (!gid) return;
+        keepLeftScroll(() => {
+            // Remove group record
+            setGroups((prev) => prev.filter((g) => g.id !== gid));
+            // Ungroup rooms/nodes that were in this group
+            setRooms((prev) => prev.map((r) => (r.groupId === gid ? { ...r, groupId: null } : r)));
+            setNodes((prev) => prev.map((n) => (n.groupId === gid ? { ...n, groupId: null } : n)));
+            // Exit add-mode if it was pointing to this group
+            setGroupAddModeId((cur) => (cur === gid ? null : cur));
+            // Clear selection/multisel that was in this group (best-effort)
+            setSelected((sel) => {
+                if (!sel) return sel;
+                if (sel.type === "node") {
+                    const n = nodes.find((x) => x.id === sel.id);
+                    return n?.groupId === gid ? null : sel;
+                }
+                if (sel.type === "room") {
+                    const r = rooms.find((x) => x.id === sel.id);
+                    return r?.groupId === gid ? null : sel;
+                }
+                return sel;
+            });
+            setMultiSel((prev) =>
+                (prev || []).filter((it) => {
+                    if (it.type === "node") return nodes.find((n) => n.id === it.id)?.groupId !== gid;
+                    if (it.type === "room") return rooms.find((r) => r.id === it.id)?.groupId !== gid;
+                    return true;
+                })
+            );
+        });
+    }, [nodes, rooms]);
+
+    const removeRoomFromGroup = useCallback((gid, roomId, opts = {}) => {
+        if (!roomId) return;
+        const removeNodesInRoom = opts.removeNodesInRoom !== false;
+        keepLeftScroll(() => {
+            setRooms((prev) => prev.map((r) => (r.id === roomId && (!gid || r.groupId === gid) ? { ...r, groupId: null } : r)));
+            if (removeNodesInRoom) {
+                setNodes((prev) =>
+                    prev.map((n) => (n.roomId === roomId && (!gid || n.groupId === gid) ? { ...n, groupId: null } : n))
+                );
+            }
+        });
+    }, []);
+
+    const removeNodeFromGroup = useCallback((nodeId) => {
+        if (!nodeId) return;
+        keepLeftScroll(() => {
+            setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, groupId: null } : n)));
+        });
+    }, []);
+
 
     const moveGroup = useCallback((gid) => {
         const { gRooms, gNodes } = getGroupMembers(gid);
@@ -4420,11 +5278,19 @@ export default function Interactive3DNodeShowcase() {
         setSelected(items[0] || null);
     }, [groups, links, getGroupMembers]);
 
-    const mergeGroups = useCallback((intoGid, fromGid) => {
+    const mergeGroups = useCallback((intoGid, fromGid, opts = {}) => {
         if (!intoGid || !fromGid || intoGid === fromGid) return;
+        const removeSource = !!opts.removeSource;
+
         setRooms(prev => prev.map(r => r.groupId === fromGid ? { ...r, groupId: intoGid } : r));
         setNodes(prev => prev.map(n => n.groupId === fromGid ? { ...n, groupId: intoGid } : n));
-    }, []);
+
+        if (removeSource) {
+            setGroups(prev => prev.filter(g => g.id !== fromGid));
+            // If user was in add-to-group mode for the removed group, stop it.
+            setGroupAddModeId((cur) => (cur === fromGid ? null : cur));
+        }
+    }, [setRooms, setNodes, setGroups]);
 
     useEffect(() => {
         try { localStorage.setItem("epic3d.decks.v1", JSON.stringify(decks)); } catch {}
@@ -4492,7 +5358,9 @@ export default function Interactive3DNodeShowcase() {
         [decks]
     );
     const hiddenRoomIds = useMemo(
-        () => new Set(rooms.filter((r) => r.deckId && hiddenDeckIds.has(r.deckId)).map((r) => r.id)),
+        () => new Set(rooms
+            .filter((r) => (r.hidden === true) || (r.deckId && hiddenDeckIds.has(r.deckId)))
+            .map((r) => r.id)),
         [rooms, hiddenDeckIds]
     );
     // Nodes visible in-scene should also be the only ones that render signal VFX.
@@ -4594,7 +5462,9 @@ export default function Interactive3DNodeShowcase() {
         } catch {}
     }, [actionsHud]);
     const [linkFromId, setLinkFromId] = useState(null);
-    const [levelFromNodeId, setLevelFromNodeId] = useState(null);  // 👈 NEW
+    // Align mode: pick a "master" node in the inspector, then click a target node to copy one axis.
+    const [levelFromNodeId, setLevelFromNodeId] = useState(null);
+    const [levelAxis, setLevelAxis] = useState("y");
 
     const [moveMode, setMoveMode] = useState(true);
     const [transformMode, setTransformMode] = useState("translate"); // 'translate' | 'rotate' | 'scale'
@@ -4881,21 +5751,66 @@ export default function Interactive3DNodeShowcase() {
         const gid = groupAddModeId;
         if (!gid) return;
 
-        // gather picked ids from selection state
-        const picked = new Set();
-        if (selected) picked.add(`${selected.type}:${selected.id}`);
-        multiSel.forEach(it => picked.add(`${it.type}:${it.id}`));
+        const roomIds = new Set();
+        const nodeIds = new Set();
+        const push = (it) => {
+            if (!it || !it.type || !it.id) return;
+            if (it.type === 'room') roomIds.add(it.id);
+            if (it.type === 'node') nodeIds.add(it.id);
+        };
+        push(selected);
+        (multiSel || []).forEach(push);
 
-        if (picked.size === 0) {
+        if (roomIds.size === 0 && nodeIds.size === 0) {
             setGroupAddModeId(null);
             return;
         }
 
-        setRooms(prev => prev.map(r => picked.has(`room:${r.id}`) ? { ...r, groupId: gid } : r));
-        setNodes(prev => prev.map(n => picked.has(`node:${n.id}`) ? { ...n, groupId: gid } : n));
+        // Assign rooms, and also assign ALL nodes inside any selected rooms
+        setRooms(prev => prev.map(r => roomIds.has(r.id) ? { ...r, groupId: gid } : r));
+        setNodes(prev => prev.map(n => (nodeIds.has(n.id) || (n.roomId && roomIds.has(n.roomId))) ? { ...n, groupId: gid } : n));
 
         setGroupAddModeId(null);
     }, [groupAddModeId, selected, multiSel, setRooms, setNodes]);
+
+    const addRoomToGroup = useCallback((gid, roomId, includeRoomNodes = true) => {
+        if (!gid || !roomId) return;
+        setRooms((prev) => prev.map((r) => (r.id === roomId ? { ...r, groupId: gid } : r)));
+        if (includeRoomNodes) {
+            setNodes((prev) => prev.map((n) => (n.roomId === roomId ? { ...n, groupId: gid } : n)));
+        }
+    }, [setRooms, setNodes]);
+
+    const addNodeToGroup = useCallback((gid, nodeId) => {
+        if (!gid || !nodeId) return;
+        setNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, groupId: gid } : n)));
+    }, [setNodes]);
+
+    // Adds the current selection (single + multi) to a group immediately.
+    // If any rooms are included, all nodes in those rooms are also added.
+    const addSelectionToGroup = useCallback((gid) => {
+        if (!gid) return;
+
+        const roomIds = new Set();
+        const nodeIds = new Set();
+        const push = (it) => {
+            if (!it || !it.type || !it.id) return;
+            if (it.type === 'room') roomIds.add(it.id);
+            if (it.type === 'node') nodeIds.add(it.id);
+        };
+        push(selected);
+        (multiSel || []).forEach(push);
+
+        if (roomIds.size === 0 && nodeIds.size === 0) return;
+
+        setRooms((prev) => prev.map((r) => (roomIds.has(r.id) ? { ...r, groupId: gid } : r)));
+        setNodes((prev) =>
+            prev.map((n) =>
+                (nodeIds.has(n.id) || (n.roomId && roomIds.has(n.roomId))) ? { ...n, groupId: gid } : n
+            )
+        );
+    }, [selected, multiSel, setRooms, setNodes]);
+
 
     const toggleSel = (list, item) =>
         list.some((x) => x.type === item.type && x.id === item.id)
@@ -5122,6 +6037,83 @@ export default function Interactive3DNodeShowcase() {
     });
     const [roomOpacity, setRoomOpacity] = useState(0.12);
 
+    // Ground grid (visual + snapping helpers)
+    const defaultGridConfig = useMemo(() => ({
+        enabled: true,
+        color: "#4aa3ff",
+        // This is "visual opacity" implemented as a blend-strength toward the grid color
+        opacity: 0.35,
+        cellSize: 0.25,
+        majorEvery: 10,
+        fadeDistance: 100,
+        fadeStrength: 1,
+        cellThickness: 0.85,
+        sectionThickness: 1.15,
+
+        infiniteGrid: true,
+        followCamera: false,
+        showPlane: true,
+        showAxes: false,
+
+        // 3D grid space (extra wall planes)
+        space3D: false,
+        planeOffsetX: 0,
+        planeOffsetZ: 0,
+        space3DCount: 4,
+        space3DStep: 5,
+        space3DXY: true,
+        space3DYZ: true,
+
+        // selection highlight
+        highlightSelection: true,
+        highlightColor: "#a78bfa",
+        highlightOpacity: 0.18,
+
+        // snapping
+        linkSnap: true,
+        snapMode: "vertices", // "off" | "vertices" | "tiles"
+        snapTilesCenterMove: "auto", // "auto" | "off"
+        tileCenterResize: true,
+
+        // snap preview ghost
+        snapGhostEnabled: true,
+        snapGhostColor: "#7dd3fc",
+        snapGhostOpacity: 0.22,
+
+        // Floors / Decks (horizontal layers)
+        floorsEnabled: false,
+        floorsAutoEnabled: false,
+        floorsAutoBaseY: 0,
+        floorsAutoStep: 2,
+        floorsAutoCount: 0,
+        floorsManual: [],
+        snapToFloors: false,
+        snapFloorMode: "nearest", // "nearest" | "active"
+        activeFloorId: "ground",
+        floorSnapAlign: "base", // "base" | "center"
+
+        // optional: where to blend the grid color from
+        blendBase: "#0d1322",
+    }), []);
+
+    const [gridConfig, setGridConfig] = useState(() => {
+        if (typeof window === "undefined") return defaultGridConfig;
+        try {
+            const raw = localStorage.getItem("epic3d.gridConfig.v1");
+            if (!raw) return defaultGridConfig;
+            const parsed = JSON.parse(raw);
+            return { ...defaultGridConfig, ...(parsed || {}) };
+        } catch {
+            return defaultGridConfig;
+        }
+    });
+
+    useEffect(() => {
+        try {
+            localStorage.setItem("epic3d.gridConfig.v1", JSON.stringify(gridConfig));
+        } catch {}
+    }, [gridConfig]);
+
 
     const [animate, setAnimate] = useState(true);
     const [perf, setPerf] = useState("med"); // 'low' | 'med' | 'high'
@@ -5166,6 +6158,196 @@ export default function Interactive3DNodeShowcase() {
         placeKind: "node", // 'node' | 'switch' | 'room'
         roomDrawMode: "box", // "single" | "box" | "points"
     });
+
+    // If desired, keep snapping aligned with the grid cell size (one source of truth)
+    useEffect(() => {
+        if (!(gridConfig?.linkSnap ?? true)) return;
+        const cell = Number(gridConfig?.cellSize);
+        if (!Number.isFinite(cell) || cell <= 0) return;
+        setPlacement((p) => {
+            const cur = Number(p?.snap ?? 0);
+            if (Number.isFinite(cur) && Math.abs(cur - cell) < 1e-9) return p;
+            return { ...(p || {}), snap: cell };
+        });
+    }, [gridConfig?.cellSize, gridConfig?.linkSnap]);
+
+    // If the user edits the snap in the Placement panel while linked, mirror it back into the grid
+    useEffect(() => {
+        if (!(gridConfig?.linkSnap ?? true)) return;
+        const s = Number(placement?.snap);
+        if (!Number.isFinite(s) || s <= 0) return;
+        setGridConfig((prev) => {
+            const cur = Number(prev?.cellSize);
+            if (Number.isFinite(cur) && Math.abs(cur - s) < 1e-9) return prev;
+            return { ...(prev || {}), cellSize: s };
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [placement?.snap, gridConfig?.linkSnap]);
+
+
+    // ---------- Grid snapping + floor snapping (data mutation) ----------
+    const _safeNum = (v, fallback) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : fallback;
+    };
+
+    const _effectiveSnapMode = () => {
+        const m = String(gridConfig?.snapMode || "").trim();
+        if (m === "off" || m === "vertices" || m === "tiles") return m;
+        return (gridConfig?.linkSnap ?? true) ? "vertices" : "off";
+    };
+
+    const _gridCell = () => {
+        const cell = _safeNum(gridConfig?.cellSize, _safeNum(placement?.snap, 0.25));
+        return Math.max(0.01, cell);
+    };
+
+    const _gridOffsets = () => {
+        return {
+            ox: _safeNum(gridConfig?.planeOffsetX, 0),
+            oz: _safeNum(gridConfig?.planeOffsetZ, 0),
+        };
+    };
+
+    const _computeFloors = () => {
+        const baseY = _safeNum(gridConfig?.y, 0);
+        const wantFloors = !!gridConfig?.floorsEnabled || !!gridConfig?.snapToFloors;
+        const out = [{ id: "ground", y: baseY }];
+        if (!wantFloors) return out;
+
+        const autoEnabled = !!gridConfig?.floorsAutoEnabled;
+        const autoCount = Math.max(0, Math.min(64, Math.round(_safeNum(gridConfig?.floorsAutoCount, 0))));
+        const autoStep = Math.max(0.05, _safeNum(gridConfig?.floorsAutoStep, 2));
+        const autoBase = _safeNum(gridConfig?.floorsAutoBaseY, baseY);
+        if (autoEnabled && autoCount > 0) {
+            for (let i = 0; i < autoCount; i++) {
+                out.push({ id: `auto_${i}`, y: autoBase + i * autoStep });
+            }
+        }
+
+        const manual = Array.isArray(gridConfig?.floorsManual) ? gridConfig.floorsManual : [];
+        for (const f of manual) {
+            if (!f?.id) continue;
+            out.push({ id: f.id, y: _safeNum(f.y, 0) });
+        }
+        return out;
+    };
+
+    const _pickFloorY = (y) => {
+        const floors = _computeFloors();
+        const mode = String(gridConfig?.snapFloorMode || "nearest");
+        const preferId = String(gridConfig?.activeFloorId || "").trim();
+
+        if (mode === "active" && preferId) {
+            const f = floors.find((ff) => ff.id === preferId);
+            if (f) return f.y;
+        }
+
+        // nearest
+        let best = floors[0]?.y ?? 0;
+        let bestD = Math.abs((floors[0]?.y ?? 0) - y);
+        for (let i = 1; i < floors.length; i++) {
+            const fy = floors[i]?.y ?? 0;
+            const d = Math.abs(fy - y);
+            if (d < bestD) {
+                bestD = d;
+                best = fy;
+            }
+        }
+        return best;
+    };
+
+    const _snapAxis = (v, cell, offset = 0) => {
+        return Math.round((v - offset) / cell) * cell + offset;
+    };
+
+    const _snapAxisTiles = (v, cell, offset = 0, span = 1) => {
+        const odd = (Math.round(span) % 2) === 1;
+        const tileOffset = odd ? cell * 0.5 : 0;
+        return Math.round((v - offset - tileOffset) / cell) * cell + offset + tileOffset;
+    };
+
+    const _applyGridSnapXZ = (x, z, spanX = 1, spanZ = 1) => {
+        const mode = _effectiveSnapMode();
+        if (mode === "off") return [x, z];
+        const cell = _gridCell();
+        const { ox, oz } = _gridOffsets();
+
+        if (mode === "tiles" && String(gridConfig?.snapTilesCenterMove || "auto") !== "off") {
+            return [_snapAxisTiles(x, cell, ox, spanX), _snapAxisTiles(z, cell, oz, spanZ)];
+        }
+        // vertices
+        return [_snapAxis(x, cell, ox), _snapAxis(z, cell, oz)];
+    };
+
+    const _nodeFootprintXZ = (node) => {
+        const sh = node?.shape || {};
+        const t = sh.type;
+        if (t === "switch") {
+            return { w: _safeNum(sh.w, 1.1), d: _safeNum(sh.d, 0.35) };
+        }
+        if (t === "sphere") {
+            const r = _safeNum(sh.radius, 0.35);
+            return { w: r * 2, d: r * 2 };
+        }
+        if (t === "cylinder" || t === "cone" || t === "circle" || t === "disc" || t === "hexagon") {
+            const r = _safeNum(sh.radius, 0.45);
+            return { w: r * 2, d: r * 2 };
+        }
+        if (t === "box" || t === "square") {
+            const sc = Array.isArray(sh.scale) ? sh.scale : [0.6, 0.6, 0.6];
+            return { w: _safeNum(sc[0], 0.6), d: _safeNum(sc[2], 0.6) };
+        }
+        // fallback
+        return { w: 0.6, d: 0.6 };
+    };
+
+    const _nodeHalfHeight = (node) => {
+        const sh = node?.shape || {};
+        const t = sh.type;
+        if (t === "switch") return _safeNum(sh.h, 0.28) * 0.5;
+        if (t === "sphere") return _safeNum(sh.radius, 0.35);
+        if (t === "cylinder" || t === "cone") return _safeNum(sh.height, 0.8) * 0.5;
+        if (t === "box" || t === "square") {
+            const sc = Array.isArray(sh.scale) ? sh.scale : [0.6, 0.6, 0.6];
+            return _safeNum(sc[1], 0.6) * 0.5;
+        }
+        return 0.3;
+    };
+
+    const applyGridSnapToNode = (node, pos) => {
+        const p = Array.isArray(pos) ? pos : [0, 0, 0];
+        const cell = _gridCell();
+        const fp = _nodeFootprintXZ(node);
+        const spanX = Math.max(1, Math.round(fp.w / cell));
+        const spanZ = Math.max(1, Math.round(fp.d / cell));
+        const [sx, sz] = _applyGridSnapXZ(p[0], p[2], spanX, spanZ);
+
+        let sy = p[1];
+        if ((gridConfig?.snapToFloors ?? false) && !node?.roomId) {
+            const fy = _pickFloorY(sy);
+            const align = String(gridConfig?.floorSnapAlign || "base");
+            sy = align === "center" ? fy : (fy + _nodeHalfHeight(node));
+        }
+        return [sx, sy, sz];
+    };
+
+    const applyGridSnapToRoom = (room, center) => {
+        const c = Array.isArray(center) ? center : (room?.center || [0, 0, 0]);
+        const cell = _gridCell();
+        const size = Array.isArray(room?.size) ? room.size : [1.8, 1, 1.8];
+        const spanX = Math.max(1, Math.round(_safeNum(size[0], 1.8) / cell));
+        const spanZ = Math.max(1, Math.round(_safeNum(size[2], 1.8) / cell));
+        const [sx, sz] = _applyGridSnapXZ(c[0], c[2], spanX, spanZ);
+
+        let sy = c[1];
+        if (gridConfig?.snapToFloors ?? false) {
+            const fy = _pickFloorY(sy);
+            const align = String(gridConfig?.floorSnapAlign || "base");
+            sy = align === "center" ? fy : (fy + _safeNum(size[1], 1) * 0.5);
+        }
+        return [sx, sy, sz];
+    };
     const placingNode = placement.armed && placement.placeKind === "node";
     const placingSwitch = placement.armed && placement.placeKind === "switch";
     const placingRoom = placement.armed && placement.placeKind === "room";
@@ -5533,6 +6715,124 @@ export default function Interactive3DNodeShowcase() {
             }
 
 
+            // Arrow keys: nudge selection in the XZ plane (Shift = 10×)
+            if (
+                (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") &&
+                !e.ctrlKey &&
+                !e.metaKey &&
+                !e.altKey
+            ) {
+                const raw = (Array.isArray(multiSel) && multiSel.length)
+                    ? multiSel
+                    : (selected ? [selected] : []);
+
+                const hasAnySelection = (raw && raw.length) || !!selectedBreakpoint;
+                if (!hasAnySelection) {
+                    // Let the browser handle arrows (scroll) if nothing is selected
+                } else {
+                    e.preventDefault();
+
+                    const baseSnap = Number(placement?.snap);
+                    const step = (Number.isFinite(baseSnap) && baseSnap > 0) ? baseSnap : 0.1;
+                    const amt = e.shiftKey ? (step * 10) : step;
+
+                    let dx = 0;
+                    let dz = 0;
+                    if (e.key === "ArrowLeft") dx = -amt;
+                    if (e.key === "ArrowRight") dx = amt;
+                    if (e.key === "ArrowUp") dz = -amt;
+                    if (e.key === "ArrowDown") dz = amt;
+
+                    // Breakpoint nudge (if a breakpoint is selected)
+                    if (selectedBreakpoint?.linkId != null) {
+                        const linkId = selectedBreakpoint.linkId;
+                        const bpIndex = selectedBreakpoint.index;
+                        setLinks((prev) => prev.map((l) => {
+                            if (l.id !== linkId) return l;
+                            const bps = Array.isArray(l.breakpoints) ? [...l.breakpoints] : [];
+                            const cur = bps[bpIndex] || [0, 0, 0];
+                            bps[bpIndex] = [Number(cur[0]) + dx, Number(cur[1]) || 0, Number(cur[2]) + dz];
+                            return { ...l, breakpoints: bps };
+                        }));
+                    }
+
+                    // Build selection sets
+                    const roomIds = new Set();
+                    const nodeIds = new Set();
+                    const pictureIds = new Set();
+                    let wantsModel = false;
+                    for (const it of (raw || [])) {
+                        if (!it || !it.type) continue;
+                        if (it.type === "room" && it.id) roomIds.add(it.id);
+                        if (it.type === "node" && it.id) nodeIds.add(it.id);
+                        if (it.type === "picture" && it.id) pictureIds.add(it.id);
+                        if (it.type === "model") wantsModel = true;
+                    }
+                    if (selected?.type === "model") wantsModel = true;
+
+                    // Respect locked rooms (don't move them, and don't move their nodes)
+                    const movableRoomIds = new Set();
+                    try {
+                        const nowRooms = roomsRef?.current || [];
+                        for (const id of roomIds) {
+                            const r = nowRooms.find((x) => x.id === id);
+                            if (r && !r.locked) movableRoomIds.add(id);
+                        }
+                    } catch {}
+
+                    // Move rooms (and their contents)
+                    if (movableRoomIds.size) {
+                        setRooms((prev) => prev.map((r) => {
+                            if (!movableRoomIds.has(r.id)) return r;
+                            const c = r.center || [0, 0, 0];
+                            const next = [Number(c[0]) + dx, Number(c[1]) || 0, Number(c[2]) + dz];
+                            return { ...r, center: clampRoomToPictureDecks ? clampRoomToPictureDecks({ ...r, center: next }, next) : next };
+                        }));
+
+                        // Shift nodes that belong to moved rooms (same delta)
+                        setNodes((prev) => prev.map((n) => {
+                            if (!n?.roomId || !movableRoomIds.has(n.roomId)) return n;
+                            const p = n.position || [0, 0, 0];
+                            let next = [Number(p[0]) + dx, Number(p[1]) || 0, Number(p[2]) + dz];
+                            if (clampNodeToPictureDecks) next = clampNodeToPictureDecks(n, next);
+                            return { ...n, position: next };
+                        }));
+                    }
+
+                    // Move nodes (skip nodes that belong to moved rooms to avoid double move)
+                    if (nodeIds.size) {
+                        setNodes((prev) => prev.map((n) => {
+                            if (!n || !nodeIds.has(n.id)) return n;
+                            if (n.roomId && movableRoomIds.has(n.roomId)) return n;
+                            const p = n.position || [0, 0, 0];
+                            let next = [Number(p[0]) + dx, Number(p[1]) || 0, Number(p[2]) + dz];
+                            if (clampNodeToRoomBounds) next = clampNodeToRoomBounds(n, next);
+                            if (clampNodeToPictureDecks) next = clampNodeToPictureDecks(n, next);
+                            return { ...n, position: next };
+                        }));
+                    }
+
+                    // Move pictures (if selected)
+                    if (pictureIds.size) {
+                        setImportedPictures((prev) => prev.map((pic) => {
+                            if (!pic || !pictureIds.has(pic.id)) return pic;
+                            return { ...pic, x: (Number(pic.x) || 0) + dx, z: (Number(pic.z) || 0) + dz };
+                        }));
+                    }
+
+                    // Move the imported model
+                    if (wantsModel) {
+                        setModelPosition((prev) => {
+                            const p = Array.isArray(prev) ? prev : [0, 0, 0];
+                            return [Number(p[0]) + dx, Number(p[1]) || 0, Number(p[2]) + dz];
+                        });
+                    }
+
+                    return; // don't fall through
+                }
+            }
+
+
             if (e.altKey) {
                 const key = e.key.toLowerCase();
                 let view = null;
@@ -5584,7 +6884,7 @@ export default function Interactive3DNodeShowcase() {
 
 
 
-            if (e.key === "Delete" && selected) {
+            if (e.key === "Delete" && selected && selected.type !== "model") {
                 e.preventDefault();
                 requestDelete(selected);
             }
@@ -5601,7 +6901,7 @@ export default function Interactive3DNodeShowcase() {
 
         window.addEventListener("keydown", onKey);
         return () => window.removeEventListener("keydown", onKey);
-    }, [selected, prodMode, duplicateNode, moveMode, undo, redo]);
+    }, [selected, multiSel, selectedBreakpoint, placement, prodMode, duplicateNode, moveMode, undo, redo, clampNodeToRoomBounds, clampNodeToPictureDecks, clampRoomToPictureDecks]);
 
 // Autosave
     useEffect(() => localStorage.setItem("epic3d.rooms.v7", JSON.stringify(rooms)), [rooms]);
@@ -5696,6 +6996,198 @@ export default function Interactive3DNodeShowcase() {
             })
         );
     }, [setNodes]);
+
+    // Daisy-chained light helpers
+    // If a light has light.daisyChained=true, toggling/setting enabled will propagate
+    // across the linked light graph (slaves + masters).
+    const setLightEnabled = React.useCallback((startId, enabled) => {
+        if (!startId) return;
+        setNodes((prevNodes) => {
+            const byId = new Map(prevNodes.map((n) => [n.id, n]));
+            const start = byId.get(startId);
+            if (!start) return prevNodes;
+
+            const targetEnabled = !!enabled;
+            const daisy = !!start.light?.daisyChained;
+
+            // Non-daisy: only update the requested node
+            if (!daisy) {
+                return prevNodes.map((n) => {
+                    if (n.id !== startId) return n;
+                    if ((n.light?.type || "none") === "none") return n;
+                    return {
+                        ...n,
+                        light: {
+                            ...(n.light || {}),
+                            enabled: targetEnabled,
+                        },
+                    };
+                });
+            }
+
+            // Build undirected adjacency from links
+            const adj = new Map();
+            const L = Array.isArray(links) ? links : [];
+            for (const l of L) {
+                if (!l || !l.from || !l.to) continue;
+                const a = l.from;
+                const b = l.to;
+                if (!adj.has(a)) adj.set(a, new Set());
+                if (!adj.has(b)) adj.set(b, new Set());
+                adj.get(a).add(b);
+                adj.get(b).add(a);
+            }
+
+            // BFS across linked LIGHT nodes
+            const visited = new Set();
+            const q = [startId];
+            visited.add(startId);
+            const MAX = 512;
+
+            while (q.length && visited.size < MAX) {
+                const id = q.shift();
+                const neigh = adj.get(id);
+                if (!neigh) continue;
+                for (const nb of neigh) {
+                    if (visited.has(nb)) continue;
+                    const nn = byId.get(nb);
+                    if (!nn) continue;
+                    if ((nn.light?.type || "none") === "none") continue;
+                    visited.add(nb);
+                    q.push(nb);
+                    if (visited.size >= MAX) break;
+                }
+            }
+
+            return prevNodes.map((n) => {
+                if (!visited.has(n.id)) return n;
+                if ((n.light?.type || "none") === "none") return n;
+                return {
+                    ...n,
+                    light: {
+                        ...(n.light || {}),
+                        enabled: targetEnabled,
+                    },
+                };
+            });
+        });
+    }, [links, setNodes]);
+
+    const toggleLightEnabled = React.useCallback((startId) => {
+        if (!startId) return;
+        setNodes((prevNodes) => {
+            const byId = new Map(prevNodes.map((n) => [n.id, n]));
+            const start = byId.get(startId);
+            if (!start) return prevNodes;
+
+            // If the node isn't a light yet, create a sensible default (keeps Actions usable).
+            const startLight = start.light || {};
+            const startType = startLight.type && startLight.type !== "none" ? startLight.type : "point";
+            const curEnabled = !!startLight.enabled;
+            const targetEnabled = !curEnabled;
+
+            const daisy = !!startLight.daisyChained;
+
+            // Non-daisy: only update the requested node
+            if (!daisy) {
+                return prevNodes.map((n) => {
+                    if (n.id !== startId) return n;
+                    return {
+                        ...n,
+                        light: {
+                            ...(n.light || {}),
+                            type: startType,
+                            intensity: (n.light?.intensity ?? 200),
+                            distance: (n.light?.distance ?? 8),
+                            enabled: targetEnabled,
+                        },
+                    };
+                });
+            }
+
+            // Build undirected adjacency from links
+            const adj = new Map();
+            const L = Array.isArray(links) ? links : [];
+            for (const l of L) {
+                if (!l || !l.from || !l.to) continue;
+                const a = l.from;
+                const b = l.to;
+                if (!adj.has(a)) adj.set(a, new Set());
+                if (!adj.has(b)) adj.set(b, new Set());
+                adj.get(a).add(b);
+                adj.get(b).add(a);
+            }
+
+            const visited = new Set();
+            const q = [startId];
+            visited.add(startId);
+            const MAX = 512;
+
+            while (q.length && visited.size < MAX) {
+                const id = q.shift();
+                const neigh = adj.get(id);
+                if (!neigh) continue;
+                for (const nb of neigh) {
+                    if (visited.has(nb)) continue;
+                    const nn = byId.get(nb);
+                    if (!nn) continue;
+                    if ((nn.light?.type || "none") === "none") continue;
+                    visited.add(nb);
+                    q.push(nb);
+                    if (visited.size >= MAX) break;
+                }
+            }
+
+            return prevNodes.map((n) => {
+                if (!visited.has(n.id)) return n;
+
+                // Start node: ensure it becomes a light when toggling
+                if (n.id === startId) {
+                    return {
+                        ...n,
+                        light: {
+                            ...(n.light || {}),
+                            type: startType,
+                            intensity: (n.light?.intensity ?? 200),
+                            distance: (n.light?.distance ?? 8),
+                            enabled: targetEnabled,
+                        },
+                    };
+                }
+
+                if ((n.light?.type || "none") === "none") return n;
+                return {
+                    ...n,
+                    light: {
+                        ...(n.light || {}),
+                        enabled: targetEnabled,
+                    },
+                };
+            });
+        });
+    }, [links, setNodes]);
+
+
+    const handleSwitchPress = React.useCallback((nodeId, buttonIndex) => {
+        if (!nodeId && nodeId !== 0) return;
+        const idx = Math.max(0, Number(buttonIndex) || 0);
+
+        const n = nodes.find((x) => x.id === nodeId);
+        if (!n) return;
+        if ((n.kind || "node") !== "switch") return;
+
+        const sw = n.switch || {};
+        const btn = (Array.isArray(sw.buttons) ? sw.buttons[idx] : null) || null;
+        const ids = btn && Array.isArray(btn.actionIds) ? btn.actionIds : [];
+        if (!ids.length) return;
+
+        for (const aid of ids) {
+            const a = actions.find((x) => x.id === aid);
+            if (a) runAction(a);
+        }
+    }, [nodes, actions, runAction]);
+
+
 
     const setRoom = (id, patch) => setRooms((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
     /* Import / Export */
@@ -6157,6 +7649,7 @@ export default function Interactive3DNodeShowcase() {
                 prodMode,
                 modelVisible,
                 modelScale,
+                modelPosition,
                 alwaysShow3DInfo,
                 currentModelId,
                 snapRoomsEnabled,
@@ -6392,6 +7885,7 @@ export default function Interactive3DNodeShowcase() {
                 if (u.prodMode !== undefined) setProdMode(!!u.prodMode);
                 if (u.modelVisible !== undefined) setModelVisible(!!u.modelVisible);
                 if (u.modelScale !== undefined) setModelScale(Number(u.modelScale) || 1);
+                if (u.modelPosition && Array.isArray(u.modelPosition) && u.modelPosition.length >= 3) setModelPosition([Number(u.modelPosition[0]) || 0, Number(u.modelPosition[1]) || 0, Number(u.modelPosition[2]) || 0]);
                 if (u.alwaysShow3DInfo !== undefined) setAlwaysShow3DInfo(!!u.alwaysShow3DInfo);
                 if (u.currentModelId) setCurrentModelId(u.currentModelId);
                 if (u.snapRooms) {
@@ -6704,6 +8198,7 @@ export default function Interactive3DNodeShowcase() {
                 prodMode,
                 modelVisible,
                 modelScale,
+                modelPosition,
                 alwaysShow3DInfo,
                 currentModelId,
                 snapRooms: { enabled: snapRoomsEnabled, distance: snapRoomsDistance },
@@ -6720,6 +8215,7 @@ export default function Interactive3DNodeShowcase() {
                 staticId: currentModelId || "",
                 visible: modelVisible,
                 scale: modelScale,
+                position: modelPosition,
             },
 
             // --- NEW: all epic3d.* prefs (top bar, model scale, panel widths, etc) ---
@@ -6919,6 +8415,9 @@ export default function Interactive3DNodeShowcase() {
                         const m = obj.model;
                         if (m.visible !== undefined) { setModelVisible(!!m.visible); appliedModelVisible = true; }
                         if (m.scale !== undefined) { setModelScale(toNum(m.scale, 1)); appliedModelScale = true; }
+                        if (m.position && Array.isArray(m.position) && m.position.length >= 3) {
+                            setModelPosition([toNum(m.position[0], 0), toNum(m.position[1], 0), toNum(m.position[2], 0)]);
+                        }
                         if (!hasBundledModel && m.staticId) { setCurrentModelId(m.staticId); appliedCurrentModel = true; }
                     }
 
@@ -7169,6 +8668,9 @@ export default function Interactive3DNodeShowcase() {
                         const m = obj.model;
                         if (m.visible !== undefined) { setModelVisible(!!m.visible); appliedModelVisible = true; }
                         if (m.scale !== undefined) { setModelScale(toNum(m.scale, 1)); appliedModelScale = true; }
+                        if (m.position && Array.isArray(m.position) && m.position.length >= 3) {
+                            setModelPosition([toNum(m.position[0], 0), toNum(m.position[1], 0), toNum(m.position[2], 0)]);
+                        }
                         if (!hasBundledModel && m.staticId) { setCurrentModelId(m.staticId); appliedCurrentModel = true; }
                     }
 
@@ -7177,6 +8679,9 @@ export default function Interactive3DNodeShowcase() {
                         if (u.prodMode !== undefined) setProdMode(!!u.prodMode);
                         if (u.modelVisible !== undefined) { setModelVisible(!!u.modelVisible); appliedModelVisible = true; }
                         if (u.modelScale !== undefined) { setModelScale(toNum(u.modelScale, 1)); appliedModelScale = true; }
+                        if (u.modelPosition && Array.isArray(u.modelPosition) && u.modelPosition.length >= 3) {
+                            setModelPosition([toNum(u.modelPosition[0], 0), toNum(u.modelPosition[1], 0), toNum(u.modelPosition[2], 0)]);
+                        }
                         if (!hasBundledModel && u.currentModelId) { setCurrentModelId(u.currentModelId); appliedCurrentModel = true; }
                         if (u.alwaysShow3DInfo !== undefined) { setAlwaysShow3DInfo(!!u.alwaysShow3DInfo); appliedAlwaysInfo = true; }
                         if (u.snapRooms) {
@@ -7368,6 +8873,13 @@ export default function Interactive3DNodeShowcase() {
             setPicturePosition(target.id, { x: pos[0], y: pos[1], z: pos[2] });
             return;
         }
+
+        // ----- MODEL (gizmo translate) -----
+        if (target?.type === "model") {
+            setModelPosition([pos[0], pos[1], pos[2]]);
+            return;
+        }
+
 
 
         // ----- GROUP MOVE (multi selection) -----
@@ -8129,6 +9641,24 @@ export default function Interactive3DNodeShowcase() {
             light: { type: "none", enabled: false },
             anim: {},
             signal: { style: isSwitch ? "rays" : "waves", speed: 1, size: 1 },
+            switch: isSwitch ? {
+                buttonsCount: 2,
+                physical: false,
+                physicalHeight: 0.028,
+                margin: 0.03,
+                gap: 0.02,
+                pressDepth: 0.014,
+                pressMs: 140,
+                textColor: "#e2e8f0",
+                textScale: 1,
+                buttonColor: "#22314d",
+                pressedColor: "#101a2d",
+                hoverEmissive: "#ffffff",
+                buttons: [
+                    { name: "On", actionIds: [] },
+                    { name: "Off", actionIds: [] },
+                ],
+            } : undefined,
         };
         // assign to room if inside one
         const roomHit = rooms.find(
@@ -8157,236 +9687,6 @@ export default function Interactive3DNodeShowcase() {
         if (a) e.preventDefault();
     };
 
-    const clampNodeToRoomBounds = useCallback(
-        (node, pos) => {
-            const p = Array.isArray(pos)
-                ? [pos[0] ?? 0, pos[1] ?? 0, pos[2] ?? 0]
-                : (pos?.toArray ? pos.toArray() : [pos?.x ?? 0, pos?.y ?? 0, pos?.z ?? 0]);
-
-            if (!node?.roomId) return p;
-
-            const room = rooms.find((r) => r.id === node.roomId);
-            if (!room) return p;
-
-            // IMPORTANT: never return undefined
-            if (room.locked) return p;
-
-            const cfg = room.nodeBounds || {};
-            if (!cfg.enabled) return p;
-
-            const shape = cfg.shape || "box";
-
-            // numeric + safe padding
-            const padding = Number(cfg.padding ?? 0) || 0;
-
-            const center = room.center || [0, 0, 0];
-            const roomSize = room.size || [3, 1.6, 2.2];
-
-            const [cx, cy, cz] = center;
-            const [rw, rh, rd] = roomSize;
-
-            // Use configured bounds if present, otherwise fall back to room size
-            const width  = Number.isFinite(cfg.width)  ? cfg.width  : rw;
-            const height = Number.isFinite(cfg.height) ? cfg.height : rh;
-            const depth  = Number.isFinite(cfg.depth)  ? cfg.depth  : rd;
-
-            // Inner (playable) box, shrunk by padding on all sides
-            const innerW = Math.max(0, width  - padding * 2);
-            const innerH = Math.max(0, height - padding * 2);
-            const innerD = Math.max(0, depth  - padding * 2);
-
-            let [x, y, z] = p;
-
-            // Degenerate – just stick to center in XZ, clamp Y to room height
-            if (innerW <= 0 || innerD <= 0 || innerH <= 0) {
-                const minY0 = cy - rh / 2;
-                const maxY0 = cy + rh / 2;
-                const yClamped = Math.max(minY0, Math.min(maxY0, y));
-                return [cx, yClamped, cz];
-            }
-
-            // Clamp Y inside the inner height volume
-            const minY = cy - innerH / 2;
-            const maxY = cy + innerH / 2;
-            y = Math.max(minY, Math.min(maxY, y));
-
-            if (shape === "circle") {
-                // Circle in XZ with optional custom radius
-                let radius = Number(cfg.radius);
-                if (!Number.isFinite(radius) || radius <= 0) {
-                    radius = Math.min(innerW, innerD) / 2;
-                }
-                if (radius <= 0) return [cx, y, cz];
-
-                const dx = x - cx;
-                const dz = z - cz;
-                const dist = Math.sqrt(dx * dx + dz * dz);
-                if (dist > radius && dist > 1e-4) {
-                    const k = radius / dist;
-                    x = cx + dx * k;
-                    z = cz + dz * k;
-                }
-            } else {
-                // Box in XZ
-                const minX = cx - innerW / 2;
-                const maxX = cx + innerW / 2;
-                const minZ = cz - innerD / 2;
-                const maxZ = cz + innerD / 2;
-                x = Math.max(minX, Math.min(maxX, x));
-                z = Math.max(minZ, Math.min(maxZ, z));
-            }
-
-            return [x, y, z];
-        },
-        [rooms]
-    );
-
-    // ------------------------------------------------------------
-    // Picture "Deck" collisions (Solid pictures)
-    // If a picture is Visible + Solid, nodes/rooms cannot go below its plane
-    // when overlapping its XZ footprint.
-    // Hidden pictures are ignored.
-    // ------------------------------------------------------------
-    const pointInOBB2D = (x, z, obb) => {
-        const dx = x - obb.cx;
-        const dz = z - obb.cz;
-        const c = Math.cos(obb.angle);
-        const s = Math.sin(obb.angle);
-        // inverse rotate by angle
-        const lx = dx * c + dz * s;
-        const lz = -dx * s + dz * c;
-        return Math.abs(lx) <= obb.hx && Math.abs(lz) <= obb.hz;
-    };
-
-    const obbOverlap2D = (a, b) => {
-        // a,b: {cx,cz,hx,hz,angle}
-        const uA = [Math.cos(a.angle), Math.sin(a.angle)];
-        const vA = [-Math.sin(a.angle), Math.cos(a.angle)];
-        const uB = [Math.cos(b.angle), Math.sin(b.angle)];
-        const vB = [-Math.sin(b.angle), Math.cos(b.angle)];
-        const axes = [uA, vA, uB, vB];
-
-        for (const axis of axes) {
-            const ax = axis[0];
-            const az = axis[1];
-
-            const cA = a.cx * ax + a.cz * az;
-            const cB = b.cx * ax + b.cz * az;
-
-            const rA =
-                a.hx * Math.abs(uA[0] * ax + uA[1] * az) +
-                a.hz * Math.abs(vA[0] * ax + vA[1] * az);
-            const rB =
-                b.hx * Math.abs(uB[0] * ax + uB[1] * az) +
-                b.hz * Math.abs(vB[0] * ax + vB[1] * az);
-
-            if (Math.abs(cA - cB) > rA + rB) return false;
-        }
-        return true;
-    };
-
-    const getNodeHalfHeight = (node) => {
-        const sh = node?.shape || {};
-        if (sh.type === "sphere") {
-            const r = Number(sh.radius);
-            return Number.isFinite(r) && r > 0 ? r : 0.28;
-        }
-        if (Number.isFinite(sh.h)) {
-            return Math.max(0.01, Number(sh.h) / 2);
-        }
-        // fallback
-        return 0.28;
-    };
-
-    const clampNodeToPictureDecks = useCallback(
-        (node, pos) => {
-            const p = Array.isArray(pos)
-                ? [pos[0] ?? 0, pos[1] ?? 0, pos[2] ?? 0]
-                : (pos?.toArray ? pos.toArray() : [pos?.x ?? 0, pos?.y ?? 0, pos?.z ?? 0]);
-
-            const pics = (Array.isArray(importedPictures) ? importedPictures : []).filter(
-                (pic) => pic && pic.src && pic.visible && pic.solid,
-            );
-            if (!pics.length) return p;
-
-            const hh = getNodeHalfHeight(node);
-            let [x, y, z] = p;
-            let minY = -Infinity;
-
-            for (const pic of pics) {
-                const s = clamp(Number(pic.scale) || 1, 0.01, 500);
-                const w = FLOORPLAN_BASE_SIZE * s;
-                const aspect = Number.isFinite(pic.aspect) && pic.aspect > 0 ? pic.aspect : 1;
-                const h = w * aspect;
-                const obb = {
-                    cx: Number(pic.x) || 0,
-                    cz: Number(pic.z) || 0,
-                    hx: w / 2,
-                    hz: h / 2,
-                    angle: THREE.MathUtils.degToRad(Number(pic.rotY) || 0),
-                };
-
-                if (!pointInOBB2D(x, z, obb)) continue;
-
-                const deckY = Number(pic.y) || 0;
-                minY = Math.max(minY, deckY + hh);
-            }
-
-            if (Number.isFinite(minY) && minY !== -Infinity && y < minY) y = minY;
-            return [x, y, z];
-        },
-        [importedPictures],
-    );
-
-    const clampRoomToPictureDecks = useCallback(
-        (room, centerPos) => {
-            const c = Array.isArray(centerPos)
-                ? [centerPos[0] ?? 0, centerPos[1] ?? 0, centerPos[2] ?? 0]
-                : (centerPos?.toArray ? centerPos.toArray() : [centerPos?.x ?? 0, centerPos?.y ?? 0, centerPos?.z ?? 0]);
-
-            const pics = (Array.isArray(importedPictures) ? importedPictures : []).filter(
-                (pic) => pic && pic.src && pic.visible && pic.solid,
-            );
-            if (!pics.length) return c;
-
-            const size = room?.size || [1, 1, 1];
-            const hy = (Number(size[1]) || 1) / 2;
-
-            const roomObb = {
-                cx: c[0],
-                cz: c[2],
-                hx: (Number(size[0]) || 1) / 2,
-                hz: (Number(size[2]) || 1) / 2,
-                angle: Number(room?.rotation?.[1]) || 0,
-            };
-
-            let y = c[1];
-            let minCenterY = -Infinity;
-
-            for (const pic of pics) {
-                const s = clamp(Number(pic.scale) || 1, 0.01, 500);
-                const w = FLOORPLAN_BASE_SIZE * s;
-                const aspect = Number.isFinite(pic.aspect) && pic.aspect > 0 ? pic.aspect : 1;
-                const h = w * aspect;
-                const picObb = {
-                    cx: Number(pic.x) || 0,
-                    cz: Number(pic.z) || 0,
-                    hx: w / 2,
-                    hz: h / 2,
-                    angle: THREE.MathUtils.degToRad(Number(pic.rotY) || 0),
-                };
-
-                if (!obbOverlap2D(roomObb, picObb)) continue;
-                const deckY = Number(pic.y) || 0;
-                minCenterY = Math.max(minCenterY, deckY + hy);
-            }
-
-            if (Number.isFinite(minCenterY) && minCenterY !== -Infinity && y < minCenterY) y = minCenterY;
-            return [c[0], y, c[2]];
-        },
-        [importedPictures],
-    );
-
 
 
 
@@ -8394,6 +9694,7 @@ export default function Interactive3DNodeShowcase() {
 
     const requestDelete = (target) => {
         if (!target) return;
+        if (target.type === "model") return;
         if (target.type === "node") {
             const linked = links.filter((l) => l.from === target.id || l.to === target.id);
             if (linked.length) setConfirm({ open: true, payload: target, text: `Delete node and ${linked.length} linked connection(s)?` });
@@ -8507,7 +9808,7 @@ export default function Interactive3DNodeShowcase() {
             return;
         }
 
-        // 🔹 NEW: Level Target mode
+        // 🔹 Align mode (pick a master node in the inspector, then click a target node)
         if (levelFromNodeId) {
             // Clicking the source again just cancels
             if (levelFromNodeId === id) {
@@ -8521,9 +9822,15 @@ export default function Interactive3DNodeShowcase() {
             if (src && dst) {
                 const srcPos = src.position || [0, 0, 0];
                 const dstPos = dst.position || [0, 0, 0];
+                const ax = (levelAxis || "y").toLowerCase();
 
-                // Keep X and Z from target, copy Y from source
-                const nextPos = [dstPos[0], srcPos[1], dstPos[2]];
+                // Copy the chosen axis from the master (src) onto the target (dst)
+                const nextPos =
+                    ax === "x"
+                        ? [srcPos[0], dstPos[1], dstPos[2]]
+                        : ax === "z"
+                            ? [dstPos[0], dstPos[1], srcPos[2]]
+                            : [dstPos[0], srcPos[1], dstPos[2]]; // default: Y
 
                 setNodes((prev) =>
                     prev.map((n) =>
@@ -9501,21 +10808,7 @@ export default function Interactive3DNodeShowcase() {
                                                                                     !!n.light
                                                                                         .enabled
                                                                                 }
-                                                                                onChange={(
-                                                                                    v,
-                                                                                ) =>
-                                                                                    setNode(
-                                                                                        n.id,
-                                                                                        {
-                                                                                            light: {
-                                                                                                ...(n.light ||
-                                                                                                    {}),
-                                                                                                enabled:
-                                                                                                v,
-                                                                                            },
-                                                                                        },
-                                                                                    )
-                                                                                }
+                                                                                onChange={(v) => setLightEnabled(n.id, v)}
                                                                                 label="light"
                                                                             />
                                                                         )}
@@ -9549,97 +10842,725 @@ export default function Interactive3DNodeShowcase() {
         );
     };
 
+    // --- Groups UI helpers (local, scoped to the editor) ---
+    const NFCard = ({ children, style, onClick, title }) => (
+        <div
+            title={title}
+            onClick={onClick}
+            style={{
+                padding: 12,
+                borderRadius: 16,
+                border: "1px solid rgba(255,255,255,0.12)",
+                background:
+                    "linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.025))",
+                boxShadow:
+                    "inset 0 0 0 1px rgba(255,255,255,0.03), 0 18px 50px rgba(0,0,0,0.35)",
+                ...style,
+            }}
+        >
+            {children}
+        </div>
+    );
+
+    const NFTag = ({ children, tone = "neutral", style }) => {
+        const bg =
+            tone === "blue"
+                ? "rgba(59,130,246,0.18)"
+                : tone === "teal"
+                    ? "rgba(20,184,166,0.18)"
+                    : "rgba(255,255,255,0.08)";
+        const bd =
+            tone === "blue"
+                ? "rgba(59,130,246,0.30)"
+                : tone === "teal"
+                    ? "rgba(20,184,166,0.30)"
+                    : "rgba(255,255,255,0.16)";
+        return (
+            <span
+                style={{
+                    padding: "3px 8px",
+                    borderRadius: 999,
+                    border: `1px solid ${bd}`,
+                    background: bg,
+                    fontSize: 11,
+                    fontWeight: 750,
+                    opacity: 0.95,
+                    ...style,
+                }}
+            >
+                {children}
+            </span>
+        );
+    };
+    const EyeOpenIcon = ({ size = 16 }) => (
+        <svg
+            width={size}
+            height={size}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ display: 'block' }}
+        >
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+            <circle cx="12" cy="12" r="3" />
+        </svg>
+    );
+
+    const EyeClosedIcon = ({ size = 16 }) => (
+        <svg
+            width={size}
+            height={size}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{ display: 'block' }}
+        >
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+            <circle cx="12" cy="12" r="3" />
+            <path d="M3 3l18 18" />
+        </svg>
+    );
+
+    const NFIconBtn = ({ icon, title, onClick, danger, active }) => (
+        <button
+            type="button"
+            title={title}
+            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+                e.stopPropagation();
+                onClick && onClick(e);
+            }}
+            style={{
+                width: 30,
+                height: 30,
+                display: "grid",
+                placeItems: "center",
+                borderRadius: 12,
+                border: active
+                    ? "1px solid rgba(255,255,255,0.26)"
+                    : "1px solid rgba(255,255,255,0.14)",
+                background: danger
+                    ? "rgba(239,68,68,0.14)"
+                    : active
+                        ? "rgba(255,255,255,0.10)"
+                        : "rgba(255,255,255,0.06)",
+                color: danger ? "#fecaca" : "#fff",
+                cursor: "pointer",
+                boxShadow:
+                    "0 10px 26px rgba(0,0,0,0.28), inset 0 0 0 1px rgba(255,255,255,0.03)",
+            }}
+        >
+            {typeof icon === "string" ? (
+                <span style={{ fontSize: 14, lineHeight: 1 }}>{icon}</span>
+            ) : (
+                icon
+            )}
+        </button>
+    );
+
+    const NFSubLabel = ({ children, style }) => (
+        <div
+            style={{
+                textTransform: "uppercase",
+                letterSpacing: "0.14em",
+                fontSize: 9,
+                fontWeight: 800,
+                opacity: 0.65,
+                marginBottom: 6,
+                ...style,
+            }}
+        >
+            {children}
+        </div>
+    );
+
     const GroupsPanel = () => {
         const [mergePick, setMergePick] = useState({});
+        const [mergeRemove, setMergeRemove] = useState({});
+        const [addRoomPick, setAddRoomPick] = useState({});
+        const [addNodePick, setAddNodePick] = useState({});
+        const [groupSearch, setGroupSearch] = useState("");
 
         const createGroup = () => {
             const id = uuid();
             const base = "Group";
             const used = new Set(groups.map((g) => (g.name || "").toLowerCase()));
-            let name = base, i = 2;
+            let name = base,
+                i = 2;
             while (used.has(name.toLowerCase())) name = `${base} ${i++}`;
             setGroups((prev) => [...prev, { id, name, hidden: false }]);
         };
 
+        const getSelKeys = () => {
+            const s = new Set();
+            const push = (it) => {
+                if (!it || !it.type || !it.id) return;
+                if (it.type !== "room" && it.type !== "node") return;
+                s.add(`${it.type}:${it.id}`);
+            };
+            push(selected);
+            (multiSel || []).forEach(push);
+            return s;
+        };
+        const selKeys = getSelKeys();
+        const selCount = selKeys.size;
+
+        const visibleGroups = useMemo(() => {
+            const q = (groupSearch || "").trim().toLowerCase();
+            if (!q) return groups;
+            return (groups || []).filter((g) => {
+                const name = (g.name || "").toLowerCase();
+                const id = (g.id || "").toLowerCase();
+                return name.includes(q) || id.includes(q);
+            });
+        }, [groups, groupSearch]);
+
         return (
             <Panel title="Groups">
-                <div style={{ display: "grid", gap: 10 }}>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                        <Btn onClick={createGroup}>New group</Btn>
+                <div style={{ display: "grid", gap: 12 }}>
+                    <div
+                        style={{
+                            display: "flex",
+                            gap: 10,
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                            justifyContent: "space-between",
+                        }}
+                    >
+                        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                            <Btn onClick={createGroup} variant="primary">
+                                New group
+                            </Btn>
+                            <div style={{ minWidth: 220, maxWidth: 320 }}>
+                                <Input
+                                    value={groupSearch}
+                                    onChange={(e) => setGroupSearch(e.target.value)}
+                                    placeholder="Search groups…"
+                                />
+                            </div>
+                            <div style={{ fontSize: 11, opacity: 0.75 }}>Tip: rooms + nodes inherit group hide / show.</div>
+                        </div>
+
                         {groupAddModeId && (
-                            <div style={{ fontSize: 12, opacity: 0.85 }}>
-                                Add-to-group active: select nodes/rooms in the scene, then press Done to add them
-                                <Btn style={{ marginLeft: 8 }} onClick={applyGroupAddMode}>Done</Btn>
+                            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                <NFTag tone="blue">Add-to-group active</NFTag>
+                                <div style={{ fontSize: 11, opacity: 0.85 }}>Select rooms/nodes in the scene, then press Done.</div>
+                                <Btn onClick={applyGroupAddMode} variant="primary">
+                                    Done
+                                </Btn>
                             </div>
                         )}
                     </div>
 
                     {groups.length === 0 ? (
                         <div style={{ opacity: 0.7 }}>No groups yet.</div>
+                    ) : visibleGroups.length === 0 ? (
+                        <div style={{ opacity: 0.7 }}>No groups match “{groupSearch}”.</div>
                     ) : (
-                        groups.map((g) => {
-                            const roomCount = rooms.filter((r) => r.groupId === g.id).length;
-                            const nodeCount = nodes.filter((n) => n.groupId === g.id).length;
+                        <div style={{ display: "grid", gap: 12 }}>
+                            {visibleGroups.map((g) => {
+                                const roomCount = rooms.filter((r) => r.groupId === g.id).length;
+                                const nodeCount = nodes.filter((n) => n.groupId === g.id).length;
 
-                            return (
-                                <div key={g.id} style={{ padding: 10, borderRadius: 10, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)" }}>
-                                    <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
-                                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                                            <Input
-                                                value={g.name || ""}
-                                                onChange={(e) =>
-                                                    setGroups((prev) => prev.map((x) => (x.id === g.id ? { ...x, name: e.target.value } : x)))
-                                                }
-                                                style={{ width: 220 }}
-                                            />
-                                            <span style={{ fontSize: 12, opacity: 0.75 }}>
-                                                {roomCount} rooms · {nodeCount} nodes
-                                            </span>
-                                        </div>
-
-                                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                                            <Btn
-                                                onClick={() => setGroupAddModeId((prev) => (prev === g.id ? null : g.id))}
-                                                variant={groupAddModeId === g.id ? "primary" : undefined}
-                                            >
-                                                {groupAddModeId === g.id ? "Adding…" : "Click to add"}
-                                            </Btn>
-
-                                            <Btn onClick={() => moveGroup(g.id)}>Move</Btn>
-
-                                            <Btn onClick={() => setGroupHidden(g.id, !g.hidden)}>
-                                                {g.hidden ? "Show" : "Hide"}
-                                            </Btn>
-
-                                            <Btn onClick={() => duplicateGroup(g.id)}>Duplicate</Btn>
-
-                                            <Select
-                                                value={mergePick[g.id] || ""}
-                                                onChange={(e) => {
-                                                    const from = e.target.value;
-                                                    setMergePick((m) => ({ ...m, [g.id]: "" }));
-                                                    mergeGroups(g.id, from);
+                                return (
+                                    <NFCard key={g.id}>
+                                        <div
+                                            style={{
+                                                display: "flex",
+                                                gap: 10,
+                                                alignItems: "center",
+                                                justifyContent: "space-between",
+                                                flexWrap: "wrap",
+                                            }}
+                                        >
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    gap: 10,
+                                                    alignItems: "center",
+                                                    flexWrap: "wrap",
+                                                    flex: 1,
+                                                    minWidth: 240,
                                                 }}
-                                                style={{ width: 160 }}
-                                                title="Merge another group into this one"
                                             >
-                                                <option value="" disabled>Merge from…</option>
-                                                {groups.filter((x) => x.id !== g.id).map((x) => (
-                                                    <option key={x.id} value={x.id}>{x.name || x.id}</option>
-                                                ))}
-                                            </Select>
+                                                <Input
+                                                    value={g.name || ""}
+                                                    onChange={(e) =>
+                                                        setGroups((prev) => prev.map((x) => (x.id === g.id ? { ...x, name: e.target.value } : x)))
+                                                    }
+                                                    style={{ maxWidth: 260 }}
+                                                />
+                                                <NFTag tone="blue">{roomCount} rooms</NFTag>
+                                                <NFTag tone="teal">{nodeCount} nodes</NFTag>
+                                                {g.hidden && <NFTag>hidden</NFTag>}
+                                            </div>
+
+                                            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                                <NFIconBtn
+                                                    icon={groupAddModeId === g.id ? "✅" : "➕"}
+                                                    title={
+                                                        groupAddModeId === g.id
+                                                            ? "Finish adding (press Done at top)"
+                                                            : "Add by clicking items in the scene"
+                                                    }
+                                                    onClick={() => setGroupAddModeId((prev) => (prev === g.id ? null : g.id))}
+                                                    active={groupAddModeId === g.id}
+                                                />
+                                                <Btn
+                                                    onClick={() => addSelectionToGroup(g.id)}
+                                                    disabled={selCount === 0}
+                                                    title={selCount === 0 ? "Select one or more rooms/nodes first" : "Add current selection to this group"}
+                                                    variant="primary"
+                                                    style={{ padding: "8px 10px" }}
+                                                >
+                                                    Add selected{selCount ? ` (${selCount})` : ""}
+                                                </Btn>
+
+                                                <NFIconBtn
+                                                    icon={g.hidden ? <EyeClosedIcon /> : <EyeOpenIcon />}
+                                                    title={g.hidden ? "Show group" : "Hide group"}
+                                                    onClick={() => setGroupHidden(g.id, !g.hidden)}
+                                                    active={!!g.hidden}
+                                                />
+                                                <NFIconBtn icon="⧉" title="Duplicate group" onClick={() => duplicateGroup(g.id)} />
+                                                <NFIconBtn icon="↕️" title="Move group" onClick={() => moveGroup(g.id)} />
+                                            </div>
                                         </div>
-                                    </div>
-                                </div>
-                            );
-                        })
+
+                                        <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <div>
+                                                    <NFSubLabel>Add room</NFSubLabel>
+                                                    <Select
+                                                        value={addRoomPick[g.id] || ""}
+                                                        onChange={(e) => {
+                                                            const roomId = e.target.value;
+                                                            setAddRoomPick((m) => ({ ...(m || {}), [g.id]: "" }));
+                                                            if (roomId) addRoomToGroup(g.id, roomId, true);
+                                                        }}
+                                                        title="Add a room to this group (also adds all nodes inside the room)"
+                                                    >
+                                                        <option value="" disabled>
+                                                            Select a room…
+                                                        </option>
+                                                        {rooms.map((r) => (
+                                                            <option key={r.id} value={r.id}>
+                                                                {r.name || r.id}
+                                                            </option>
+                                                        ))}
+                                                    </Select>
+                                                </div>
+
+                                                <div>
+                                                    <NFSubLabel>Add node</NFSubLabel>
+                                                    <Select
+                                                        value={addNodePick[g.id] || ""}
+                                                        onChange={(e) => {
+                                                            const nodeId = e.target.value;
+                                                            setAddNodePick((m) => ({ ...(m || {}), [g.id]: "" }));
+                                                            if (nodeId) addNodeToGroup(g.id, nodeId);
+                                                        }}
+                                                        title="Add a single node to this group"
+                                                    >
+                                                        <option value="" disabled>
+                                                            Select a node…
+                                                        </option>
+                                                        {nodes.map((n) => (
+                                                            <option key={n.id} value={n.id}>
+                                                                {n.label || n.id}
+                                                            </option>
+                                                        ))}
+                                                    </Select>
+                                                </div>
+                                            </div>
+
+                                            <div
+                                                style={{
+                                                    display: "flex",
+                                                    gap: 10,
+                                                    alignItems: "center",
+                                                    flexWrap: "wrap",
+                                                    paddingTop: 10,
+                                                    borderTop: "1px dashed rgba(255,255,255,0.16)",
+                                                }}
+                                            >
+                                                <Checkbox
+                                                    checked={!!mergeRemove[g.id]}
+                                                    onChange={(v) => setMergeRemove((m) => ({ ...(m || {}), [g.id]: v }))}
+                                                    label="Delete src"
+                                                    title="When merging, also remove the source group (leaves no empty groups behind)"
+                                                />
+
+                                                <div style={{ flex: 1, minWidth: 220 }}>
+                                                    <NFSubLabel style={{ marginBottom: 6 }}>Merge into this group</NFSubLabel>
+                                                    <Select
+                                                        value={mergePick[g.id] || ""}
+                                                        onChange={(e) => {
+                                                            const from = e.target.value;
+                                                            setMergePick((m) => ({ ...m, [g.id]: "" }));
+                                                            if (from) mergeGroups(g.id, from, { removeSource: !!mergeRemove[g.id] });
+                                                        }}
+                                                        title="Merge another group into this one"
+                                                    >
+                                                        <option value="" disabled>
+                                                            Pick a source group…
+                                                        </option>
+                                                        {groups
+                                                            .filter((x) => x.id !== g.id)
+                                                            .map((x) => (
+                                                                <option key={x.id} value={x.id}>
+                                                                    {x.name || x.id}
+                                                                </option>
+                                                            ))}
+                                                    </Select>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </NFCard>
+                                );
+                            })}
+                        </div>
                     )}
                 </div>
             </Panel>
         );
     };
 
-    // DecksPanel is now provided via a stable wrapper (DecksPanelInner).
+
+    const GroupsMembersPanel = () => {
+        const [memberSearch, setMemberSearch] = useState("");
+        const [openRoomsByGroup, setOpenRoomsByGroup] = useState(() => ({}));
+        const [openNodesByGroup, setOpenNodesByGroup] = useState(() => ({}));
+
+        const grouped = useMemo(
+            () =>
+                (groups || []).map((g) => {
+                    const gRooms = (rooms || []).filter((r) => r.groupId === g.id);
+                    const gNodes = (nodes || []).filter((n) => n.groupId === g.id);
+                    return { group: g, rooms: gRooms, nodes: gNodes };
+                }),
+            [groups, rooms, nodes]
+        );
+
+        const q = (memberSearch || "").trim().toLowerCase();
+
+        const filteredGrouped = useMemo(() => {
+            if (!q) return grouped;
+            const out = [];
+            for (const it of grouped) {
+                const g = it.group;
+                const gName = (g.name || "").toLowerCase();
+                const gId = (g.id || "").toLowerCase();
+                const groupMatch = gName.includes(q) || gId.includes(q);
+
+                const rFiltered = groupMatch
+                    ? it.rooms
+                    : it.rooms.filter((r) => ((r.name || r.id || "").toLowerCase().includes(q)));
+
+                const nFiltered = groupMatch
+                    ? it.nodes
+                    : it.nodes.filter((n) => ((n.label || n.id || "").toLowerCase().includes(q)));
+
+                if (groupMatch || rFiltered.length || nFiltered.length) {
+                    out.push({ group: g, rooms: rFiltered, nodes: nFiltered, _fullRooms: it.rooms, _fullNodes: it.nodes });
+                }
+            }
+            return out;
+        }, [grouped, q]);
+
+        const selectRoom = (id) => {
+            setSelected({ type: "room", id });
+            setMultiSel([]);
+        };
+        const selectNode = (id) => {
+            setSelected({ type: "node", id });
+            setMultiSel([]);
+        };
+
+        const rowStyle = {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            padding: "8px 10px",
+            borderRadius: 14,
+            border: "1px solid rgba(255,255,255,0.10)",
+            background: "rgba(255,255,255,0.045)",
+            cursor: "pointer",
+        };
+
+        const summaryStyle = {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            padding: "8px 10px",
+            borderRadius: 14,
+            border: "1px solid rgba(255,255,255,0.10)",
+            background: "rgba(255,255,255,0.03)",
+            cursor: "pointer",
+            listStyle: "none",
+        };
+
+        const metaStyle = { fontSize: 10, opacity: 0.65, marginTop: 1 };
+
+        if (!grouped.length) {
+            return (
+                <Panel title="Groups – Members">
+                    <div style={{ fontSize: 12, opacity: 0.8 }}>
+                        No groups yet. Create a group in <b>Groups</b> and then add rooms/nodes.
+                    </div>
+                </Panel>
+            );
+        }
+
+        return (
+            <Panel title="Groups – Members">
+                <div style={{ display: "grid", gap: 10 }}>
+                    <Input
+                        value={memberSearch}
+                        onChange={(e) => setMemberSearch(e.target.value)}
+                        placeholder="Search groups / members…"
+                    />
+
+                    {filteredGrouped.length === 0 ? (
+                        <div style={{ opacity: 0.7, fontSize: 12 }}>No matches for “{memberSearch}”.</div>
+                    ) : (
+                        <div style={{ display: "grid", gap: 12 }}>
+                            {filteredGrouped.map(({ group: g, rooms: gRooms, nodes: gNodes, _fullRooms, _fullNodes }) => {
+                                const fullRooms = _fullRooms || gRooms;
+                                const fullNodes = _fullNodes || gNodes;
+                                const hasMembers = fullRooms.length + fullNodes.length > 0;
+
+                                const roomsOpen = q ? true : (openRoomsByGroup[g.id] ?? false);
+                                const nodesOpen = q ? true : (openNodesByGroup[g.id] ?? false);
+
+                                return (
+                                    <NFCard key={g.id}>
+                                        <div
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                justifyContent: "space-between",
+                                                gap: 10,
+                                                flexWrap: "wrap",
+                                            }}
+                                        >
+                                            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flex: 1, minWidth: 240 }}>
+                                                <Input
+                                                    value={g.name || ""}
+                                                    onChange={(e) => renameGroup(g.id, e.target.value)}
+                                                    style={{ maxWidth: 260 }}
+                                                />
+                                                <NFTag tone="blue">{fullRooms.length} rooms</NFTag>
+                                                <NFTag tone="teal">{fullNodes.length} nodes</NFTag>
+                                                {g.hidden && <NFTag>hidden</NFTag>}
+                                            </div>
+
+                                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                                <NFIconBtn
+                                                    icon={g.hidden ? <EyeClosedIcon /> : <EyeOpenIcon />}
+                                                    title={g.hidden ? "Show group" : "Hide group"}
+                                                    onClick={() => setGroupHidden(g.id, !g.hidden)}
+                                                    active={!!g.hidden}
+                                                />
+                                                <NFIconBtn
+                                                    icon="🕳️"
+                                                    title="Delete group (keeps rooms/nodes, just ungroups them)"
+                                                    danger
+                                                    onClick={() => {
+                                                        const ok = window.confirm(
+                                                            `Delete group “${g.name || "Group"}”?
+
+This will UNGROUP its rooms/nodes (it won’t delete them).`
+                                                        );
+                                                        if (ok) deleteGroup(g.id);
+                                                    }}
+                                                />
+                                            </div>
+                                        </div>
+
+                                        <div style={{ marginTop: 12 }}>
+                                            {hasMembers ? (
+                                                <div style={{ display: "grid", gap: 10 }}>
+                                                    <details
+                                                        open={roomsOpen}
+                                                        onToggle={(e) => {
+                                                            if (q) return;
+                                                            setOpenRoomsByGroup((m) => ({ ...(m || {}), [g.id]: !!e.currentTarget.open }));
+                                                        }}
+                                                    >
+                                                        <summary style={summaryStyle}>
+                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                                <span style={{ opacity: 0.75 }}>Rooms</span>
+                                                                <NFTag tone="blue">{gRooms.length}</NFTag>
+                                                            </div>
+                                                            <span style={{ opacity: 0.7, fontSize: 12 }}>{roomsOpen ? "▾" : "▸"}</span>
+                                                        </summary>
+                                                        <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                                                            {gRooms.length === 0 ? (
+                                                                <div style={{ fontSize: 11, opacity: 0.7 }}>No rooms match.</div>
+                                                            ) : (
+                                                                gRooms.map((r) => {
+                                                                    const nodesInRoom = (nodes || []).filter((n) => n.roomId === r.id).length;
+                                                                    return (
+                                                                        <div
+                                                                            key={r.id}
+                                                                            onClick={() => selectRoom(r.id)}
+                                                                            role="button"
+                                                                            title="Select room"
+                                                                            style={rowStyle}
+                                                                        >
+                                                                            <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                                                                                <div
+                                                                                    style={{
+                                                                                        width: 26,
+                                                                                        height: 26,
+                                                                                        borderRadius: 12,
+                                                                                        display: "grid",
+                                                                                        placeItems: "center",
+                                                                                        border: "1px solid rgba(255,255,255,0.14)",
+                                                                                        background: "rgba(59,130,246,0.14)",
+                                                                                        flex: "0 0 auto",
+                                                                                    }}
+                                                                                >
+                                                                                    🏠
+                                                                                </div>
+                                                                                <div style={{ minWidth: 0 }}>
+                                                                                    <div
+                                                                                        style={{
+                                                                                            fontSize: 12,
+                                                                                            fontWeight: 800,
+                                                                                            whiteSpace: "nowrap",
+                                                                                            overflow: "hidden",
+                                                                                            textOverflow: "ellipsis",
+                                                                                        }}
+                                                                                    >
+                                                                                        {r.name || "Room"}
+                                                                                    </div>
+                                                                                    <div style={metaStyle}>{nodesInRoom} nodes in room</div>
+                                                                                </div>
+                                                                            </div>
+
+                                                                            <NFIconBtn
+                                                                                icon="🗑️"
+                                                                                title="Remove room from group (also removes nodes inside the room that belong to this group)"
+                                                                                danger
+                                                                                onClick={() => removeRoomFromGroup(g.id, r.id, { removeNodesInRoom: true })}
+                                                                            />
+                                                                        </div>
+                                                                    );
+                                                                })
+                                                            )}
+                                                        </div>
+                                                    </details>
+
+                                                    <details
+                                                        open={nodesOpen}
+                                                        onToggle={(e) => {
+                                                            if (q) return;
+                                                            setOpenNodesByGroup((m) => ({ ...(m || {}), [g.id]: !!e.currentTarget.open }));
+                                                        }}
+                                                    >
+                                                        <summary style={summaryStyle}>
+                                                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                                                <span style={{ opacity: 0.75 }}>Nodes</span>
+                                                                <NFTag tone="teal">{gNodes.length}</NFTag>
+                                                            </div>
+                                                            <span style={{ opacity: 0.7, fontSize: 12 }}>{nodesOpen ? "▾" : "▸"}</span>
+                                                        </summary>
+                                                        <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                                                            {gNodes.length === 0 ? (
+                                                                <div style={{ fontSize: 11, opacity: 0.7 }}>No nodes match.</div>
+                                                            ) : (
+                                                                gNodes.map((n) => {
+                                                                    const roomName = n.roomId
+                                                                        ? (rooms || []).find((r) => r.id === n.roomId)?.name
+                                                                        : null;
+                                                                    return (
+                                                                        <div
+                                                                            key={n.id}
+                                                                            onClick={() => selectNode(n.id)}
+                                                                            role="button"
+                                                                            title="Select node"
+                                                                            style={rowStyle}
+                                                                        >
+                                                                            <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                                                                                <div
+                                                                                    style={{
+                                                                                        width: 10,
+                                                                                        height: 10,
+                                                                                        borderRadius: 999,
+                                                                                        background: n.color || "#22c55e",
+                                                                                        boxShadow: "0 0 0 3px rgba(255,255,255,0.06)",
+                                                                                        flex: "0 0 auto",
+                                                                                    }}
+                                                                                />
+                                                                                <div style={{ minWidth: 0 }}>
+                                                                                    <div
+                                                                                        style={{
+                                                                                            fontSize: 12,
+                                                                                            fontWeight: 800,
+                                                                                            whiteSpace: "nowrap",
+                                                                                            overflow: "hidden",
+                                                                                            textOverflow: "ellipsis",
+                                                                                        }}
+                                                                                    >
+                                                                                        {n.label || "Node"}
+                                                                                    </div>
+                                                                                    <div style={metaStyle}>{roomName ? `Room: ${roomName}` : "No room"}</div>
+                                                                                </div>
+                                                                            </div>
+
+                                                                            <NFIconBtn
+                                                                                icon="🗑️"
+                                                                                title="Remove node from group"
+                                                                                danger
+                                                                                onClick={() => removeNodeFromGroup(n.id)}
+                                                                            />
+                                                                        </div>
+                                                                    );
+                                                                })
+                                                            )}
+                                                        </div>
+                                                    </details>
+                                                </div>
+                                            ) : (
+                                                <div style={{ fontSize: 11, opacity: 0.7 }}>No rooms or nodes in this group yet.</div>
+                                            )}
+                                        </div>
+                                    </NFCard>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            </Panel>
+        );
+    };
+
+    const LinksPanel = () => (
+        <Panel title="Links">
+            <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <Btn onClick={() => setMode(mode === "link" ? "select" : "link")} glow={mode === "link"} variant={mode === "link" ? "primary" : "ghost"}>
+                        {mode === "link" ? "Link Mode: ON" : "Link Mode: OFF"}
+                    </Btn>
+                    {linkFromId && <span style={{ fontSize: 12, opacity: 0.85 }}>From: {nodes.find((n) => n.id === linkFromId)?.label || linkFromId} → pick target…</span>}
+                </div>
+                {selectedLink && <Btn onClick={() => requestDelete({ type: "link", id: selectedLink.id })}>Delete Selected Link</Btn>}
+                <div style={{ fontSize: 11, opacity: 0.8 }}>Tip: Click first node, then second. Switch in pair ⇒ glowing tube.</div>
+            </div>
+        </Panel>
+    );
+
 
     const FlowDefaultsPanel = () => (
         <Panel title="Flow / Link Defaults">
@@ -9725,75 +11646,11 @@ export default function Interactive3DNodeShowcase() {
                         <label>
                             Opacity
                             <Slider
-                                value={linkDefaults.particles?.opacity ?? 1}
-                                min={0.1}
+                                value={linkDefaults.particles?.opacity ?? 0.8}
+                                min={0}
                                 max={1}
-                                step={0.05}
-                                onChange={(v) => setLinkDefaults((d) => ({ ...d, particles: { ...(d.particles || {}), opacity: v } }))}
-                            />
-                        </label>
-                        <label>
-                            Wave Amplitude
-                            <Slider
-                                value={linkDefaults.particles?.waveAmp ?? (linkDefaults.style === "wavy" ? 0.15 : 0)}
-                                min={0}
-                                max={0.6}
                                 step={0.01}
-                                onChange={(v) => setLinkDefaults((d) => ({ ...d, particles: { ...(d.particles || {}), waveAmp: v } }))}
-                            />
-                        </label>
-                        <label>
-                            Wave Frequency
-                            <Slider
-                                value={linkDefaults.particles?.waveFreq ?? 2}
-                                min={0.2}
-                                max={8}
-                                step={0.05}
-                                onChange={(v) => setLinkDefaults((d) => ({ ...d, particles: { ...(d.particles || {}), waveFreq: v } }))}
-                            />
-                        </label>
-                        <label>
-                            Shape
-                            <Select
-                                value={linkDefaults.particles?.shape || "sphere"}
-                                onChange={(e) => setLinkDefaults((d) => ({ ...d, particles: { ...(d.particles || {}), shape: e.target.value } }))}
-                            >
-                                <option value="sphere">sphere</option>
-                                <option value="box">box</option>
-                                <option value="octa">octa</option>
-                            </Select>
-                        </label>
-                    </>
-                )}
-
-                {linkDefaults.style === "epic" && (
-                    <>
-                        <label>
-                            Tube Thickness
-                            <Slider
-                                value={linkDefaults.tube?.thickness ?? 0.06}
-                                min={0.02}
-                                max={0.25}
-                                step={0.005}
-                                onChange={(v) => setLinkDefaults((d) => ({ ...d, tube: { ...(d.tube || {}), thickness: v } }))}
-                            />
-                        </label>
-                        <label>
-                            Tube Glow
-                            <Slider
-                                value={linkDefaults.tube?.glow ?? 1.3}
-                                min={0}
-                                max={3}
-                                step={0.05}
-                                onChange={(v) => setLinkDefaults((d) => ({ ...d, tube: { ...(d.tube || {}), glow: v } }))}
-                            />
-                        </label>
-                        <label>
-                            Trail Particles
-                            <Checkbox
-                                checked={(linkDefaults.tube?.trail ?? true) === true}
-                                onChange={(v) => setLinkDefaults((d) => ({ ...d, tube: { ...(d.tube || {}), trail: v } }))}
-                                label="enabled"
+                                onChange={(v) => setLinkDefaults((d) => ({ ...d, particles: { ...(d.particles || {}), opacity: v } }))}
                             />
                         </label>
                     </>
@@ -9802,30 +11659,56 @@ export default function Interactive3DNodeShowcase() {
                 {linkDefaults.style === "icons" && (
                     <>
                         <label>
-                            Icon (emoji or char)
+                            Icon
                             <Input
-                                value={linkDefaults.icon?.char ?? "▶"}
-                                onChange={(e) => setLinkDefaults((d) => ({ ...d, icon: { ...(d.icon || {}), char: e.target.value } }))}
-                            />
-                        </label>
-                        <label>
-                            Icon Count
-                            <Slider
-                                value={linkDefaults.icon?.count ?? 4}
-                                min={1}
-                                max={8}
-                                step={1}
-                                onChange={(v) => setLinkDefaults((d) => ({ ...d, icon: { ...(d.icon || {}), count: v } }))}
+                                value={linkDefaults.icons?.icon ?? "⬤"}
+                                onChange={(e) => setLinkDefaults((d) => ({ ...d, icons: { ...(d.icons || {}), icon: e.target.value } }))}
+                                placeholder="e.g. ⬤, ✦, →"
                             />
                         </label>
                         <label>
                             Icon Size
                             <Slider
-                                value={linkDefaults.icon?.size ?? 0.12}
-                                min={0.06}
-                                max={0.4}
+                                value={linkDefaults.icons?.size ?? 16}
+                                min={8}
+                                max={48}
+                                step={1}
+                                onChange={(v) => setLinkDefaults((d) => ({ ...d, icons: { ...(d.icons || {}), size: v } }))}
+                            />
+                        </label>
+                        <label>
+                            Spacing
+                            <Slider
+                                value={linkDefaults.icons?.spacing ?? 0.7}
+                                min={0.2}
+                                max={3}
+                                step={0.05}
+                                onChange={(v) => setLinkDefaults((d) => ({ ...d, icons: { ...(d.icons || {}), spacing: v } }))}
+                            />
+                        </label>
+                    </>
+                )}
+
+                {linkDefaults.style === "dashed" && (
+                    <>
+                        <label>
+                            Dash size
+                            <Slider
+                                value={linkDefaults.dashed?.dash ?? 0.2}
+                                min={0.02}
+                                max={1}
                                 step={0.01}
-                                onChange={(v) => setLinkDefaults((d) => ({ ...d, icon: { ...(d.icon || {}), size: v } }))}
+                                onChange={(v) => setLinkDefaults((d) => ({ ...d, dashed: { ...(d.dashed || {}), dash: v } }))}
+                            />
+                        </label>
+                        <label>
+                            Gap
+                            <Slider
+                                value={linkDefaults.dashed?.gap ?? 0.2}
+                                min={0.02}
+                                max={1}
+                                step={0.01}
+                                onChange={(v) => setLinkDefaults((d) => ({ ...d, dashed: { ...(d.dashed || {}), gap: v } }))}
                             />
                         </label>
                     </>
@@ -9835,208 +11718,7 @@ export default function Interactive3DNodeShowcase() {
     );
 
 
-    const GroupsMembersPanel = () => {
-        const grouped = useMemo(
-            () =>
-                (groups || []).map((g) => {
-                    const gRooms = (rooms || []).filter((r) => r.groupId === g.id);
-                    const gNodes = (nodes || []).filter((n) => n.groupId === g.id);
-                    return { group: g, rooms: gRooms, nodes: gNodes };
-                }),
-            [groups, rooms, nodes]
-        );
-
-        const selectRoom = (id) => {
-            setSelected({ type: "room", id });
-            setMultiSel([]);
-        };
-        const selectNode = (id) => {
-            setSelected({ type: "node", id });
-            setMultiSel([]);
-        };
-
-        if (!grouped.length) {
-            return (
-                <Panel title="Groups – Members">
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                        No groups yet. Create a group and assign rooms or nodes to see them here.
-                    </div>
-                </Panel>
-            );
-        }
-
-        return (
-            <Panel title="Groups – Members">
-                <div style={{ display: "grid", gap: 8 }}>
-                    {grouped.map(({ group: g, rooms: gRooms, nodes: gNodes }) => {
-                        const hasMembers = gRooms.length || gNodes.length;
-                        const color = g.color || "#38bdf8";
-                        return (
-                            <div
-                                key={g.id}
-                                style={{
-                                    borderRadius: 10,
-                                    padding: 8,
-                                    background:
-                                        "radial-gradient(260px 180px at 0% 0%, rgba(30,64,175,0.35), rgba(15,23,42,0.95))",
-                                    border: "1px solid rgba(148,163,184,0.35)",
-                                    boxShadow: `0 10px 30px rgba(15,23,42,0.85)`,
-                                }}
-                            >
-                                <div
-                                    style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "space-between",
-                                        gap: 8,
-                                        marginBottom: 6,
-                                    }}
-                                >
-                                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                        <div
-                                            style={{
-                                                width: 10,
-                                                height: 10,
-                                                borderRadius: 999,
-                                                background: color,
-                                                boxShadow: `0 0 10px ${color}`,
-                                            }}
-                                        />
-                                        <div style={{ fontWeight: 700, fontSize: 13 }}>
-                                            {g.name || "Unnamed group"}
-                                        </div>
-                                    </div>
-                                    <div
-                                        style={{
-                                            fontSize: 11,
-                                            opacity: 0.8,
-                                            display: "flex",
-                                            gap: 8,
-                                            whiteSpace: "nowrap",
-                                        }}
-                                    >
-                                        <span>Rooms: {gRooms.length}</span>
-                                        <span>Nodes: {gNodes.length}</span>
-                                    </div>
-                                </div>
-
-                                {hasMembers ? (
-                                    <div style={{ display: "grid", gap: 6, fontSize: 11 }}>
-                                        {gRooms.length > 0 && (
-                                            <div>
-                                                <div
-                                                    style={{
-                                                        textTransform: "uppercase",
-                                                        letterSpacing: "0.16em",
-                                                        fontSize: 9,
-                                                        opacity: 0.7,
-                                                        marginBottom: 4,
-                                                    }}
-                                                >
-                                                    ROOMS
-                                                </div>
-                                                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                                                    {gRooms.map((r) => (
-                                                        <button
-                                                            key={r.id}
-                                                            type="button"
-                                                            onClick={() => selectRoom(r.id)}
-                                                            style={{
-                                                                borderRadius: 999,
-                                                                border: "1px solid rgba(148,163,184,0.55)",
-                                                                padding: "3px 8px",
-                                                                fontSize: 11,
-                                                                background:
-                                                                    "radial-gradient(120px 120px at 0% 0%, rgba(59,130,246,0.4), rgba(15,23,42,0.95))",
-                                                                color: "#e5e7eb",
-                                                                cursor: "pointer",
-                                                            }}
-                                                        >
-                                                            {r.name || "Room"}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        {gNodes.length > 0 && (
-                                            <div>
-                                                <div
-                                                    style={{
-                                                        textTransform: "uppercase",
-                                                        letterSpacing: "0.16em",
-                                                        fontSize: 9,
-                                                        opacity: 0.7,
-                                                        marginBottom: 4,
-                                                    }}
-                                                >
-                                                    NODES
-                                                </div>
-                                                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                                                    {gNodes.map((n) => (
-                                                        <button
-                                                            key={n.id}
-                                                            type="button"
-                                                            onClick={() => selectNode(n.id)}
-                                                            style={{
-                                                                borderRadius: 999,
-                                                                border: "1px solid rgba(148,163,184,0.55)",
-                                                                padding: "3px 8px",
-                                                                fontSize: 11,
-                                                                background:
-                                                                    "radial-gradient(120px 120px at 0% 0%, rgba(45,212,191,0.4), rgba(15,23,42,0.95))",
-                                                                color: "#e5e7eb",
-                                                                cursor: "pointer",
-                                                                display: "flex",
-                                                                alignItems: "center",
-                                                                gap: 4,
-                                                            }}
-                                                        >
-                                                            <span
-                                                                style={{
-                                                                    width: 6,
-                                                                    height: 6,
-                                                                    borderRadius: 999,
-                                                                    background: n.color || "#22c55e",
-                                                                }}
-                                                            />
-                                                            <span>{n.label || "Node"}</span>
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                ) : (
-                                    <div style={{ fontSize: 11, opacity: 0.7 }}>
-                                        No rooms or nodes in this group yet.
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
-                </div>
-            </Panel>
-        );
-    };
-
-    const LinksPanel = () => (
-        <Panel title="Links">
-            <div style={{ display: "grid", gap: 8 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <Btn onClick={() => setMode(mode === "link" ? "select" : "link")} glow={mode === "link"} variant={mode === "link" ? "primary" : "ghost"}>
-                        {mode === "link" ? "Link Mode: ON" : "Link Mode: OFF"}
-                    </Btn>
-                    {linkFromId && <span style={{ fontSize: 12, opacity: 0.85 }}>From: {nodes.find((n) => n.id === linkFromId)?.label || linkFromId} → pick target…</span>}
-                </div>
-                {selectedLink && <Btn onClick={() => requestDelete({ type: "link", id: selectedLink.id })}>Delete Selected Link</Btn>}
-                <div style={{ fontSize: 11, opacity: 0.8 }}>Tip: Click first node, then second. Switch in pair ⇒ glowing tube.</div>
-            </div>
-        </Panel>
-    );
-
-
-    const runAction = (action) => {
+    function runAction(action) {
         if (!action || !Array.isArray(action.steps)) return;
 
         // Camera timeline cursor in seconds (camera moves still chain)
@@ -10058,6 +11740,124 @@ export default function Interactive3DNodeShowcase() {
             else setTimeout(runWire, startSec * 1000);
         };
 
+
+
+        const schedulePacketStep = (step, startSec) => {
+
+            const runPkt = () => {
+
+                const linkId = step.linkId || "__ALL_PACKET__";
+
+                const isAll = linkId === "__ALL_PACKET__" || linkId === "__ALL__" || linkId === "*";
+
+                try {
+
+                    if (step.type === "packetSend") {
+
+                        const overrides = {
+
+                            count: Math.max(1, Math.round(Number(step.count ?? 1) || 1)),
+
+                            interval: Math.max(0, Number(step.interval ?? 0.15) || 0),
+
+                            loop: !!step.loop,
+
+                            loopGap: Math.max(0, Number(step.burstInterval ?? 1.0) || 0),
+
+                            burstsLimit: Math.max(0, Math.round(Number(step.burstsLimit ?? 0) || 0)),
+
+                            clearExisting: !!step.clearExisting,
+
+                        };
+
+                        window.dispatchEvent(
+
+                            new CustomEvent("EPIC3D_PACKET_CTRL", {
+
+                                detail: {
+
+                                    action: "start",
+
+                                    ...(isAll ? { all: true } : { linkId }),
+
+                                    overrides,
+
+                                },
+
+                            })
+
+                        );
+
+                        // Back-compat: legacy events (harmless if unused)
+
+                        window.dispatchEvent(
+
+                            new CustomEvent("EPIC3D_PACKET_SEND", {
+
+                                detail: { linkId, ...overrides, burstInterval: overrides.loopGap },
+
+                            })
+
+                        );
+
+                    } else if (step.type === "packetStop") {
+
+                        const clear = step.stopLoopsOnly ? false : (step.clearInFlight ?? true) !== false;
+
+                        window.dispatchEvent(
+
+                            new CustomEvent("EPIC3D_PACKET_CTRL", {
+
+                                detail: {
+
+                                    action: "stop",
+
+                                    ...(isAll ? { all: true } : { linkId }),
+
+                                    clear,
+
+                                },
+
+                            })
+
+                        );
+
+                        // Back-compat: legacy events
+
+                        window.dispatchEvent(
+
+                            new CustomEvent("EPIC3D_PACKET_STOP", {
+
+                                detail: {
+
+                                    linkId,
+
+                                    stopLoopsOnly: !!step.stopLoopsOnly,
+
+                                    clearInFlight: (step.clearInFlight ?? true) !== false,
+
+                                },
+
+                            })
+
+                        );
+
+                    }
+
+                } catch (err) {
+
+                    if (process.env.NODE_ENV !== "production") console.warn("Packet action dispatch failed", err);
+
+                }
+
+            };
+
+            if (startSec <= 0) runPkt();
+
+            else setTimeout(runPkt, startSec * 1000);
+
+        };
+
         const scheduleNodeStep = (step, startSec) => {
             if (!step.nodeId) {
                 if (process.env.NODE_ENV !== "production") {
@@ -10071,13 +11871,7 @@ export default function Interactive3DNodeShowcase() {
                 if (!n) return;
 
                 if (step.type === "toggleLight") {
-                    const cur = !!n.light?.enabled;
-                    setNode(n.id, {
-                        light: {
-                            ...(n.light || {type: "point", intensity: 200, distance: 8}),
-                            enabled: !cur,
-                        },
-                    });
+                    toggleLightEnabled(n.id);
                 } else if (step.type === "toggleGlow") {
                     setNode(n.id, {glowOn: !n.glowOn});
                 } else if (step.type === "setSignalStyle") {
@@ -10172,6 +11966,126 @@ export default function Interactive3DNodeShowcase() {
             else setTimeout(runNode, startSec * 1000);
         };
 
+
+        const scheduleRoomStep = (step, startSec) => {
+            if (!step.roomId) {
+                if (process.env.NODE_ENV !== 'production') {
+                    console.warn('Action step has no roomId:', step);
+                }
+                return;
+            }
+
+            const runRoom = () => {
+                const r = rooms.find((x) => x.id === step.roomId);
+                if (!r) return;
+                const mode = step.mode || step.value || 'toggle';
+                const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !r.hidden;
+
+                setRooms((prev) => prev.map((rm) => (rm.id === r.id ? { ...rm, hidden: nextHidden } : rm)));
+
+                if (nextHidden) {
+                    // clear selection if it becomes hidden
+                    setSelected((sel) => {
+                        if (!sel) return sel;
+                        if (sel.type === 'room' && sel.id === r.id) return null;
+                        if (sel.type === 'node') {
+                            const n = nodes.find((x) => x.id === sel.id);
+                            if (n && n.roomId === r.id) return null;
+                        }
+                        return sel;
+                    });
+                    setMultiSel((prev) =>
+                        (prev || []).filter((it) => {
+                            if (it.type === 'room') return it.id !== r.id;
+                            if (it.type === 'node') {
+                                const n = nodes.find((x) => x.id === it.id);
+                                return !(n && n.roomId === r.id);
+                            }
+                            return true;
+                        })
+                    );
+                }
+            };
+
+            if (startSec <= 0) runRoom();
+            else setTimeout(runRoom, startSec * 1000);
+        };
+
+
+        const scheduleGroupStep = (step, startSec) => {
+            if (!step.groupId) {
+                if (process.env.NODE_ENV !== 'production') {
+                    console.warn('Action step has no groupId:', step);
+                }
+                return;
+            }
+
+            const runGroup = () => {
+                const mode = step.mode || step.value || 'toggle';
+
+                // Determine which group IDs will be hidden after this step (best-effort)
+                let willHideIds = new Set();
+                if (step.groupId === '__ALL__') {
+                    for (const g of (groups || [])) {
+                        const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !g.hidden;
+                        if (nextHidden) willHideIds.add(g.id);
+                    }
+                } else {
+                    const g = (groups || []).find((x) => x.id === step.groupId);
+                    if (!g) return;
+                    const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !g.hidden;
+                    if (nextHidden) willHideIds.add(g.id);
+                }
+
+                setGroups((prev) => {
+                    const list = prev || [];
+                    if (step.groupId === '__ALL__') {
+                        return list.map((g) => {
+                            const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !g.hidden;
+                            return { ...g, hidden: nextHidden };
+                        });
+                    }
+                    const cur = list.find((x) => x.id === step.groupId);
+                    if (!cur) return prev;
+                    const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !cur.hidden;
+                    return list.map((g) => (g.id === step.groupId ? { ...g, hidden: nextHidden } : g));
+                });
+
+                if (willHideIds.size > 0) {
+                    // Clear selection if it becomes hidden
+                    setSelected((sel) => {
+                        if (!sel) return sel;
+                        if (sel.type === 'room') {
+                            const r = rooms.find((x) => x.id === sel.id);
+                            if (r && r.groupId && willHideIds.has(r.groupId)) return null;
+                        }
+                        if (sel.type === 'node') {
+                            const n = nodes.find((x) => x.id === sel.id);
+                            if (n && n.groupId && willHideIds.has(n.groupId)) return null;
+                        }
+                        return sel;
+                    });
+
+                    setMultiSel((prev) =>
+                        (prev || []).filter((it) => {
+                            if (it.type === 'room') {
+                                const r = rooms.find((x) => x.id === it.id);
+                                return !(r && r.groupId && willHideIds.has(r.groupId));
+                            }
+                            if (it.type === 'node') {
+                                const n = nodes.find((x) => x.id === it.id);
+                                return !(n && n.groupId && willHideIds.has(n.groupId));
+                            }
+                            return true;
+                        })
+                    );
+                }
+            };
+
+            if (startSec <= 0) runGroup();
+            else setTimeout(runGroup, startSec * 1000);
+        };
+
         (action.steps || []).forEach((s) => {
             if (!s) return;
 
@@ -10223,11 +12137,25 @@ export default function Interactive3DNodeShowcase() {
                 parentStart = delay;
                 scheduleWireStep(s, parentStart);
             }
+            // ---------- Packet steps (absolute timing) ----------
+            else if (s.type === "packetSend" || s.type === "packetStop") {
+                parentStart = delay;
+                schedulePacketStep(s, parentStart);
+            }
+            // ---------- Room visibility steps (absolute timing) ----------
+            else if (s.type === 'setRoomVisible') {
+                parentStart = delay;
+                scheduleRoomStep(s, parentStart);
+            }
+            // ---------- Group visibility steps (absolute timing) ----------
+            else if (s.type === 'setGroupVisible') {
+                parentStart = delay;
+                scheduleGroupStep(s, parentStart);
+            }
             // ---------- Node-targeted steps (absolute timing) ----------
             else {
                 parentStart = delay;
                 scheduleNodeStep(s, parentStart);
-
             }
             // ---------- Child steps: run relative to parentStart ----------
             if (Array.isArray(s.children) && s.children.length > 0) {
@@ -10241,13 +12169,20 @@ export default function Interactive3DNodeShowcase() {
                         return;
                     } else if (c.type === "setWireframe") {
                         scheduleWireStep(c, childStart);
+                    } else if (c.type === "packetSend" || c.type === "packetStop") {
+                        schedulePacketStep(c, childStart);
+                    } else if (c.type === 'setRoomVisible') {
+                        scheduleRoomStep(c, childStart);
+                    } else if (c.type === 'setGroupVisible') {
+                        scheduleGroupStep(c, childStart);
                     } else {
                         scheduleNodeStep(c, childStart);
                     }
                 });
             }
         });
-    };
+    }
+
 
 
 
@@ -10258,7 +12193,10 @@ export default function Interactive3DNodeShowcase() {
     actionsPanelCtxRef.current = {
         actions,
         setActions,
+        rooms,
         nodes,
+        links,
+        groups,
         cameraPresets,
         runAction,
         keepLeftScroll,
@@ -10439,6 +12377,24 @@ export default function Interactive3DNodeShowcase() {
         setPictureClipboardTick,
     };
 
+    const onMoveModel = useCallback(() => {
+        // Cancel placement/linking and open gizmo for the imported model
+        setPlacement((p) => ({ ...(p || {}), armed: false }));
+        setSelectedBreakpoint(null);
+        setMultiSel([]);
+        setLinkFromId(null);
+        setMode("select");
+        setModelVisible(true);
+        setMoveMode(true);
+        setTransformMode("translate");
+        setSelected((prev) => (prev?.type === "model" ? null : ({ type: "model" })));
+    }, [setPlacement, setSelectedBreakpoint, setMultiSel, setLinkFromId, setMode, setModelVisible, setMoveMode, setTransformMode, setSelected]);
+
+    const onResetModelPosition = useCallback(() => {
+        setModelPosition([0, 0, 0]);
+    }, [setModelPosition]);
+
+
 
 
     return (
@@ -10464,6 +12420,9 @@ export default function Interactive3DNodeShowcase() {
                 uiStop={uiStop}
                 stopAnchorDefault={stopAnchorDefault}
                 selected={selected}
+                onMoveModel={onMoveModel}
+                onResetModelPosition={onResetModelPosition}
+                modelPosition={modelPosition}
                 roomsNodesSubtitle={roomsNodesSubtitle}
                 linksSubtitle={linksSubtitle}
                 placement={placement}
@@ -10500,6 +12459,9 @@ export default function Interactive3DNodeShowcase() {
                 setLabelsOn={setLabelsOn}
                 hudButtonsVisible={hudButtonsVisible}
                 setHudButtonsVisible={setHudButtonsVisible}
+
+                gridConfig={gridConfig}
+                setGridConfig={setGridConfig}
             />
 
 
@@ -10519,6 +12481,7 @@ export default function Interactive3DNodeShowcase() {
                 links={links}
                 setNode={setNode}
                 setNodeById={setNodeById}
+                setLightEnabled={setLightEnabled}
                 setRoom={setRoom}
                 duplicateRoom={duplicateRoom}
                 requestDelete={requestDelete}
@@ -10532,6 +12495,11 @@ export default function Interactive3DNodeShowcase() {
                 setLinkFromId={setLinkFromId}   // 🔹 NEW
                 levelFromNodeId={levelFromNodeId}
                 setLevelFromNodeId={setLevelFromNodeId}
+                levelAxis={levelAxis}
+                setLevelAxis={setLevelAxis}
+
+                actions={actions}
+                ActionsPanel={ActionsPanel}
             />
 
             {selectedNode && <RackHUD node={selectedNode} setNodeById={setNodeById} />}
@@ -10656,6 +12624,7 @@ export default function Interactive3DNodeShowcase() {
                         showModel={modelVisible}
                         wireStroke={wireStroke}
                         modelScale={modelScale}
+                        modelPosition={modelPosition}
                         labelsOn={labelsOn}
                         labelMode={labelMode}
                         labelSize={labelSize}
@@ -10681,6 +12650,7 @@ export default function Interactive3DNodeShowcase() {
                         showLights={showLights}
                         showLightBounds={showLightBounds}
                         showGround={showGround}
+                        gridConfig={gridConfig}
                         roomOpacity={roomOpacity}
                         modelRef={modelRef}
                         animate={animate}
@@ -10689,6 +12659,7 @@ export default function Interactive3DNodeShowcase() {
                         bg={bg}
                         missGuardRef={missGuardRef}
                         onNodePointerDown={handleNodeDown}
+                        onSwitchPress={handleSwitchPress}
                         onRoomPointerDown={handleRoomDown}
                         moveMode={moveMode}
                         roomGap={roomGap}

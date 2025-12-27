@@ -1,11 +1,191 @@
 // ui/EditorRightPane.jsx
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Panel, Btn, Input, Select, Checkbox, Slider } from "./Controls.jsx";
 import { DEFAULT_CLUSTERS } from "../utils/clusters.js";
 import { OutgoingLinksEditor } from "../Interactive3DNodeShowcase.helpers.hud.jsx";
 import { RepresentativePanel } from "../Interactive3DNodeShowcase.helpers.editor.jsx";
 
 const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+// ---------------- Light profile clipboard (Copy/Paste) ----------------
+// Stored in memory + localStorage so you can copy on one node and paste on another.
+const LIGHT_PROFILE_CLIPBOARD_KEY = "epic3d.lightProfileClipboard.v1";
+let __lightProfileClipboard = null;
+
+function __deepClone(obj) {
+    if (obj == null) return obj;
+    try {
+        // structuredClone is supported in modern browsers
+        // eslint-disable-next-line no-undef
+        return structuredClone(obj);
+    } catch {
+        try {
+            return JSON.parse(JSON.stringify(obj));
+        } catch {
+            return null;
+        }
+    }
+}
+
+function __loadLightProfileClipboard() {
+    if (__lightProfileClipboard) return __lightProfileClipboard;
+    try {
+        const raw = localStorage.getItem(LIGHT_PROFILE_CLIPBOARD_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return null;
+        __lightProfileClipboard = parsed;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function __saveLightProfileClipboard(profile) {
+    __lightProfileClipboard = profile ? __deepClone(profile) : null;
+    try {
+        if (!profile) {
+            localStorage.removeItem(LIGHT_PROFILE_CLIPBOARD_KEY);
+        } else {
+            localStorage.setItem(LIGHT_PROFILE_CLIPBOARD_KEY, JSON.stringify(profile));
+        }
+    } catch {}
+}
+
+function __pickLightProfileFromNode(node) {
+    const l = node?.light || {};
+    const light = {};
+    // Always include type so pasting can create lights on nodes that had none
+    light.type = l.type || "none";
+
+    const copyKeys = [
+        "enabled",
+        "daisyChained",
+        "color",
+        "autoIntensity",
+        "targetLux",
+        "intensity",
+        "distance",
+        "decay",
+        "angle",
+        "penumbra",
+        "aimMode",
+        "yaw",
+        "pitch",
+        "yawPitchBasis",
+        "aimDistance",
+        "target",
+        "pointAt", // legacy alias
+        "showBounds",
+        "fadeIn",
+        "fadeOut",
+        "shadowMapSize",
+        "shadowBias",
+        "shadowNormalBias",
+    ];
+
+    for (const k of copyKeys) {
+        if (l[k] !== undefined) light[k] = __deepClone(l[k]);
+    }
+
+    // Shadows integration (per-node light casting toggle)
+    const shadows = node?.shadows || {};
+    const profile = {
+        __kind: "lightProfile",
+        __v: 1,
+        light,
+        shadows: {
+            light: shadows.light ?? true,
+        },
+    };
+
+    return profile;
+}
+
+function __applyLightProfileToNode({ nodeId, profile, setNodeById }) {
+    if (!nodeId || !profile || typeof profile !== "object") return;
+    const light = profile.light || null;
+    const shadowPatch = profile.shadows || null;
+
+    setNodeById(nodeId, (cur) => {
+        const next = {};
+        if (light) {
+            next.light = __deepClone(light);
+        }
+        if (shadowPatch) {
+            next.shadows = { ...(cur.shadows || {}), ...__deepClone(shadowPatch) };
+        }
+        return next;
+    });
+}
+
+function __computeDownstreamChain(startId, links, maxHops = 64) {
+    if (!startId) return [];
+    const chain = [];
+    const visited = new Set([startId]);
+    let cur = startId;
+    for (let i = 0; i < maxHops; i++) {
+        const out = (Array.isArray(links) ? links : []).find((l) => l && l.from === cur && l.to);
+        if (!out) break;
+        const nextId = out.to;
+        if (!nextId || visited.has(nextId)) break;
+        chain.push(nextId);
+        visited.add(nextId);
+        cur = nextId;
+    }
+    return chain;
+}
+
+
+// ---------------- Switch profile clipboard (Copy/Paste) ----------------
+const SWITCH_PROFILE_CLIPBOARD_KEY = "epic3d.switchProfileClipboard.v1";
+let __switchProfileClipboard = null;
+
+function __loadSwitchProfileClipboard() {
+    if (__switchProfileClipboard) return __switchProfileClipboard;
+    try {
+        const raw = localStorage.getItem(SWITCH_PROFILE_CLIPBOARD_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return null;
+        __switchProfileClipboard = parsed;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function __saveSwitchProfileClipboard(profile) {
+    __switchProfileClipboard = profile ? __deepClone(profile) : null;
+    try {
+        if (!profile) localStorage.removeItem(SWITCH_PROFILE_CLIPBOARD_KEY);
+        else localStorage.setItem(SWITCH_PROFILE_CLIPBOARD_KEY, JSON.stringify(profile));
+    } catch {}
+}
+
+function __pickSwitchProfileFromNode(node) {
+    const sw = node?.switch || {};
+    const shape = node?.shape || null;
+    return {
+        __kind: "switchProfile",
+        __v: 1,
+        kind: "switch",
+        shape: shape ? __deepClone(shape) : null,
+        switch: __deepClone(sw) || {},
+    };
+}
+
+function __applySwitchProfileToNode({ nodeId, profile, setNodeById }) {
+    if (!nodeId || !profile || typeof profile !== "object") return;
+    const sw = profile.switch || {};
+    const shape = profile.shape || null;
+    setNodeById(nodeId, (cur) => {
+        const next = { kind: "switch" };
+        if (shape) next.shape = __deepClone(shape);
+        next.switch = __deepClone(sw) || {};
+        return next;
+    });
+}
 
 const NumberInput = ({ value, onChange, step = 0.05, min = 0.0 }) => {
     const safeVal =
@@ -49,6 +229,7 @@ export default function EditorRightPane({
                                             links,
                                             setNode,
                                             setNodeById,
+                                            setLightEnabled,
                                             setRoom,
                                             duplicateRoom,
                                             requestDelete,
@@ -64,6 +245,10 @@ export default function EditorRightPane({
                                             setMultiLinkMode,
                                             levelFromNodeId,       // 👈 NEW
                                             setLevelFromNodeId,    // 👈 NEW
+                                            levelAxis,             // 👈 NEW
+                                            setLevelAxis,          // 👈 NEW
+                                            actions,
+                                            ActionsPanel,
                                         }) {
 
     const [paneWidth, setPaneWidth] = useState(() => {
@@ -261,6 +446,7 @@ export default function EditorRightPane({
                         links={links}
                         setNode={setNode}
                         setNodeById={setNodeById}
+                        setLightEnabled={setLightEnabled}
                         setLinks={setLinks}
                         mode={mode}
                         setMode={setMode}
@@ -270,6 +456,10 @@ export default function EditorRightPane({
                         setLinkFromId={setLinkFromId}   // 🔹 NEW
                         levelFromNodeId={levelFromNodeId}         // 👈 NEW
                         setLevelFromNodeId={setLevelFromNodeId}   // 👈 NEW
+                        levelAxis={levelAxis}                     // 👈 NEW
+                        setLevelAxis={setLevelAxis}               // 👈 NEW
+                        actions={actions}
+                        ActionsPanel={ActionsPanel}
                     />
                 )}
 
@@ -323,6 +513,7 @@ function NodeInspector({
                            links,
                            setNode,
                            setNodeById,
+                           setLightEnabled,
                            setLinks,
                            mode,
                            setMode,
@@ -334,9 +525,65 @@ function NodeInspector({
                            setMultiLinkMode,
                            levelFromNodeId,        // 👈 NEW
                            setLevelFromNodeId,     // 👈 NEW
+                           levelAxis,              // 👈 NEW
+                           setLevelAxis,           // 👈 NEW
+                           actions,
+                           ActionsPanel,
                        }) {
 
     const [openMasterId, setOpenMasterId] = useState(null);
+    const [lightProfileClipboard, setLightProfileClipboard] = useState(() => __loadLightProfileClipboard());
+    const [switchProfileClipboard, setSwitchProfileClipboard] = useState(() => __loadSwitchProfileClipboard());
+
+
+    // Downstream chain (daisy-chain) starting at this node.
+    // Used by “Paste to chain” to speed up applying the same light profile across linked nodes.
+    const downstreamChainIds = useMemo(
+        () => __computeDownstreamChain(n?.id, links, 96),
+        [n?.id, links],
+    );
+
+    const canPasteLightProfile = !!(
+        lightProfileClipboard &&
+        typeof lightProfileClipboard === "object" &&
+        lightProfileClipboard.__kind === "lightProfile"
+    );
+
+    const copyLightProfile = () => {
+        const prof = __pickLightProfileFromNode(n);
+        __saveLightProfileClipboard(prof);
+        setLightProfileClipboard(prof);
+    };
+
+    const pasteLightProfile = (nodeId) => {
+        if (!canPasteLightProfile) return;
+        __applyLightProfileToNode({ nodeId, profile: lightProfileClipboard, setNodeById });
+    };
+
+    const pasteLightProfileToChain = () => {
+        if (!canPasteLightProfile) return;
+        const ids = Array.isArray(downstreamChainIds) ? downstreamChainIds : [];
+        if (!ids.length) return;
+        // Apply to linked node(s) and continue down the chain.
+        for (const id of ids) {
+            pasteLightProfile(id);
+        }
+    };
+
+    // Keep clipboard in sync if something else updates localStorage.
+    useEffect(() => {
+        const onStorage = (e) => {
+            if (!e) return;
+            if (e.key === LIGHT_PROFILE_CLIPBOARD_KEY) {
+                setLightProfileClipboard(__loadLightProfileClipboard());
+            }
+            if (e.key === SWITCH_PROFILE_CLIPBOARD_KEY) {
+                setSwitchProfileClipboard(__loadSwitchProfileClipboard());
+            }
+        };
+        window.addEventListener?.("storage", onStorage);
+        return () => window.removeEventListener?.("storage", onStorage);
+    }, []);
     if (!n) return null;
 
     // "Master links" = incoming links where this node is the target.
@@ -419,6 +666,100 @@ function NodeInspector({
                     />
                 </label>
 
+                <label>
+                    Node Type
+                    <Select
+                        value={(n.kind || "node").toLowerCase()}
+                        onChange={(e) => {
+                            const kind = String(e.target.value || "node").toLowerCase();
+                            if (kind === "switch") {
+                                setNodeById(n.id, (cur) => {
+                                    const curShape = cur.shape || {};
+                                    const shape = (curShape.type || "").toLowerCase() === "switch" ? curShape : { type: "switch", w: 1.1, h: 0.12, d: 0.35 };
+                                    const sw = (function ensureSwitch(cfg) {
+                                        const c0 = cfg || {};
+                                        const raw = c0.buttonsCount ?? (Array.isArray(c0.buttons) ? c0.buttons.length : 2) ?? 2;
+                                        const count = Math.max(1, Math.min(12, Math.floor(Number(raw) || 2)));
+                                        const out = {
+                                            buttonsCount: count,
+                                            physical: !!c0.physical,
+                                            physicalHeight: Number(c0.physicalHeight ?? 0.028) || 0.028,
+                                            margin: Number(c0.margin ?? 0.03) || 0.03,
+                                            gap: Number(c0.gap ?? 0.02) || 0.02,
+                                            pressDepth: Number(c0.pressDepth ?? 0.014) || 0.014,
+
+                                            // ✅ fluid press animation (same timing in + out) + optional hold
+                                            pressAnimMs: Math.max(40, Math.floor(Number(c0.pressAnimMs ?? c0.pressMs ?? 160) || 160)),
+                                            pressHoldMs: Math.max(0, Math.floor(Number(c0.pressHoldMs ?? 60) || 60)),
+
+                                            // legacy compatibility
+                                            pressMs: Math.max(40, Math.floor(Number(c0.pressMs ?? c0.pressAnimMs ?? 160) || 160)),
+
+                                            textColor: c0.textColor ?? "#e2e8f0",
+                                            textScale: Number(c0.textScale ?? 1) || 1,
+
+                                            // ✅ text layout defaults
+                                            textRotationDeg: Number(c0.textRotationDeg ?? 0) || 0,
+                                            textAlign: c0.textAlign ?? "center",
+                                            textOffset: (() => {
+                                                const o = c0.textOffset || { x: 0, y: 0 };
+                                                if (Array.isArray(o) && o.length >= 2) return { x: Number(o[0]) || 0, y: Number(o[1]) || 0 };
+                                                return { x: Number(o?.x) || 0, y: Number(o?.y) || 0 };
+                                            })(),
+
+                                            buttonColor: c0.buttonColor ?? "#22314d",
+                                            pressedColor: c0.pressedColor ?? "#101a2d",
+                                            hoverEmissive: c0.hoverEmissive ?? "#ffffff",
+
+                                            // ✅ defaults for button backlight + text glow
+                                            backlight: {
+                                                enabled: !!(c0.backlight?.enabled ?? false),
+                                                color: c0.backlight?.color ?? "#00b7ff",
+                                                pressedColor: c0.backlight?.pressedColor ?? (c0.backlight?.color ?? "#00b7ff"),
+                                                intensity: Number(c0.backlight?.intensity ?? 1.6) || 1.6,
+                                                opacity: Number(c0.backlight?.opacity ?? 0.35) || 0.35,
+                                                padding: Number(c0.backlight?.padding ?? 0.012) || 0.012,
+                                            },
+                                            textGlow: {
+                                                enabled: !!(c0.textGlow?.enabled ?? false),
+                                                color: c0.textGlow?.color ?? "#ffffff",
+                                                pressedColor: c0.textGlow?.pressedColor ?? (c0.textGlow?.color ?? "#ffffff"),
+                                                intensity: Number(c0.textGlow?.intensity ?? 1) || 1,
+                                                outlineWidth: Number(c0.textGlow?.outlineWidth ?? 0.02) || 0.02,
+                                                outlineOpacity: Number(c0.textGlow?.outlineOpacity ?? 0.8) || 0.8,
+                                            },
+
+                                            buttons: Array.isArray(c0.buttons) ? c0.buttons.slice(0, count) : [],
+                                        };
+                                        while (out.buttons.length < count) out.buttons.push({ name: `Btn ${out.buttons.length + 1}`, actionIds: [] });
+                                        out.buttons = out.buttons.map((b, i) => ({
+                                            ...b,
+                                            name: b?.name ?? b?.label ?? `Btn ${i + 1}`,
+                                            color: b?.color,
+                                            pressedColor: b?.pressedColor,
+                                            textColor: b?.textColor,
+                                            textScale: b?.textScale,
+                                            textRotationDeg: b?.textRotationDeg,
+                                            textAlign: b?.textAlign,
+                                            textOffset: b?.textOffset,
+                                            backlight: b?.backlight,
+                                            textGlow: b?.textGlow,
+                                            actionIds: Array.isArray(b?.actionIds) ? b.actionIds : [],
+                                        }));
+                                        return out;
+                                    })(cur.switch || {});
+                                    return { kind: "switch", shape, switch: sw };
+                                });
+                            } else {
+                                setNode(n.id, { kind: "node" });
+                            }
+                        }}
+                    >
+                        <option value="node">Node</option>
+                        <option value="switch">Switch</option>
+                    </Select>
+                </label>
+
 
                 <div
                     style={{
@@ -475,23 +816,69 @@ function NodeInspector({
                     </Btn>
 
 
-                    {/* 🔹 NEW: Level Target button */}
+                    {/* Align axis buttons (pick master → click target) */}
                     <Btn
                         onClick={() => {
-                            // Always be in normal select mode for leveling
+                            // Always be in normal select mode for align
                             setMode("select");
                             setLinkFromId?.(null);
 
-                            // Toggle: clicking again on same node cancels
-                            setLevelFromNodeId?.((current) =>
-                                current === n.id ? null : n.id,
-                            );
+                            const ax = (levelAxis || "y").toLowerCase();
+                            const active = levelFromNodeId === n.id && ax === "x";
+                            if (active) {
+                                setLevelFromNodeId?.(null);
+                                return;
+                            }
+                            setLevelAxis?.("x");
+                            setLevelFromNodeId?.(n.id);
                         }}
-                        glow={levelFromNodeId === n.id}
+                        glow={levelFromNodeId === n.id && (levelAxis || "y").toLowerCase() === "x"}
                     >
-                        {levelFromNodeId === n.id
-                            ? "Level Target (pick…)"
-                            : "Level Target"}
+                        {levelFromNodeId === n.id && (levelAxis || "y").toLowerCase() === "x"
+                            ? "Align X (pick…)"
+                            : "Align X"}
+                    </Btn>
+
+                    <Btn
+                        onClick={() => {
+                            setMode("select");
+                            setLinkFromId?.(null);
+
+                            const ax = (levelAxis || "y").toLowerCase();
+                            const active = levelFromNodeId === n.id && ax === "y";
+                            if (active) {
+                                setLevelFromNodeId?.(null);
+                                return;
+                            }
+                            setLevelAxis?.("y");
+                            setLevelFromNodeId?.(n.id);
+                        }}
+                        glow={levelFromNodeId === n.id && (levelAxis || "y").toLowerCase() === "y"}
+                    >
+                        {levelFromNodeId === n.id && (levelAxis || "y").toLowerCase() === "y"
+                            ? "Align Y (pick…)"
+                            : "Align Y"}
+                    </Btn>
+
+                    <Btn
+                        onClick={() => {
+                            setMode("select");
+                            setLinkFromId?.(null);
+
+                            const ax = (levelAxis || "y").toLowerCase();
+                            const active = levelFromNodeId === n.id && ax === "z";
+                            if (active) {
+                                setLevelFromNodeId?.(null);
+                                return;
+                            }
+                            setLevelAxis?.("z");
+                            setLevelFromNodeId?.(n.id);
+                        }}
+                        glow={levelFromNodeId === n.id && (levelAxis || "y").toLowerCase() === "z"}
+                    >
+                        {levelFromNodeId === n.id && (levelAxis || "y").toLowerCase() === "z"
+                            ? "Align Z (pick…)"
+                            : "Align Z"}
                     </Btn>
 
                     {/* Delete node */}
@@ -1436,6 +1823,711 @@ function NodeInspector({
                     setNodeById={setNodeById}
                 />
 
+                {/* Switch */}
+                {((n.kind || "node") === "switch") && (() => {
+                    const ensureSwitch = (cfg, countOverride) => {
+                        const c0 = cfg || {};
+                        const raw = countOverride ?? c0.buttonsCount ?? (Array.isArray(c0.buttons) ? c0.buttons.length : 2) ?? 2;
+                        const count = Math.max(1, Math.min(12, Math.floor(Number(raw) || 2)));
+                        const out = {
+                            buttonsCount: count,
+                            physical: !!c0.physical,
+                            physicalHeight: Number(c0.physicalHeight ?? 0.028) || 0.028,
+                            margin: Number(c0.margin ?? 0.03) || 0.03,
+                            gap: Number(c0.gap ?? 0.02) || 0.02,
+                            pressDepth: Number(c0.pressDepth ?? 0.014) || 0.014,
+
+                            // ✅ fluid press animation (same timing in + out) + optional hold
+                            pressAnimMs: Math.max(40, Math.floor(Number(c0.pressAnimMs ?? c0.pressMs ?? 160) || 160)),
+                            pressHoldMs: Math.max(0, Math.floor(Number(c0.pressHoldMs ?? 60) || 60)),
+
+                            // legacy compatibility
+                            pressMs: Math.max(40, Math.floor(Number(c0.pressMs ?? c0.pressAnimMs ?? 160) || 160)),
+
+                            textColor: c0.textColor ?? "#e2e8f0",
+                            textScale: Number(c0.textScale ?? 1) || 1,
+
+                            // ✅ text layout defaults
+                            textRotationDeg: Number(c0.textRotationDeg ?? 0) || 0,
+                            textAlign: c0.textAlign ?? "center",
+                            textOffset: (() => {
+                                const o = c0.textOffset || { x: 0, y: 0 };
+                                if (Array.isArray(o) && o.length >= 2) return { x: Number(o[0]) || 0, y: Number(o[1]) || 0 };
+                                return { x: Number(o?.x) || 0, y: Number(o?.y) || 0 };
+                            })(),
+
+                            buttonColor: c0.buttonColor ?? "#22314d",
+                            pressedColor: c0.pressedColor ?? "#101a2d",
+                            hoverEmissive: c0.hoverEmissive ?? "#ffffff",
+
+                            // ✅ defaults for button backlight + text glow
+                            backlight: {
+                                enabled: !!(c0.backlight?.enabled ?? false),
+                                color: c0.backlight?.color ?? "#00b7ff",
+                                pressedColor: c0.backlight?.pressedColor ?? (c0.backlight?.color ?? "#00b7ff"),
+                                intensity: Number(c0.backlight?.intensity ?? 1.6) || 1.6,
+                                opacity: Number(c0.backlight?.opacity ?? 0.35) || 0.35,
+                                padding: Number(c0.backlight?.padding ?? 0.012) || 0.012,
+                            },
+                            textGlow: {
+                                enabled: !!(c0.textGlow?.enabled ?? false),
+                                color: c0.textGlow?.color ?? "#ffffff",
+                                pressedColor: c0.textGlow?.pressedColor ?? (c0.textGlow?.color ?? "#ffffff"),
+                                intensity: Number(c0.textGlow?.intensity ?? 1) || 1,
+                                outlineWidth: Number(c0.textGlow?.outlineWidth ?? 0.02) || 0.02,
+                                outlineOpacity: Number(c0.textGlow?.outlineOpacity ?? 0.8) || 0.8,
+                            },
+
+                            buttons: Array.isArray(c0.buttons) ? c0.buttons.slice(0, count) : [],
+                        };
+                        while (out.buttons.length < count) out.buttons.push({ name: `Btn ${out.buttons.length + 1}`, actionIds: [] });
+                        out.buttons = out.buttons.map((b, i) => ({
+                            ...b,
+                            name: b?.name ?? b?.label ?? `Btn ${i + 1}`,
+                            color: b?.color,
+                            pressedColor: b?.pressedColor,
+                            textColor: b?.textColor,
+                            textScale: b?.textScale,
+                            textRotationDeg: b?.textRotationDeg,
+                            textAlign: b?.textAlign,
+                            textOffset: b?.textOffset,
+                            backlight: b?.backlight,
+                            textGlow: b?.textGlow,
+                            actionIds: Array.isArray(b?.actionIds) ? b.actionIds : [],
+                        }));
+                        return out;
+                    };
+
+                    const sw0 = ensureSwitch(n.switch || {}, null);
+                    const canPasteSwitchProfile = !!(switchProfileClipboard && switchProfileClipboard.__kind === "switchProfile");
+
+                    const copySwitchProfile = () => {
+                        const prof = __pickSwitchProfileFromNode(n);
+                        __saveSwitchProfileClipboard(prof);
+                        setSwitchProfileClipboard(prof);
+                    };
+
+                    const pasteSwitchProfile = () => {
+                        if (!canPasteSwitchProfile) return;
+                        __applySwitchProfileToNode({ nodeId: n.id, profile: switchProfileClipboard, setNodeById });
+                    };
+
+                    const setSwitch = (patchOrFn) => {
+                        setNodeById(n.id, (cur) => {
+                            const base = ensureSwitch(cur.switch || {}, null);
+                            const patch = typeof patchOrFn === "function" ? patchOrFn(base) : patchOrFn;
+                            return { switch: { ...base, ...(patch || {}) } };
+                        });
+                    };
+
+                    const setButton = (idx, patch) => {
+                        setSwitch((base) => {
+                            const btns = (base.buttons || []).slice();
+                            const curB = btns[idx] || { name: `Btn ${idx + 1}`, actionIds: [] };
+                            btns[idx] = { ...curB, ...(patch || {}) };
+                            return { buttons: btns };
+                        });
+                    };
+
+                    const toggleButtonAction = (idx, actionId, on) => {
+                        setButton(idx, {
+                            actionIds: (() => {
+                                const cur = (sw0.buttons[idx]?.actionIds || []).slice();
+                                const has = cur.includes(actionId);
+                                if (on && !has) cur.push(actionId);
+                                if (!on && has) return cur.filter((x) => x !== actionId);
+                                return cur;
+                            })(),
+                        });
+                    };
+
+                    return (
+                        <div
+                            style={{
+                                borderTop: "1px dashed rgba(255,255,255,0.15)",
+                                paddingTop: 8,
+                                marginTop: 8,
+                            }}
+                        >
+                            <div style={{ fontWeight: 900, marginBottom: 6 }}>Switch</div>
+
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}
+                            >
+                                <Btn onClick={copySwitchProfile} style={{ padding: "8px 10px" }} title="Copy this switch button layout + styles + actions">
+                                    Copy profile
+                                </Btn>
+                                <Btn disabled={!canPasteSwitchProfile} onClick={pasteSwitchProfile} style={{ padding: "8px 10px" }} title="Paste the copied switch profile onto this node">
+                                    Paste profile
+                                </Btn>
+                            </div>
+
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignItems: "end" }}>
+                                <label>
+                                    Buttons
+                                    <NumberInput
+                                        value={sw0.buttonsCount}
+                                        step={1}
+                                        min={1}
+                                        onChange={(v) => {
+                                            const cnt = Math.max(1, Math.min(12, Math.floor(Number(v) || 1)));
+                                            setSwitch((base) => ensureSwitch(base, cnt));
+                                        }}
+                                    />
+                                </label>
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <Checkbox
+                                        checked={!!sw0.physical}
+                                        onChange={(v) => setSwitch({ physical: v })}
+                                        label="physical buttons (3D)"
+                                    />
+                                </div>
+                            </div>
+
+                            {sw0.physical && (
+                                <label>
+                                    Physical height
+                                    <NumberInput
+                                        value={sw0.physicalHeight}
+                                        step={0.002}
+                                        min={0.001}
+                                        onChange={(v) => setSwitch({ physicalHeight: v })}
+                                    />
+                                </label>
+                            )}
+
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                                <label>
+                                    Margin
+                                    <NumberInput
+                                        value={sw0.margin}
+                                        step={0.005}
+                                        min={0}
+                                        onChange={(v) => setSwitch({ margin: v })}
+                                    />
+                                </label>
+                                <label>
+                                    Gap
+                                    <NumberInput
+                                        value={sw0.gap}
+                                        step={0.005}
+                                        min={0}
+                                        onChange={(v) => setSwitch({ gap: v })}
+                                    />
+                                </label>
+                                <label>
+                                    Press depth
+                                    <NumberInput
+                                        value={sw0.pressDepth}
+                                        step={0.002}
+                                        min={0}
+                                        onChange={(v) => setSwitch({ pressDepth: v })}
+                                    />
+                                </label>
+                                <label>
+                                    Press anim (ms)
+                                    <NumberInput
+                                        value={sw0.pressAnimMs ?? sw0.pressMs}
+                                        step={10}
+                                        min={40}
+                                        onChange={(v) => setSwitch({ pressAnimMs: v, pressMs: v })}
+                                    />
+                                </label>
+                                <label>
+                                    Hold (ms)
+                                    <NumberInput
+                                        value={sw0.pressHoldMs ?? 60}
+                                        step={10}
+                                        min={0}
+                                        onChange={(v) => setSwitch({ pressHoldMs: v })}
+                                    />
+                                </label>
+                            </div>
+
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 6 }}>
+                                <label>
+                                    Default button
+                                    <Input
+                                        type="color"
+                                        value={sw0.buttonColor || "#22314d"}
+                                        onChange={(e) => setSwitch({ buttonColor: e.target.value })}
+                                    />
+                                </label>
+                                <label>
+                                    Pressed
+                                    <Input
+                                        type="color"
+                                        value={sw0.pressedColor || "#101a2d"}
+                                        onChange={(e) => setSwitch({ pressedColor: e.target.value })}
+                                    />
+                                </label>
+                                <label>
+                                    Text color
+                                    <Input
+                                        type="color"
+                                        value={sw0.textColor || "#e2e8f0"}
+                                        onChange={(e) => setSwitch({ textColor: e.target.value })}
+                                    />
+                                </label>
+                                <label>
+                                    Text scale
+                                    <NumberInput
+                                        value={sw0.textScale ?? 1}
+                                        step={0.05}
+                                        min={0.2}
+                                        onChange={(v) => setSwitch({ textScale: v })}
+                                    />
+                                </label>
+
+
+                                <div style={{
+                                    marginTop: 10,
+                                    padding: 10,
+                                    borderRadius: 12,
+                                    background: "rgba(255,255,255,0.04)",
+                                    border: "1px solid rgba(255,255,255,0.08)"
+                                }}>
+                                    <div style={{ fontWeight: 900, marginBottom: 8 }}>Text layout defaults</div>
+                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                        <label>
+                                            Rotation (deg)
+                                            <NumberInput
+                                                value={sw0.textRotationDeg ?? 0}
+                                                step={5}
+                                                onChange={(v) => setSwitch({ textRotationDeg: v })}
+                                            />
+                                        </label>
+                                        <label>
+                                            Align
+                                            <Select
+                                                value={sw0.textAlign ?? "center"}
+                                                onChange={(e) => setSwitch({ textAlign: e.target.value })}
+                                            >
+                                                <option value="left">Left</option>
+                                                <option value="center">Center</option>
+                                                <option value="right">Right</option>
+                                            </Select>
+                                        </label>
+                                        <label>
+                                            Offset X
+                                            <NumberInput
+                                                value={(sw0.textOffset?.x ?? 0)}
+                                                step={0.005}
+                                                onChange={(v) => setSwitch((cur) => ({ textOffset: { ...(cur.textOffset || { x: 0, y: 0 }), x: v } }))}
+                                            />
+                                        </label>
+                                        <label>
+                                            Offset Y
+                                            <NumberInput
+                                                value={(sw0.textOffset?.y ?? 0)}
+                                                step={0.005}
+                                                onChange={(v) => setSwitch((cur) => ({ textOffset: { ...(cur.textOffset || { x: 0, y: 0 }), y: v } }))}
+                                            />
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <details style={{ marginTop: 8 }}>
+                                    <summary style={{ cursor: "pointer", fontWeight: 900 }}>Backlight defaults</summary>
+                                    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                                        <Checkbox
+                                            checked={!!sw0.backlight?.enabled}
+                                            onChange={(on) => setSwitch((cur) => ({ backlight: { ...(cur.backlight || {}), enabled: on } }))}
+                                            label="Enabled"
+                                        />
+                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                            <label>
+                                                Color
+                                                <Input
+                                                    type="color"
+                                                    value={sw0.backlight?.color ?? "#00b7ff"}
+                                                    onChange={(e) => setSwitch((cur) => ({ backlight: { ...(cur.backlight || {}), color: e.target.value } }))}
+                                                />
+                                            </label>
+                                            <label>
+                                                Pressed
+                                                <Input
+                                                    type="color"
+                                                    value={sw0.backlight?.pressedColor ?? (sw0.backlight?.color ?? "#00b7ff")}
+                                                    onChange={(e) => setSwitch((cur) => ({ backlight: { ...(cur.backlight || {}), pressedColor: e.target.value } }))}
+                                                />
+                                            </label>
+                                            <label>
+                                                Intensity
+                                                <NumberInput
+                                                    value={sw0.backlight?.intensity ?? 1.6}
+                                                    step={0.1}
+                                                    min={0}
+                                                    onChange={(v) => setSwitch((cur) => ({ backlight: { ...(cur.backlight || {}), intensity: v } }))}
+                                                />
+                                            </label>
+                                            <label>
+                                                Opacity
+                                                <NumberInput
+                                                    value={sw0.backlight?.opacity ?? 0.35}
+                                                    step={0.05}
+                                                    min={0}
+                                                    max={1}
+                                                    onChange={(v) => setSwitch((cur) => ({ backlight: { ...(cur.backlight || {}), opacity: v } }))}
+                                                />
+                                            </label>
+                                            <label>
+                                                Padding
+                                                <NumberInput
+                                                    value={sw0.backlight?.padding ?? 0.012}
+                                                    step={0.002}
+                                                    min={0}
+                                                    onChange={(v) => setSwitch((cur) => ({ backlight: { ...(cur.backlight || {}), padding: v } }))}
+                                                />
+                                            </label>
+                                        </div>
+                                    </div>
+                                </details>
+
+                                <details style={{ marginTop: 8 }}>
+                                    <summary style={{ cursor: "pointer", fontWeight: 900 }}>Text glow defaults</summary>
+                                    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                                        <Checkbox
+                                            checked={!!sw0.textGlow?.enabled}
+                                            onChange={(on) => setSwitch((cur) => ({ textGlow: { ...(cur.textGlow || {}), enabled: on } }))}
+                                            label="Enabled"
+                                        />
+                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                            <label>
+                                                Color
+                                                <Input
+                                                    type="color"
+                                                    value={sw0.textGlow?.color ?? "#ffffff"}
+                                                    onChange={(e) => setSwitch((cur) => ({ textGlow: { ...(cur.textGlow || {}), color: e.target.value } }))}
+                                                />
+                                            </label>
+                                            <label>
+                                                Pressed
+                                                <Input
+                                                    type="color"
+                                                    value={sw0.textGlow?.pressedColor ?? (sw0.textGlow?.color ?? "#ffffff")}
+                                                    onChange={(e) => setSwitch((cur) => ({ textGlow: { ...(cur.textGlow || {}), pressedColor: e.target.value } }))}
+                                                />
+                                            </label>
+                                            <label>
+                                                Intensity
+                                                <NumberInput
+                                                    value={sw0.textGlow?.intensity ?? 1}
+                                                    step={0.1}
+                                                    min={0}
+                                                    onChange={(v) => setSwitch((cur) => ({ textGlow: { ...(cur.textGlow || {}), intensity: v } }))}
+                                                />
+                                            </label>
+                                            <label>
+                                                Outline width
+                                                <NumberInput
+                                                    value={sw0.textGlow?.outlineWidth ?? 0.02}
+                                                    step={0.005}
+                                                    min={0}
+                                                    onChange={(v) => setSwitch((cur) => ({ textGlow: { ...(cur.textGlow || {}), outlineWidth: v } }))}
+                                                />
+                                            </label>
+                                            <label>
+                                                Outline opacity
+                                                <NumberInput
+                                                    value={sw0.textGlow?.outlineOpacity ?? 0.8}
+                                                    step={0.05}
+                                                    min={0}
+                                                    max={1}
+                                                    onChange={(v) => setSwitch((cur) => ({ textGlow: { ...(cur.textGlow || {}), outlineOpacity: v } }))}
+                                                />
+                                            </label>
+                                        </div>
+                                    </div>
+                                </details>
+
+                            </div>
+
+                            <details style={{ marginTop: 8 }} open>
+                                <summary style={{ cursor: "pointer", fontWeight: 800, marginBottom: 6 }}>Buttons</summary>
+                                <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
+                                    {sw0.buttons.map((b, i) => {
+                                        const btn = b || {};
+                                        const effBacklight = { ...(sw0.backlight || {}), ...(btn.backlight || {}) };
+                                        const effTextGlow = { ...(sw0.textGlow || {}), ...(btn.textGlow || {}) };
+                                        return (
+                                            <details key={i} style={{ border: "1px solid rgba(255,255,255,0.10)", borderRadius: 12, padding: 10 }} open={i === 0}>
+                                                <summary style={{ cursor: "pointer", fontWeight: 800 }}>
+                                                    {`Button ${i + 1}: ${btn.name || `Btn ${i + 1}`}`}
+                                                </summary>
+                                                <div style={{ display: "grid", gap: 8, marginTop: 10 }}
+                                                >
+                                                    <label>
+                                                        Name (shown on button)
+                                                        <Input
+                                                            value={btn.name || ""}
+                                                            onChange={(e) => setButton(i, { name: e.target.value })}
+                                                        />
+                                                    </label>
+
+                                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                                        <label>
+                                                            Color
+                                                            <Input
+                                                                type="color"
+                                                                value={btn.color || sw0.buttonColor || "#22314d"}
+                                                                onChange={(e) => setButton(i, { color: e.target.value })}
+                                                            />
+                                                        </label>
+                                                        <label>
+                                                            Pressed
+                                                            <Input
+                                                                type="color"
+                                                                value={btn.pressedColor || sw0.pressedColor || "#101a2d"}
+                                                                onChange={(e) => setButton(i, { pressedColor: e.target.value })}
+                                                            />
+                                                        </label>
+                                                        <label>
+                                                            Text color
+                                                            <Input
+                                                                type="color"
+                                                                value={btn.textColor || sw0.textColor || "#e2e8f0"}
+                                                                onChange={(e) => setButton(i, { textColor: e.target.value })}
+                                                            />
+                                                        </label>
+                                                        <label>
+                                                            Text scale
+                                                            <NumberInput
+                                                                value={btn.textScale ?? 1}
+                                                                step={0.05}
+                                                                min={0.2}
+                                                                onChange={(v) => setButton(i, { textScale: v })}
+                                                            />
+                                                        </label>
+                                                    </div>
+
+
+                                                    <div style={{
+                                                        padding: 10,
+                                                        borderRadius: 12,
+                                                        background: "rgba(0,0,0,0.18)",
+                                                        border: "1px solid rgba(255,255,255,0.08)"
+                                                    }}>
+                                                        <div style={{ fontWeight: 900, marginBottom: 6 }}>Text layout</div>
+                                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                                            <label>
+                                                                Rotation (deg)
+                                                                <NumberInput
+                                                                    value={btn.textRotationDeg ?? sw0.textRotationDeg ?? 0}
+                                                                    step={5}
+                                                                    onChange={(v) => setButton(i, { textRotationDeg: v })}
+                                                                />
+                                                            </label>
+                                                            <label>
+                                                                Align
+                                                                <Select
+                                                                    value={btn.textAlign ?? sw0.textAlign ?? "center"}
+                                                                    onChange={(e) => setButton(i, { textAlign: e.target.value })}
+                                                                >
+                                                                    <option value="left">Left</option>
+                                                                    <option value="center">Center</option>
+                                                                    <option value="right">Right</option>
+                                                                </Select>
+                                                            </label>
+                                                            <label>
+                                                                Offset X
+                                                                <NumberInput
+                                                                    value={(btn.textOffset?.x ?? sw0.textOffset?.x ?? 0)}
+                                                                    step={0.005}
+                                                                    onChange={(v) => setButton(i, { textOffset: { ...(btn.textOffset || sw0.textOffset || { x: 0, y: 0 }), x: v } })}
+                                                                />
+                                                            </label>
+                                                            <label>
+                                                                Offset Y
+                                                                <NumberInput
+                                                                    value={(btn.textOffset?.y ?? sw0.textOffset?.y ?? 0)}
+                                                                    step={0.005}
+                                                                    onChange={(v) => setButton(i, { textOffset: { ...(btn.textOffset || sw0.textOffset || { x: 0, y: 0 }), y: v } })}
+                                                                />
+                                                            </label>
+                                                        </div>
+                                                    </div>
+
+                                                    <details style={{ marginTop: 8 }}>
+                                                        <summary style={{ cursor: "pointer", fontWeight: 900 }}>Backlight</summary>
+                                                        <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                                                            <Checkbox
+                                                                checked={!!btn.backlight}
+                                                                onChange={(on) => setButton(i, { backlight: on ? { ...(sw0.backlight || {}) } : undefined })}
+                                                                label="Override for this button"
+                                                            />
+                                                            <div
+                                                                style={{
+                                                                    display: "grid",
+                                                                    gridTemplateColumns: "1fr 1fr",
+                                                                    gap: 8,
+                                                                    opacity: btn.backlight ? 1 : 0.55,
+                                                                    pointerEvents: btn.backlight ? "auto" : "none",
+                                                                }}
+                                                            >
+                                                                <Checkbox
+                                                                    checked={!!effBacklight.enabled}
+                                                                    onChange={(on) => setButton(i, { backlight: { ...(btn.backlight || sw0.backlight || {}), enabled: on } })}
+                                                                    label="Enabled"
+                                                                />
+                                                                <div />
+                                                                <label>
+                                                                    Color
+                                                                    <Input
+                                                                        type="color"
+                                                                        value={effBacklight.color ?? "#00b7ff"}
+                                                                        onChange={(e) => setButton(i, { backlight: { ...(btn.backlight || sw0.backlight || {}), color: e.target.value } })}
+                                                                    />
+                                                                </label>
+                                                                <label>
+                                                                    Pressed
+                                                                    <Input
+                                                                        type="color"
+                                                                        value={effBacklight.pressedColor ?? (effBacklight.color ?? "#00b7ff")}
+                                                                        onChange={(e) => setButton(i, { backlight: { ...(btn.backlight || sw0.backlight || {}), pressedColor: e.target.value } })}
+                                                                    />
+                                                                </label>
+                                                                <label>
+                                                                    Intensity
+                                                                    <NumberInput
+                                                                        value={effBacklight.intensity ?? 1.6}
+                                                                        step={0.1}
+                                                                        min={0}
+                                                                        onChange={(v) => setButton(i, { backlight: { ...(btn.backlight || sw0.backlight || {}), intensity: v } })}
+                                                                    />
+                                                                </label>
+                                                                <label>
+                                                                    Opacity
+                                                                    <NumberInput
+                                                                        value={effBacklight.opacity ?? 0.35}
+                                                                        step={0.05}
+                                                                        min={0}
+                                                                        max={1}
+                                                                        onChange={(v) => setButton(i, { backlight: { ...(btn.backlight || sw0.backlight || {}), opacity: v } })}
+                                                                    />
+                                                                </label>
+                                                                <label>
+                                                                    Padding
+                                                                    <NumberInput
+                                                                        value={effBacklight.padding ?? 0.012}
+                                                                        step={0.002}
+                                                                        min={0}
+                                                                        onChange={(v) => setButton(i, { backlight: { ...(btn.backlight || sw0.backlight || {}), padding: v } })}
+                                                                    />
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </details>
+
+                                                    <details style={{ marginTop: 8 }}>
+                                                        <summary style={{ cursor: "pointer", fontWeight: 900 }}>Text glow</summary>
+                                                        <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                                                            <Checkbox
+                                                                checked={!!btn.textGlow}
+                                                                onChange={(on) => setButton(i, { textGlow: on ? { ...(sw0.textGlow || {}) } : undefined })}
+                                                                label="Override for this button"
+                                                            />
+                                                            <div
+                                                                style={{
+                                                                    display: "grid",
+                                                                    gridTemplateColumns: "1fr 1fr",
+                                                                    gap: 8,
+                                                                    opacity: btn.textGlow ? 1 : 0.55,
+                                                                    pointerEvents: btn.textGlow ? "auto" : "none",
+                                                                }}
+                                                            >
+                                                                <Checkbox
+                                                                    checked={!!effTextGlow.enabled}
+                                                                    onChange={(on) => setButton(i, { textGlow: { ...(btn.textGlow || sw0.textGlow || {}), enabled: on } })}
+                                                                    label="Enabled"
+                                                                />
+                                                                <div />
+                                                                <label>
+                                                                    Color
+                                                                    <Input
+                                                                        type="color"
+                                                                        value={effTextGlow.color ?? "#ffffff"}
+                                                                        onChange={(e) => setButton(i, { textGlow: { ...(btn.textGlow || sw0.textGlow || {}), color: e.target.value } })}
+                                                                    />
+                                                                </label>
+                                                                <label>
+                                                                    Pressed
+                                                                    <Input
+                                                                        type="color"
+                                                                        value={effTextGlow.pressedColor ?? (effTextGlow.color ?? "#ffffff")}
+                                                                        onChange={(e) => setButton(i, { textGlow: { ...(btn.textGlow || sw0.textGlow || {}), pressedColor: e.target.value } })}
+                                                                    />
+                                                                </label>
+                                                                <label>
+                                                                    Intensity
+                                                                    <NumberInput
+                                                                        value={effTextGlow.intensity ?? 1}
+                                                                        step={0.1}
+                                                                        min={0}
+                                                                        onChange={(v) => setButton(i, { textGlow: { ...(btn.textGlow || sw0.textGlow || {}), intensity: v } })}
+                                                                    />
+                                                                </label>
+                                                                <label>
+                                                                    Outline width
+                                                                    <NumberInput
+                                                                        value={effTextGlow.outlineWidth ?? 0.02}
+                                                                        step={0.005}
+                                                                        min={0}
+                                                                        onChange={(v) => setButton(i, { textGlow: { ...(btn.textGlow || sw0.textGlow || {}), outlineWidth: v } })}
+                                                                    />
+                                                                </label>
+                                                                <label>
+                                                                    Outline opacity
+                                                                    <NumberInput
+                                                                        value={effTextGlow.outlineOpacity ?? 0.8}
+                                                                        step={0.05}
+                                                                        min={0}
+                                                                        max={1}
+                                                                        onChange={(v) => setButton(i, { textGlow: { ...(btn.textGlow || sw0.textGlow || {}), outlineOpacity: v } })}
+                                                                    />
+                                                                </label>
+                                                            </div>
+                                                        </div>
+                                                    </details>
+
+                                                    <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>
+                                                        Actions to run when this button is pressed
+                                                    </div>
+                                                    {(Array.isArray(actions) && actions.length > 0) ? (
+                                                        <div style={{ display: "grid", gap: 6 }}>
+                                                            {actions.map((a) => {
+                                                                const checked = (btn.actionIds || []).includes(a.id);
+                                                                return (
+                                                                    <Checkbox
+                                                                        key={a.id}
+                                                                        checked={checked}
+                                                                        onChange={(v) => toggleButtonAction(i, a.id, v)}
+                                                                        label={a.label || a.name || a.id}
+                                                                    />
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    ) : (
+                                                        <div style={{ fontSize: 12, opacity: 0.8 }}>No actions yet. Add one below.</div>
+                                                    )}
+                                                </div>
+                                            </details>
+                                        );
+                                    })}
+                                </div>
+                            </details>
+
+                            {ActionsPanel && (
+                                <details style={{ marginTop: 10 }}>
+                                    <summary style={{ cursor: "pointer", fontWeight: 800 }}>Manage Actions</summary>
+                                    <div style={{ marginTop: 8 }}>
+                                        <ActionsPanel />
+                                    </div>
+                                </details>
+                            )}
+                        </div>
+                    );
+                })()}
+
                 {/* Light */}
                 <div
                     style={{
@@ -1444,14 +2536,43 @@ function NodeInspector({
                         marginTop: 8,
                     }}
                 >
+                    <div style={{ fontWeight: 900, marginBottom: 6 }}>Light</div>
+
+                    {/* Copy / Paste light profile */}
                     <div
                         style={{
-                            fontWeight: 900,
-                            marginBottom: 6,
+                            display: "flex",
+                            gap: 8,
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                            marginBottom: 8,
                         }}
                     >
-                        Light
+                        <Btn
+                            onClick={copyLightProfile}
+                            style={{ padding: "8px 10px" }}
+                            title="Copy this node's light profile (type, intensity, aim, dimmer, shadows)"
+                        >
+                            Copy profile
+                        </Btn>
+                        <Btn
+                            disabled={!canPasteLightProfile}
+                            onClick={() => pasteLightProfile(n.id)}
+                            style={{ padding: "8px 10px" }}
+                            title="Paste the copied light profile onto this node"
+                        >
+                            Paste profile
+                        </Btn>
+                        <Btn
+                            disabled={!canPasteLightProfile || downstreamChainIds.length === 0}
+                            onClick={pasteLightProfileToChain}
+                            style={{ padding: "8px 10px" }}
+                            title="Paste the copied light profile onto the linked node and continue down the chain"
+                        >
+                            Paste → chain{downstreamChainIds.length ? ` (${downstreamChainIds.length})` : ""}
+                        </Btn>
                     </div>
+
                     <label>
                         Type
                         <Select
@@ -1468,75 +2589,222 @@ function NodeInspector({
                             <option value="none">none</option>
                             <option value="point">point</option>
                             <option value="spot">spot</option>
+                            <option value="directional">directional</option>
                         </Select>
                     </label>
 
                     {n.light?.type !== "none" && (
                         <>
-                            <label>
-                                Color
-                                <Input
-                                    type="color"
-                                    value={n.light?.color || "#ffffff"}
-                                    onChange={(e) =>
-                                        setNode(n.id, {
-                                            light: {
-                                                ...(n.light || {}),
-                                                color: e.target.value,
-                                            },
-                                        })
-                                    }
-                                />
-                            </label>
-                            <label>
-                                Intensity
-                                <Slider
-                                    value={n.light?.intensity ?? 200}
-                                    min={0}
-                                    max={2000}
-                                    step={1}
-                                    onChange={(v) =>
-                                        setNode(n.id, {
-                                            light: {
-                                                ...(n.light || {}),
-                                                intensity: v,
-                                            },
-                                        })
-                                    }
-                                />
-                            </label>
-                            <label>
-                                Distance
-                                <Slider
-                                    value={n.light?.distance ?? 8}
-                                    min={0}
-                                    max={50}
-                                    step={0.1}
-                                    onChange={(v) =>
-                                        setNode(n.id, {
-                                            light: {
-                                                ...(n.light || {}),
-                                                distance: v,
-                                            },
-                                        })
-                                    }
-                                />
-                            </label>
+                            <div
+                                style={{
+                                    display: "grid",
+                                    gridTemplateColumns: "1fr 1fr",
+                                    gap: 8,
+                                    alignItems: "end",
+                                }}
+                            >
+                                <label>
+                                    Color
+                                    <Input
+                                        type="color"
+                                        value={n.light?.color || "#ffffff"}
+                                        onChange={(e) =>
+                                            setNode(n.id, {
+                                                light: {
+                                                    ...(n.light || {}),
+                                                    color: e.target.value,
+                                                },
+                                            })
+                                        }
+                                    />
+                                </label>
 
-                            {n.light.type === "spot" && (
-                                <>
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <Checkbox
+                                        checked={n.light?.enabled ?? true}
+                                        onChange={(v) => {
+                                            if (typeof setLightEnabled === "function") {
+                                                setLightEnabled(n.id, v);
+                                            } else {
+                                                setNode(n.id, {
+                                                    light: {
+                                                        ...(n.light || {}),
+                                                        enabled: v,
+                                                    },
+                                                });
+                                            }
+                                        }}
+                                        label="enabled (dimmer)"
+                                    />
+                                    <Checkbox
+                                        checked={!!n.light?.daisyChained}
+                                        onChange={(v) =>
+                                            setNode(n.id, {
+                                                light: {
+                                                    ...(n.light || {}),
+                                                    daisyChained: v,
+                                                },
+                                            })
+                                        }
+                                        label="daisy chained"
+                                    />
+                                    <Checkbox
+                                        checked={!!n.light?.showBounds}
+                                        onChange={(v) =>
+                                            setNode(n.id, {
+                                                light: {
+                                                    ...(n.light || {}),
+                                                    showBounds: v,
+                                                },
+                                            })
+                                        }
+                                        label="show bounds"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Intensity / units */}
+                            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                                <Checkbox
+                                    checked={n.light?.autoIntensity ?? (n.light?.type === "spot" || n.light?.type === "point")}
+                                    onChange={(v) =>
+                                        setNode(n.id, {
+                                            light: {
+                                                ...(n.light || {}),
+                                                autoIntensity: v,
+                                            },
+                                        })
+                                    }
+                                    label={
+                                        n.light?.type === "directional"
+                                            ? "Auto intensity (lux)"
+                                            : "Auto intensity (target lux @ distance)"
+                                    }
+                                />
+
+                                {(n.light?.autoIntensity ?? (n.light?.type === "spot" || n.light?.type === "point")) ? (
+                                    <label>
+                                        Target Lux
+                                        <Slider
+                                            value={n.light?.targetLux ?? (n.light?.type === "directional" ? 30 : 120)}
+                                            min={0}
+                                            max={2000}
+                                            step={1}
+                                            onChange={(v) =>
+                                                setNode(n.id, {
+                                                    light: {
+                                                        ...(n.light || {}),
+                                                        targetLux: v,
+                                                    },
+                                                })
+                                            }
+                                        />
+                                    </label>
+                                ) : (
+                                    <label>
+                                        Intensity
+                                        <Slider
+                                            value={n.light?.intensity ?? (n.light?.type === "spot" ? 1200 : n.light?.type === "directional" ? 30 : 800)}
+                                            min={0}
+                                            max={20000}
+                                            step={1}
+                                            onChange={(v) =>
+                                                setNode(n.id, {
+                                                    light: {
+                                                        ...(n.light || {}),
+                                                        intensity: v,
+                                                    },
+                                                })
+                                            }
+                                        />
+                                    </label>
+                                )}
+
+                                {/* Manual numeric input for intensity (always available) */}
+                                <label>
+                                    {n.light?.type === "directional" ? "Intensity (lux)" : "Intensity (candela)"}
+                                    <NumberInput
+                                        value={
+                                            (n.light?.autoIntensity ?? (n.light?.type === "spot" || n.light?.type === "point"))
+                                                ? (n.light?.targetLux ?? (n.light?.type === "directional" ? 30 : 120))
+                                                : (n.light?.intensity ?? (n.light?.type === "spot" ? 1200 : n.light?.type === "directional" ? 30 : 800))
+                                        }
+                                        step={1}
+                                        min={0}
+                                        onChange={(v) =>
+                                            setNode(n.id, {
+                                                light: {
+                                                    ...(n.light || {}),
+                                                    ...( (n.light?.autoIntensity ?? (n.light?.type === "spot" || n.light?.type === "point"))
+                                                            ? { targetLux: v }
+                                                            : { intensity: v }
+                                                    ),
+                                                },
+                                            })
+                                        }
+                                    />
+                                    <div style={{ fontSize: 11, opacity: 0.75, marginTop: 4 }}>
+                                        {n.light?.type === "directional"
+                                            ? "Directional light uses lux. Auto mode sets lux directly."
+                                            : "Point/Spot light uses candela. Auto mode sets target lux and derives candela from distance."}
+                                    </div>
+                                </label>
+                            </div>
+
+                            {/* Range */}
+                            {(n.light?.type === "point" || n.light?.type === "spot") && (
+                                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                                    <label>
+                                        Distance (range)
+                                        <Slider
+                                            value={n.light?.distance ?? (n.light?.type === "spot" ? 10 : 8)}
+                                            min={0}
+                                            max={60}
+                                            step={0.1}
+                                            onChange={(v) =>
+                                                setNode(n.id, {
+                                                    light: {
+                                                        ...(n.light || {}),
+                                                        distance: v,
+                                                    },
+                                                })
+                                            }
+                                        />
+                                    </label>
+                                    <label>
+                                        Decay
+                                        <Slider
+                                            value={n.light?.decay ?? 2}
+                                            min={0}
+                                            max={2}
+                                            step={0.01}
+                                            onChange={(v) =>
+                                                setNode(n.id, {
+                                                    light: {
+                                                        ...(n.light || {}),
+                                                        decay: v,
+                                                    },
+                                                })
+                                            }
+                                        />
+                                    </label>
+                                </div>
+                            )}
+
+                            {/* Spot options */}
+                            {n.light?.type === "spot" && (
+                                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
                                     <label>
                                         Angle
                                         <Slider
-                                            value={n.light.angle ?? 0.6}
+                                            value={n.light?.angle ?? 0.6}
                                             min={0.05}
                                             max={1.5}
                                             step={0.01}
                                             onChange={(v) =>
                                                 setNode(n.id, {
                                                     light: {
-                                                        ...(n.light ||
-                                                            {}),
+                                                        ...(n.light || {}),
                                                         angle: v,
                                                     },
                                                 })
@@ -1546,121 +2814,299 @@ function NodeInspector({
                                     <label>
                                         Penumbra
                                         <Slider
-                                            value={n.light.penumbra ?? 0.35}
+                                            value={n.light?.penumbra ?? 0.35}
                                             min={0}
                                             max={1}
                                             step={0.01}
                                             onChange={(v) =>
                                                 setNode(n.id, {
                                                     light: {
-                                                        ...(n.light ||
-                                                            {}),
+                                                        ...(n.light || {}),
                                                         penumbra: v,
                                                     },
                                                 })
                                             }
                                         />
                                     </label>
-                                    <label>
-                                        Yaw (°)
-                                        <Slider
-                                            value={n.light.yaw ?? 0}
-                                            min={-180}
-                                            max={180}
-                                            step={1}
-                                            onChange={(v) =>
-                                                setNode(n.id, {
-                                                    light: {
-                                                        ...(n.light ||
-                                                            {}),
-                                                        yaw: v,
-                                                    },
-                                                })
-                                            }
-                                        />
-                                    </label>
-                                    <label>
-                                        Pitch (°)
-                                        <Slider
-                                            value={n.light.pitch ?? -25}
-                                            min={-89}
-                                            max={89}
-                                            step={1}
-                                            onChange={(v) =>
-                                                setNode(n.id, {
-                                                    light: {
-                                                        ...(n.light ||
-                                                            {}),
-                                                        pitch: v,
-                                                    },
-                                                })
-                                            }
-                                        />
-                                    </label>
-                                </>
+                                </div>
                             )}
 
-                            <Checkbox
-                                checked={!!n.light.enabled}
-                                onChange={(v) =>
-                                    setNode(n.id, {
-                                        light: {
-                                            ...(n.light || {}),
-                                            enabled: v,
-                                        },
-                                    })
-                                }
-                                label="enabled"
-                            />
-                            <Checkbox
-                                checked={!!n.light.showBounds}
-                                onChange={(v) =>
-                                    setNode(n.id, {
-                                        light: {
-                                            ...(n.light || {}),
-                                            showBounds: v,
-                                        },
-                                    })
-                                }
-                                label="show bounds"
-                            />
+                            {/* Aim / target */}
+                            {(n.light?.type === "spot" || n.light?.type === "directional") && (
+                                <div
+                                    style={{
+                                        borderTop: "1px dashed rgba(255,255,255,0.15)",
+                                        paddingTop: 8,
+                                        marginTop: 8,
+                                    }}
+                                >
+                                    <div style={{ fontWeight: 900, marginBottom: 6 }}>Aim</div>
 
-                            {/* Shadows */}
+                                    <label>
+                                        Aim mode
+                                        <Select
+                                            value={n.light?.aimMode || (n.light?.target ? "target" : "yawPitch")}
+                                            onChange={(e) =>
+                                                setNode(n.id, {
+                                                    light: {
+                                                        ...(n.light || {}),
+                                                        aimMode: e.target.value,
+                                                        ...(e.target.value === "target"
+                                                            ? { target: n.light?.target || { x: 0, y: 0, z: -2 } }
+                                                            : {}),
+                                                    },
+                                                })
+                                            }
+                                        >
+                                            <option value="target">Target point (x,y,z)</option>
+                                            <option value="yawPitch">Yaw / Pitch (legacy)</option>
+                                        </Select>
+                                    </label>
+
+                                    {(n.light?.aimMode || (n.light?.target ? "target" : "yawPitch")) === "target" && (
+                                        <>
+                                            <div
+                                                style={{
+                                                    display: "grid",
+                                                    gridTemplateColumns: "repeat(3, 1fr)",
+                                                    gap: 8,
+                                                }}
+                                            >
+                                                <label>
+                                                    X
+                                                    <NumberInput
+                                                        value={n.light?.target?.x ?? 0}
+                                                        step={0.1}
+                                                        min={-999}
+                                                        onChange={(v) =>
+                                                            setNode(n.id, {
+                                                                light: {
+                                                                    ...(n.light || {}),
+                                                                    target: {
+                                                                        ...(n.light?.target || { x: 0, y: 0, z: -2 }),
+                                                                        x: v,
+                                                                    },
+                                                                },
+                                                            })
+                                                        }
+                                                    />
+                                                </label>
+                                                <label>
+                                                    Y
+                                                    <NumberInput
+                                                        value={n.light?.target?.y ?? 0}
+                                                        step={0.1}
+                                                        min={-999}
+                                                        onChange={(v) =>
+                                                            setNode(n.id, {
+                                                                light: {
+                                                                    ...(n.light || {}),
+                                                                    target: {
+                                                                        ...(n.light?.target || { x: 0, y: 0, z: -2 }),
+                                                                        y: v,
+                                                                    },
+                                                                },
+                                                            })
+                                                        }
+                                                    />
+                                                </label>
+                                                <label>
+                                                    Z
+                                                    <NumberInput
+                                                        value={n.light?.target?.z ?? -2}
+                                                        step={0.1}
+                                                        min={-999}
+                                                        onChange={(v) =>
+                                                            setNode(n.id, {
+                                                                light: {
+                                                                    ...(n.light || {}),
+                                                                    target: {
+                                                                        ...(n.light?.target || { x: 0, y: 0, z: -2 }),
+                                                                        z: v,
+                                                                    },
+                                                                },
+                                                            })
+                                                        }
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                                                <Btn
+                                                    onClick={() =>
+                                                        setNode(n.id, {
+                                                            light: {
+                                                                ...(n.light || {}),
+                                                                aimMode: "target",
+                                                                target: { x: 0, y: 0, z: -2 },
+                                                            },
+                                                        })
+                                                    }
+                                                    style={{ padding: "8px 10px" }}
+                                                    title="Aim forward"
+                                                >
+                                                    Aim forward
+                                                </Btn>
+                                                <Btn
+                                                    onClick={() =>
+                                                        setNode(n.id, {
+                                                            light: {
+                                                                ...(n.light || {}),
+                                                                aimMode: "target",
+                                                                target: { x: 0, y: -2, z: 0 },
+                                                            },
+                                                        })
+                                                    }
+                                                    style={{ padding: "8px 10px" }}
+                                                    title="Aim down"
+                                                >
+                                                    Aim down
+                                                </Btn>
+                                                <Btn
+                                                    onClick={() =>
+                                                        setNode(n.id, {
+                                                            light: {
+                                                                ...(n.light || {}),
+                                                                aimMode: "target",
+                                                                target: { x: 0, y: 2, z: 0 },
+                                                            },
+                                                        })
+                                                    }
+                                                    style={{ padding: "8px 10px" }}
+                                                    title="Aim up"
+                                                >
+                                                    Aim up
+                                                </Btn>
+                                            </div>
+
+                                            <div style={{ fontSize: 11, opacity: 0.75, marginTop: 6 }}>
+                                                Target is in <strong>local</strong> space (relative to the light position on this node).
+                                            </div>
+                                        </>
+                                    )}
+
+                                    {(n.light?.aimMode || (n.light?.target ? "target" : "yawPitch")) === "yawPitch" && (
+                                        <>
+                                            <label>
+                                                Yaw (°)
+                                                <Slider
+                                                    value={n.light?.yaw ?? 0}
+                                                    min={-180}
+                                                    max={180}
+                                                    step={1}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            light: {
+                                                                ...(n.light || {}),
+                                                                yaw: v,
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+                                            <label>
+                                                Pitch (°)
+                                                <Slider
+                                                    value={n.light?.pitch ?? 0}
+                                                    min={-89}
+                                                    max={89}
+                                                    step={1}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            light: {
+                                                                ...(n.light || {}),
+                                                                pitch: v,
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+                                            <label>
+                                                Yaw/Pitch basis
+                                                <Select
+                                                    value={n.light?.yawPitchBasis || "forward"}
+                                                    onChange={(e) =>
+                                                        setNode(n.id, {
+                                                            light: {
+                                                                ...(n.light || {}),
+                                                                yawPitchBasis: e.target.value,
+                                                            },
+                                                        })
+                                                    }
+                                                >
+                                                    <option value="forward">forward (-Z) — recommended</option>
+                                                    <option value="down">legacy down (-Y)</option>
+                                                </Select>
+                                            </label>
+                                        </>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Dimmer timing */}
                             <div
                                 style={{
-                                    borderTop:
-                                        "1px dashed rgba(255,255,255,0.15)",
+                                    borderTop: "1px dashed rgba(255,255,255,0.15)",
                                     paddingTop: 8,
                                     marginTop: 8,
                                 }}
                             >
-                                <div
-                                    style={{
-                                        fontWeight: 900,
-                                        marginBottom: 6,
-                                    }}
-                                >
-                                    Shadows
-                                </div>
+                                <div style={{ fontWeight: 900, marginBottom: 6 }}>Dimmer</div>
+                                <label>
+                                    Fade in (s)
+                                    <Slider
+                                        value={n.light?.fadeIn ?? 0.25}
+                                        min={0}
+                                        max={2}
+                                        step={0.01}
+                                        onChange={(v) =>
+                                            setNode(n.id, {
+                                                light: {
+                                                    ...(n.light || {}),
+                                                    fadeIn: v,
+                                                },
+                                            })
+                                        }
+                                    />
+                                </label>
+                                <label>
+                                    Fade out (s)
+                                    <Slider
+                                        value={n.light?.fadeOut ?? 0.25}
+                                        min={0}
+                                        max={2}
+                                        step={0.01}
+                                        onChange={(v) =>
+                                            setNode(n.id, {
+                                                light: {
+                                                    ...(n.light || {}),
+                                                    fadeOut: v,
+                                                },
+                                            })
+                                        }
+                                    />
+                                </label>
+                            </div>
 
-                                <label
-                                    style={{
-                                        display: "block",
-                                        marginTop: 6,
-                                    }}
-                                >
+                            {/* Shadows */}
+                            <div
+                                style={{
+                                    borderTop: "1px dashed rgba(255,255,255,0.15)",
+                                    paddingTop: 8,
+                                    marginTop: 8,
+                                }}
+                            >
+                                <div style={{ fontWeight: 900, marginBottom: 6 }}>Shadows</div>
+
+                                <label style={{ display: "block", marginTop: 6 }}>
                                     <input
                                         type="checkbox"
-                                        checked={
-                                            n.shadows?.cast ?? true
-                                        }
+                                        checked={n.shadows?.cast ?? true}
                                         onChange={(e) =>
                                             setNode(n.id, {
                                                 shadows: {
-                                                    ...(n.shadows ||
-                                                        {}),
-                                                    cast: e.target
-                                                        .checked,
+                                                    ...(n.shadows || {}),
+                                                    cast: e.target.checked,
                                                 },
                                             })
                                         }
@@ -1668,25 +3114,15 @@ function NodeInspector({
                                     Cast shadows
                                 </label>
 
-                                <label
-                                    style={{
-                                        display: "block",
-                                        marginTop: 6,
-                                    }}
-                                >
+                                <label style={{ display: "block", marginTop: 6 }}>
                                     <input
                                         type="checkbox"
-                                        checked={
-                                            n.shadows?.receive ?? true
-                                        }
+                                        checked={n.shadows?.receive ?? true}
                                         onChange={(e) =>
                                             setNode(n.id, {
                                                 shadows: {
-                                                    ...(n.shadows ||
-                                                        {}),
-                                                    receive:
-                                                    e.target
-                                                        .checked,
+                                                    ...(n.shadows || {}),
+                                                    receive: e.target.checked,
                                                 },
                                             })
                                         }
@@ -1694,29 +3130,75 @@ function NodeInspector({
                                     Receive shadows
                                 </label>
 
-                                <label
-                                    style={{
-                                        display: "block",
-                                        marginTop: 6,
-                                    }}
-                                >
+                                <label style={{ display: "block", marginTop: 6 }}>
                                     <input
                                         type="checkbox"
-                                        checked={
-                                            n.shadows?.light ?? true
-                                        }
+                                        checked={n.shadows?.light ?? true}
                                         onChange={(e) =>
                                             setNode(n.id, {
                                                 shadows: {
-                                                    ...(n.shadows ||
-                                                        {}),
-                                                    light: e.target
-                                                        .checked,
+                                                    ...(n.shadows || {}),
+                                                    light: e.target.checked,
                                                 },
                                             })
                                         }
                                     />{" "}
                                     Node light casts
+                                </label>
+
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 10 }}>
+                                    <label>
+                                        Shadow map
+                                        <Select
+                                            value={String(n.light?.shadowMapSize ?? 1024)}
+                                            onChange={(e) =>
+                                                setNode(n.id, {
+                                                    light: {
+                                                        ...(n.light || {}),
+                                                        shadowMapSize: Number(e.target.value),
+                                                    },
+                                                })
+                                            }
+                                        >
+                                            <option value="256">256</option>
+                                            <option value="512">512</option>
+                                            <option value="1024">1024</option>
+                                            <option value="2048">2048</option>
+                                            <option value="4096">4096</option>
+                                        </Select>
+                                    </label>
+                                    <label>
+                                        Normal bias
+                                        <NumberInput
+                                            value={n.light?.shadowNormalBias ?? 0.02}
+                                            step={0.005}
+                                            min={0}
+                                            onChange={(v) =>
+                                                setNode(n.id, {
+                                                    light: {
+                                                        ...(n.light || {}),
+                                                        shadowNormalBias: v,
+                                                    },
+                                                })
+                                            }
+                                        />
+                                    </label>
+                                </div>
+                                <label>
+                                    Bias
+                                    <NumberInput
+                                        value={n.light?.shadowBias ?? -0.0002}
+                                        step={0.0001}
+                                        min={-0.01}
+                                        onChange={(v) =>
+                                            setNode(n.id, {
+                                                light: {
+                                                    ...(n.light || {}),
+                                                    shadowBias: v,
+                                                },
+                                            })
+                                        }
+                                    />
                                 </label>
                             </div>
                         </>
@@ -2697,6 +4179,8 @@ function LinkInspector({ link: l, setLinks, requestDelete }) {
                         <option value="particles">particles</option>
                         <option value="wavy">wavy</option>
                         <option value="icons">icons</option>
+                        <option value="sweep">sweep</option>
+                        <option value="packet">packet</option>
                         <option value="dashed">dashed</option>
                         <option value="solid">solid</option>
                         <option value="epic">epic</option>
@@ -2971,6 +4455,477 @@ function LinkInspector({ link: l, setLinks, requestDelete }) {
                                 label="enabled"
                             />
                         </label>
+                    </>
+                )}
+
+                {l.style === "packet" && (
+                    <>
+                        <div style={{
+                            marginTop: 10,
+                            paddingTop: 10,
+                            borderTop: "1px dashed rgba(255,255,255,0.15)",
+                            fontWeight: 900,
+                        }}>
+                            Packet
+                        </div>
+
+                        <label>
+                            Packet Style
+                            <Select
+                                value={l.packet?.style || "orb"}
+                                onChange={(e) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            style: e.target.value,
+                                        },
+                                    })
+                                }
+                            >
+                                <option value="orb">orb</option>
+                                <option value="cube">cube</option>
+                                <option value="diamond">diamond</option>
+                                <option value="ring">ring</option>
+                                <option value="spark">spark</option>
+                                <option value="waves">waves</option>
+                                <option value="envelope">envelope</option>
+                                <option value="text">text</option>
+                            </Select>
+                        </label>
+
+                        {(l.packet?.style === "text" || l.packet?.style === "envelope") && (
+                            <label>
+                                Packet Text
+                                <input
+                                    value={l.packet?.text ?? "PKT"}
+                                    onChange={(e) =>
+                                        update({
+                                            packet: {
+                                                ...(l.packet || {}),
+                                                text: e.target.value,
+                                            },
+                                        })
+                                    }
+                                    style={{ width: "100%" }}
+                                />
+                            </label>
+                        )}
+
+                        <label>
+                            Color
+                            <input
+                                type="color"
+                                value={l.packet?.color || l.color || "#7cf"}
+                                onChange={(e) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            color: e.target.value,
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Size
+                            <Slider
+                                value={l.packet?.size ?? 0.14}
+                                min={0.03}
+                                max={0.6}
+                                step={0.01}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            size: v,
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Opacity
+                            <Slider
+                                value={l.packet?.opacity ?? 1}
+                                min={0}
+                                max={1}
+                                step={0.02}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            opacity: v,
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Billboard
+                            <Checkbox
+                                checked={(l.packet?.billboard ?? true) === true}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            billboard: v,
+                                        },
+                                    })
+                                }
+                                label="face camera"
+                            />
+                        </label>
+
+                        <div style={{
+                            marginTop: 10,
+                            paddingTop: 10,
+                            borderTop: "1px dashed rgba(255,255,255,0.15)",
+                            fontWeight: 900,
+                        }}>
+                            Packet Path
+                        </div>
+
+                        <label>
+                            Path Mode
+                            <Select
+                                value={l.packet?.path?.mode || "hidden"}
+                                onChange={(e) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            path: {
+                                                ...((l.packet || {}).path || {}),
+                                                mode: e.target.value,
+                                            },
+                                        },
+                                    })
+                                }
+                            >
+                                <option value="hidden">hidden</option>
+                                <option value="line">line</option>
+                                <option value="dashed">dashed</option>
+                                <option value="particles">particles</option>
+                                <option value="sweep">sweep</option>
+                            </Select>
+                        </label>
+
+                        <label>
+                            Path Color
+                            <input
+                                type="color"
+                                value={l.packet?.path?.color || l.packet?.color || l.color || "#7cf"}
+                                onChange={(e) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            path: {
+                                                ...((l.packet || {}).path || {}),
+                                                color: e.target.value,
+                                            },
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Path Opacity
+                            <Slider
+                                value={l.packet?.path?.opacity ?? 0.2}
+                                min={0}
+                                max={1}
+                                step={0.02}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            path: {
+                                                ...((l.packet || {}).path || {}),
+                                                opacity: v,
+                                            },
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Show path when selected
+                            <Checkbox
+                                checked={(l.packet?.path?.showWhenSelected ?? true) === true}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            path: {
+                                                ...((l.packet || {}).path || {}),
+                                                showWhenSelected: v,
+                                            },
+                                        },
+                                    })
+                                }
+                                label="preview"
+                            />
+                        </label>
+
+                        <div style={{
+                            marginTop: 10,
+                            paddingTop: 10,
+                            borderTop: "1px dashed rgba(255,255,255,0.15)",
+                            fontWeight: 900,
+                        }}>
+                            Timing
+                        </div>
+
+                        <label>
+                            Travel time (s)
+                            <Slider
+                                value={l.packet?.timing?.travel ?? l.packet?.travel ?? 1.2}
+                                min={0.05}
+                                max={10}
+                                step={0.05}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            timing: {
+                                                ...((l.packet || {}).timing || {}),
+                                                travel: v,
+                                            },
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Start delay (s)
+                            <Slider
+                                value={l.packet?.timing?.delay ?? l.packet?.delay ?? 0}
+                                min={0}
+                                max={10}
+                                step={0.05}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            timing: {
+                                                ...((l.packet || {}).timing || {}),
+                                                delay: v,
+                                            },
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <div style={{ display: "flex", gap: 8 }}>
+                            <label style={{ flex: 1 }}>
+                                Packets
+                                <Slider
+                                    value={l.packet?.timing?.count ?? l.packet?.count ?? 1}
+                                    min={1}
+                                    max={50}
+                                    step={1}
+                                    onChange={(v) =>
+                                        update({
+                                            packet: {
+                                                ...(l.packet || {}),
+                                                timing: {
+                                                    ...((l.packet || {}).timing || {}),
+                                                    count: Math.round(v),
+                                                },
+                                            },
+                                        })
+                                    }
+                                />
+                            </label>
+                            <label style={{ flex: 1 }}>
+                                Interval (s)
+                                <Slider
+                                    value={l.packet?.timing?.interval ?? l.packet?.interval ?? 0.35}
+                                    min={0}
+                                    max={5}
+                                    step={0.05}
+                                    onChange={(v) =>
+                                        update({
+                                            packet: {
+                                                ...(l.packet || {}),
+                                                timing: {
+                                                    ...((l.packet || {}).timing || {}),
+                                                    interval: v,
+                                                },
+                                            },
+                                        })
+                                    }
+                                />
+                            </label>
+                        </div>
+
+                        <div style={{ display: "flex", gap: 8 }}>
+                            <label style={{ flex: 1 }}>
+                                Loop
+                                <Checkbox
+                                    checked={(l.packet?.timing?.loop ?? l.packet?.loop ?? false) === true}
+                                    onChange={(v) =>
+                                        update({
+                                            packet: {
+                                                ...(l.packet || {}),
+                                                timing: {
+                                                    ...((l.packet || {}).timing || {}),
+                                                    loop: v,
+                                                },
+                                            },
+                                        })
+                                    }
+                                    label="repeat"
+                                />
+                            </label>
+                            <label style={{ flex: 1 }}>
+                                Loop gap (s)
+                                <Slider
+                                    value={l.packet?.timing?.loopGap ?? l.packet?.loopGap ?? 0.6}
+                                    min={0}
+                                    max={10}
+                                    step={0.05}
+                                    onChange={(v) =>
+                                        update({
+                                            packet: {
+                                                ...(l.packet || {}),
+                                                timing: {
+                                                    ...((l.packet || {}).timing || {}),
+                                                    loopGap: v,
+                                                },
+                                            },
+                                        })
+                                    }
+                                />
+                            </label>
+                        </div>
+
+                        <div style={{
+                            marginTop: 10,
+                            paddingTop: 10,
+                            borderTop: "1px dashed rgba(255,255,255,0.15)",
+                            fontWeight: 900,
+                        }}>
+                            On Arrival
+                        </div>
+
+                        <label>
+                            Success Effect
+                            <Select
+                                value={l.packet?.success?.mode || "pulse"}
+                                onChange={(e) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            success: {
+                                                ...((l.packet || {}).success || {}),
+                                                mode: e.target.value,
+                                            },
+                                        },
+                                    })
+                                }
+                            >
+                                <option value="pulse">pulse</option>
+                                <option value="spark">spark</option>
+                                <option value="explosion">explosion</option>
+                            </Select>
+                        </label>
+
+                        <label>
+                            Success Color
+                            <input
+                                type="color"
+                                value={l.packet?.success?.color || l.packet?.color || l.color || "#7cf"}
+                                onChange={(e) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            success: {
+                                                ...((l.packet || {}).success || {}),
+                                                color: e.target.value,
+                                            },
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Success Size
+                            <Slider
+                                value={l.packet?.success?.size ?? 0.6}
+                                min={0.05}
+                                max={3}
+                                step={0.05}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            success: {
+                                                ...((l.packet || {}).success || {}),
+                                                size: v,
+                                            },
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Success Duration (s)
+                            <Slider
+                                value={l.packet?.success?.duration ?? 0.5}
+                                min={0.05}
+                                max={4}
+                                step={0.05}
+                                onChange={(v) =>
+                                    update({
+                                        packet: {
+                                            ...(l.packet || {}),
+                                            success: {
+                                                ...((l.packet || {}).success || {}),
+                                                duration: v,
+                                            },
+                                        },
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                            <Btn
+                                onClick={() => {
+                                    try {
+                                        window.dispatchEvent(
+                                            new CustomEvent("EPIC3D_PACKET_CTRL", {
+                                                detail: { action: "start", linkId: l.id, overrides: {} },
+                                            }),
+                                        );
+                                    } catch {}
+                                }}
+                            >
+                                Start Packet
+                            </Btn>
+                            <Btn
+                                onClick={() => {
+                                    try {
+                                        window.dispatchEvent(
+                                            new CustomEvent("EPIC3D_PACKET_CTRL", {
+                                                detail: { action: "stop", linkId: l.id },
+                                            }),
+                                        );
+                                    } catch {}
+                                }}
+                            >
+                                Stop Packet
+                            </Btn>
+                        </div>
                     </>
                 )}
 

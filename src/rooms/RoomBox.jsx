@@ -83,17 +83,29 @@ const RoomBox = memo(
         const labelY = halfH + 0.12;
 
         const color = room.color || "#1b2a44";
-        const surfaceMat = useMemo(() => new THREE.MeshStandardMaterial({
-            color,
-            transparent: opacity < 1,     // only mark transparent if we actually are
-            opacity,
-            roughness: 0.8,
-            metalness: 0.05,
-            side: THREE.DoubleSide,
-            depthWrite: true,             // <-- crucial so lit pixels “stick”
-            depthTest: true,
-            blending: THREE.NormalBlending
-        }), [color, opacity]);
+
+        // Material tuning for better, more readable lighting on room surfaces
+        const surfaceRoughness = Number(room.surface?.roughness ?? 0.75);
+        const surfaceMetalness = Number(room.surface?.metalness ?? 0.02);
+        const surfaceEnvIntensity = Number(room.surface?.envMapIntensity ?? 0.9);
+        const insideOnly = !!(room.surface?.insideOnly ?? room.insideOnly);
+
+        const surfaceMat = useMemo(() => {
+            const mat = new THREE.MeshStandardMaterial({
+                color,
+                transparent: opacity < 1,
+                opacity,
+                roughness: Number.isFinite(surfaceRoughness) ? surfaceRoughness : 0.75,
+                metalness: Number.isFinite(surfaceMetalness) ? surfaceMetalness : 0.02,
+                envMapIntensity: Number.isFinite(surfaceEnvIntensity) ? surfaceEnvIntensity : 0.9,
+                side: insideOnly ? THREE.BackSide : THREE.DoubleSide,
+                // For transparent surfaces, depthWrite causes "sticking" artifacts.
+                depthWrite: opacity >= 0.999,
+                depthTest: true,
+                blending: THREE.NormalBlending,
+            });
+            return mat;
+        }, [color, opacity, surfaceRoughness, surfaceMetalness, surfaceEnvIntensity, insideOnly]);
 
         // ---- CORE FIX: block raycasting on *everything* during gizmo drag ----
 

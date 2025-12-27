@@ -33,6 +33,51 @@ function __endpointOffsetXZ(node, idx, count) {
     return [Math.cos(a) * r, 0, Math.sin(a) * r];
 }
 
+// -------- Global lighting prefs (localStorage; updated via window event) --------
+function readLightingPrefs() {
+    const fallback = {
+        envPreset: "warehouse",
+        envIntensity: 0.8,
+        hemiIntensity: 0.7,
+        sunIntensity: 2.4,
+        sunPosX: 6,
+        sunPosY: 8,
+        sunPosZ: 6,
+        fillIntensity: 1.0,
+        fillPosX: -5,
+        fillPosY: 4,
+        fillPosZ: -3,
+        exposure: 1.0,
+    };
+
+    if (typeof window === "undefined") return fallback;
+
+    try {
+        const getNum = (k, f) => {
+            const v = Number(localStorage.getItem(k));
+            return Number.isFinite(v) ? v : f;
+        };
+        const getStr = (k, f) => localStorage.getItem(k) || f;
+
+        return {
+            envPreset: getStr("epic3d.lighting.envPreset.v1", fallback.envPreset),
+            envIntensity: getNum("epic3d.lighting.envIntensity.v1", fallback.envIntensity),
+            hemiIntensity: getNum("epic3d.lighting.hemiIntensity.v1", fallback.hemiIntensity),
+            sunIntensity: getNum("epic3d.lighting.sunIntensity.v1", fallback.sunIntensity),
+            sunPosX: getNum("epic3d.lighting.sunPosX.v1", fallback.sunPosX),
+            sunPosY: getNum("epic3d.lighting.sunPosY.v1", fallback.sunPosY),
+            sunPosZ: getNum("epic3d.lighting.sunPosZ.v1", fallback.sunPosZ),
+            fillIntensity: getNum("epic3d.lighting.fillIntensity.v1", fallback.fillIntensity),
+            fillPosX: getNum("epic3d.lighting.fillPosX.v1", fallback.fillPosX),
+            fillPosY: getNum("epic3d.lighting.fillPosY.v1", fallback.fillPosY),
+            fillPosZ: getNum("epic3d.lighting.fillPosZ.v1", fallback.fillPosZ),
+            exposure: getNum("epic3d.lighting.exposure.v1", fallback.exposure),
+        };
+    } catch {
+        return fallback;
+    }
+}
+
 export default function SceneInner({
                                        perf,
                                        // scene/model
@@ -49,6 +94,7 @@ export default function SceneInner({
                                        showModel = true,
                                        roomOpacity = 0.4,
                                        modelScale = 1, // <-- NEW
+                                       modelPosition = [0, 0, 0], // NEW: model offset
                                        // data
                                        rooms = [],
                                        nodes = [],
@@ -61,6 +107,7 @@ export default function SceneInner({
                                        selected,
                                        setSelected,
                                        onNodePointerDown,
+                                       onSwitchPress,
                                        onRoomPointerDown,
                                        selectedMulti = [],
                                        selectedBreakpoint = null,   // NEW
@@ -84,6 +131,8 @@ export default function SceneInner({
                                        showLightBounds = false,
                                        shadowsOn = true,
                                        showGround = true,
+                                       // NEW: grid config
+                                       gridConfig,
                                        // labels
                                        labelsOn = true,
                                        labelMode = "billboard",
@@ -110,13 +159,386 @@ export default function SceneInner({
                                        // scene ready callback
                                        onModelScene
                                    }) {
+    // ---------- grid config (ground + snapping helpers) ----------
+    const __grid = gridConfig || {};
+    // Keep cell size & snap in lockstep when gridConfig.linkSnap is enabled (default true).
+    // - When linked: prefer placement.snap for the rendered grid (prevents reload desync).
+    // - When unlinked: prefer gridConfig.cellSize (fallback to placement.snap for back-compat).
+    const __linkSnap = __grid.linkSnap !== undefined ? !!__grid.linkSnap : true;
+    const __snapCell = Number(placement?.snap);
+    const __cellFromConfig = Number(__grid.cellSize);
+    const gridCellSize = (() => {
+        const snapOk = Number.isFinite(__snapCell) && __snapCell > 0;
+        const cellOk = Number.isFinite(__cellFromConfig) && __cellFromConfig > 0;
+        if (__linkSnap) {
+            if (snapOk) return __snapCell;
+            if (cellOk) return __cellFromConfig;
+        } else {
+            if (cellOk) return __cellFromConfig;
+            if (snapOk) return __snapCell;
+        }
+        return 0.25;
+    })();
+    const gridMajorEvery = Number.isFinite(Number(__grid.majorEvery)) && Number(__grid.majorEvery) >= 1 ? Math.round(Number(__grid.majorEvery)) : 10;
+    const gridSectionSize = gridCellSize * gridMajorEvery;
+    const gridFadeDistance = Number.isFinite(Number(__grid.fadeDistance)) ? Number(__grid.fadeDistance) : 100;
+    const gridFadeStrength = Number.isFinite(Number(__grid.fadeStrength)) ? Number(__grid.fadeStrength) : 1;
+    const gridCellThickness = Number.isFinite(Number(__grid.cellThickness)) ? Number(__grid.cellThickness) : 0.85;
+    const gridSectionThickness = Number.isFinite(Number(__grid.sectionThickness)) ? Number(__grid.sectionThickness) : 1.15;
+    const gridFollowCamera = !!__grid.followCamera;
+    const gridInfinite = __grid.infiniteGrid !== undefined ? !!__grid.infiniteGrid : true;
+    const gridEnabled = __grid.enabled !== undefined ? !!__grid.enabled : true;
+    const gridSpace3D = !!__grid.space3D;
+    const gridShowPlane = __grid.showPlane !== undefined ? !!__grid.showPlane : true;
+    const gridY = Number.isFinite(Number(__grid.y)) ? Number(__grid.y) : 0;
+
+    const gridOpacity = (() => {
+        const v = Number(__grid.opacity);
+        return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.35;
+    })();
+
+    const gridColor = typeof __grid.color === "string" && __grid.color ? __grid.color : "#4aa3ff";
+    const gridGroundBlend = typeof __grid.blendBase === "string" && __grid.blendBase ? __grid.blendBase : "#0d1322";
+
+    // We can't alpha-blend via THREE.ColorRepresentation, so we emulate transparency by blending the grid
+    // color toward the ground color by gridOpacity.
+    const gridCellColor = useMemo(() => {
+        const base = new THREE.Color(gridGroundBlend);
+        const tgt = new THREE.Color(gridColor);
+        // cell lines are a little softer
+        return base.clone().lerp(tgt, gridOpacity * 0.7).getStyle();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [gridGroundBlend, gridColor, gridOpacity]);
+
+    const gridSectionColor = useMemo(() => {
+        const base = new THREE.Color(gridGroundBlend);
+        const tgt = new THREE.Color(gridColor);
+        // major lines are stronger
+        return base.clone().lerp(tgt, Math.min(1, gridOpacity * 1.1)).getStyle();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [gridGroundBlend, gridColor, gridOpacity]);
+
+    const gridSize = (() => {
+        const v = Number(__grid.size);
+        return Number.isFinite(v) ? Math.max(1, Math.min(4000, v)) : 20;
+    })();
+
+    const gridHighlightSelection = !!__grid.highlightSelection;
+    const gridHighlightOpacity = (() => {
+        const v = Number(__grid.highlightOpacity);
+        return Number.isFinite(v) ? Math.max(0.02, Math.min(0.85, v)) : 0.18;
+    })();
+    const gridHighlightColor = typeof __grid.highlightColor === "string" && __grid.highlightColor ? __grid.highlightColor : gridColor;
+
+    const gridPlaneOffsetX = Number.isFinite(Number(__grid.planeOffsetX)) ? Number(__grid.planeOffsetX) : 0;
+    const gridPlaneOffsetZ = Number.isFinite(Number(__grid.planeOffsetZ)) ? Number(__grid.planeOffsetZ) : 0;
+    const gridShowAxes = !!__grid.showAxes;
+
+
+    // ---------- Floors / Decks (horizontal grid layers) ----------
+    const floorsEnabled = !!__grid.floorsEnabled;
+    const floorsAutoEnabled = !!__grid.floorsAutoEnabled;
+    const floorsAutoBaseY = Number.isFinite(Number(__grid.floorsAutoBaseY)) ? Number(__grid.floorsAutoBaseY) : gridY;
+    const floorsAutoStep = Number.isFinite(Number(__grid.floorsAutoStep)) ? Math.max(0.1, Number(__grid.floorsAutoStep)) : 2;
+    const floorsAutoCount = Number.isFinite(Number(__grid.floorsAutoCount)) ? Math.max(0, Math.min(60, Math.round(Number(__grid.floorsAutoCount)))) : 6;
+    const floorsManual = Array.isArray(__grid.floorsManual) ? __grid.floorsManual : [];
+
+    const allFloors = useMemo(() => {
+        const out = [];
+        // Ground always exists (even if floors are disabled)
+        out.push({
+            id: "ground",
+            name: "Ground",
+            y: gridY,
+            visible: true,
+            color: gridColor,
+            opacity: gridOpacity,
+        });
+
+        if (floorsEnabled) {
+            if (floorsAutoEnabled && floorsAutoCount > 0) {
+                for (let i = 1; i <= floorsAutoCount; i++) {
+                    out.push({
+                        id: `auto_${i}`,
+                        name: `Auto ${i}`,
+                        y: floorsAutoBaseY + i * floorsAutoStep,
+                        visible: true,
+                        color: gridColor,
+                        opacity: Math.max(0.06, Math.min(0.35, gridOpacity * 0.65)),
+                    });
+                }
+            }
+            for (const f of floorsManual) {
+                if (!f) continue;
+                const id = String(f.id || "");
+                if (!id) continue;
+                out.push({
+                    id,
+                    name: String(f.name || id),
+                    y: Number.isFinite(Number(f.y)) ? Number(f.y) : gridY,
+                    visible: f.visible !== undefined ? !!f.visible : true,
+                    color: typeof f.color === "string" && f.color ? f.color : gridColor,
+                    opacity: Number.isFinite(Number(f.opacity)) ? Math.max(0.02, Math.min(0.9, Number(f.opacity))) : Math.max(0.06, Math.min(0.35, gridOpacity * 0.65)),
+                });
+            }
+        }
+
+        // stable sort by height
+        out.sort((a, b) => (a.y || 0) - (b.y || 0));
+        return out;
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [floorsEnabled, floorsAutoEnabled, floorsAutoBaseY, floorsAutoStep, floorsAutoCount, floorsManual, gridY, gridColor, gridOpacity]);
+
+    const visibleFloors = useMemo(() => allFloors.filter((f) => f && f.visible), [allFloors]);
+
+    // ---------- 3D grid space improvements (multiple wall planes) ----------
+    const gridSpace3DCount = Number.isFinite(Number(__grid.space3DCount)) ? Math.max(0, Math.min(24, Math.round(Number(__grid.space3DCount)))) : 2;
+    const gridSpace3DStep = Number.isFinite(Number(__grid.space3DStep)) ? Math.max(0.1, Number(__grid.space3DStep)) : 5;
+    const gridSpace3DXY = __grid.space3DXY !== undefined ? !!__grid.space3DXY : true;
+    const gridSpace3DYZ = __grid.space3DYZ !== undefined ? !!__grid.space3DYZ : true;
+    const gridSpaceOffsets = useMemo(() => {
+        const out = [];
+        const n = gridSpace3DCount;
+        const step = gridSpace3DStep;
+        for (let i = -n; i <= n; i++) out.push(i * step);
+        return out;
+    }, [gridSpace3DCount, gridSpace3DStep]);
+
+    // ---------- snapping ghost preview ----------
+    const snapGhostEnabled = __grid.snapGhostEnabled !== undefined ? !!__grid.snapGhostEnabled : true;
+    const snapGhostColor = typeof __grid.snapGhostColor === "string" && __grid.snapGhostColor ? __grid.snapGhostColor : "#7dd3fc";
+    const snapGhostOpacity = Number.isFinite(Number(__grid.snapGhostOpacity)) ? Math.max(0.02, Math.min(0.8, Number(__grid.snapGhostOpacity))) : 0.22;
+
+    const snapToFloors = !!__grid.snapToFloors;
+    const snapFloorMode = String(__grid.snapFloorMode || "nearest");
+    const activeFloorId = String(__grid.activeFloorId || "ground");
+    const floorSnapAlign = String(__grid.floorSnapAlign || "base");
+
+    const effectiveSnapMode = String(__grid.snapMode || ((__grid.linkSnap ?? true) ? "vertices" : "off"));
+    const tileCenterMove = String(__grid.snapTilesCenterMove || "auto");
+    const tileCenterResize = __grid.snapTilesCenterResize !== undefined ? !!__grid.snapTilesCenterResize : true;
+
+    const getNodeHalfHeight = (node) => {
+        const sh = node?.shape || {};
+        if (sh.type === "sphere") {
+            const r = Number(sh.radius);
+            return Number.isFinite(r) && r > 0 ? r : 0.28;
+        }
+        if (Number.isFinite(Number(sh.h))) return Math.max(0.01, Number(sh.h) / 2);
+        return 0.28;
+    };
+
+    const pickFloorY = (y, preferId = null) => {
+        const list = Array.isArray(allFloors) ? allFloors : [];
+        if (!list.length) return gridY;
+
+        if (preferId) {
+            const hit = list.find((f) => f && String(f.id) === String(preferId));
+            if (hit && Number.isFinite(Number(hit.y))) return Number(hit.y);
+        }
+
+        // for nearest: ignore hidden floors, but keep ground
+        const candidates = list.filter((f) => f && (f.id === "ground" || f.visible));
+        if (!candidates.length) return gridY;
+
+        let best = candidates[0];
+        let bestD = Math.abs((Number(best.y) || 0) - y);
+        for (const f of candidates) {
+            const fy = Number(f.y) || 0;
+            const d = Math.abs(fy - y);
+            if (d < bestD) {
+                best = f;
+                bestD = d;
+            }
+        }
+        return Number(best.y) || gridY;
+    };
+
+    const snapXZ = (x, z, spanX = 1, spanZ = 1) => {
+        const cell = gridCellSize;
+        if (!Number.isFinite(cell) || cell <= 0) return [x, z];
+
+        const mode = effectiveSnapMode;
+        if (mode === "off") return [x, z];
+
+        const useTiles = (mode === "tiles") && (tileCenterMove !== "off");
+        if (!useTiles) {
+            // vertices
+            return [Math.round(x / cell) * cell, Math.round(z / cell) * cell];
+        }
+
+        const ox = (spanX % 2 === 0) ? 0 : cell / 2;
+        const oz = (spanZ % 2 === 0) ? 0 : cell / 2;
+        const sx = Math.round((x - ox) / cell) * cell + ox;
+        const sz = Math.round((z - oz) / cell) * cell + oz;
+        return [sx, sz];
+    };
+
     // ---------- lookups ----------
     const nodeRefs = useRef({});
     const roomRefs = useRef({});
+
+    // Keep a reference to the *loaded* model scene without hijacking the wrapper group ref.
+    // - modelRef.current stays the wrapper <group> (raycasts + gizmo targeting)
+    // - onModelScene(scene) receives the actual imported scene for bounds/material work
+    const modelSceneRef = useRef(null);
+
+    const safeModelPosition = useMemo(() => {
+        if (Array.isArray(modelPosition) && modelPosition.length >= 3) {
+            const x = Number(modelPosition[0]);
+            const y = Number(modelPosition[1]);
+            const z = Number(modelPosition[2]);
+            return [Number.isFinite(x) ? x : 0, Number.isFinite(y) ? y : 0, Number.isFinite(z) ? z : 0];
+        }
+        return [0, 0, 0];
+    }, [modelPosition?.[0], modelPosition?.[1], modelPosition?.[2]]);
     const nodeMap = useMemo(() => Object.fromEntries(nodes.map((n) => [n.id, n])), [nodes]);
     const selectedNode = selected?.type === "node" ? nodeMap[selected?.id] : null;
     const selectedRoom = selected?.type === "room" ? rooms.find((r) => r.id === selected?.id) : null;
     const selectedPictureId = selected?.type === "picture" ? selected?.id : null;
+
+    const selectionGridRect = useMemo(() => {
+        if (!gridHighlightSelection) return null;
+        if (!selectedNode && !selectedRoom) return null;
+        const cell = gridCellSize;
+        if (!Number.isFinite(cell) || cell <= 0) return null;
+
+        const snapFloor = (v) => Math.floor(v / cell) * cell;
+        const snapCeil = (v) => Math.ceil(v / cell) * cell;
+
+        // Node: highlight the single cell it sits in
+        if (selectedNode?.position) {
+            const x = Number(selectedNode.position[0]) || 0;
+            const z = Number(selectedNode.position[2]) || 0;
+            const x0 = snapFloor(x);
+            const z0 = snapFloor(z);
+            return {
+                cx: x0 + cell * 0.5,
+                cz: z0 + cell * 0.5,
+                w: cell,
+                d: cell,
+            };
+        }
+
+        // Room: highlight its footprint snapped to grid cells (axis-aligned)
+        if (selectedRoom?.center) {
+            const x = Number(selectedRoom.center[0]) || 0;
+            const z = Number(selectedRoom.center[2]) || 0;
+            const size = selectedRoom.size || [3, 1.6, 2.2];
+            const w0 = Number(size[0]) || 0;
+            const d0 = Number(size[2]) || 0;
+            const minX = x - w0 * 0.5;
+            const maxX = x + w0 * 0.5;
+            const minZ = z - d0 * 0.5;
+            const maxZ = z + d0 * 0.5;
+            const sx0 = snapFloor(minX);
+            const sx1 = snapCeil(maxX);
+            const sz0 = snapFloor(minZ);
+            const sz1 = snapCeil(maxZ);
+            const w = Math.max(cell, sx1 - sx0);
+            const d = Math.max(cell, sz1 - sz0);
+            return {
+                cx: sx0 + w * 0.5,
+                cz: sz0 + d * 0.5,
+                w,
+                d,
+            };
+        }
+
+        return null;
+    }, [gridHighlightSelection, selectedNode, selectedRoom, gridCellSize]);
+
+
+
+    const snapGhost = useMemo(() => {
+        if (!snapGhostEnabled) return null;
+        if (!dragState?.active) return null;
+        const n = selectedNode;
+        const r = selectedRoom;
+        if (!n && !r) return null;
+
+        const pos = r?.center || n?.position;
+        if (!Array.isArray(pos) || pos.length < 3) return null;
+
+        let x = Number(pos[0]) || 0;
+        let y = Number(pos[1]) || 0;
+        let z = Number(pos[2]) || 0;
+
+        let w = gridCellSize;
+        let h = 0.56;
+        let d = gridCellSize;
+
+        if (r) {
+            const size = Array.isArray(r.size) ? r.size : [1, 1, 1];
+            w = Number(size[0]) || 1;
+            h = Number(size[1]) || 1;
+            d = Number(size[2]) || 1;
+        } else if (n) {
+            h = getNodeHalfHeight(n) * 2;
+        }
+
+        // Determine span in tiles (for parity-based tile centering)
+        let spanX = 1;
+        let spanZ = 1;
+        if (effectiveSnapMode === "tiles" && r) {
+            spanX = Math.max(1, Math.round(w / gridCellSize));
+            spanZ = Math.max(1, Math.round(d / gridCellSize));
+        }
+
+        // snap x/z
+        const [sx, sz] = snapXZ(x, z, spanX, spanZ);
+        x = sx;
+        z = sz;
+
+        // snap Y to floors
+        if (snapToFloors) {
+            const floorY = (snapFloorMode === "active")
+                ? pickFloorY(y, activeFloorId)
+                : pickFloorY(y, null);
+
+            if (floorSnapAlign === "center") {
+                y = floorY;
+            } else {
+                y = floorY + h / 2;
+            }
+        }
+
+        // Footprint: in tile mode we preview the occupied tiles (rounded to whole tiles)
+        let footprintW = w;
+        let footprintD = d;
+        if (effectiveSnapMode === "tiles" && tileCenterResize) {
+            const spanWX = r ? Math.max(1, Math.round(w / gridCellSize)) : 1;
+            const spanWZ = r ? Math.max(1, Math.round(d / gridCellSize)) : 1;
+            footprintW = spanWX * gridCellSize;
+            footprintD = spanWZ * gridCellSize;
+        }
+
+        const baseY = y - h / 2;
+
+        return {
+            x,
+            y,
+            z,
+            w: footprintW,
+            h,
+            d: footprintD,
+            baseY,
+        };
+    }, [
+        snapGhostEnabled,
+        dragState?.active,
+        selectedNode,
+        selectedRoom,
+        gridCellSize,
+        effectiveSnapMode,
+        tileCenterMove,
+        snapToFloors,
+        snapFloorMode,
+        activeFloorId,
+        floorSnapAlign,
+        allFloors,
+    ]);
+
 
     // Pictures are rendered outside this component; their refs may not be ready on the same render.
     // Resolve the picture object asynchronously (next frame) so the gizmo can attach reliably.
@@ -268,6 +690,21 @@ export default function SceneInner({
     const tcRef = useRef();
     const controlsRef = useRef();
     const { gl, camera } = useThree();
+
+
+    const [lightingPrefs, setLightingPrefs] = useState(() => readLightingPrefs());
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        const on = () => setLightingPrefs(readLightingPrefs());
+        window.addEventListener("epic3d:lighting-changed", on);
+        return () => window.removeEventListener("epic3d:lighting-changed", on);
+    }, []);
+
+    useEffect(() => {
+        if (!gl) return;
+        gl.toneMappingExposure = Number(lightingPrefs.exposure) || 1.0;
+    }, [gl, lightingPrefs.exposure]);
 
     // ---------- config (tweak feel here) ----------
     const CFG = useRef({
@@ -1260,6 +1697,10 @@ export default function SceneInner({
         if (selectedPictureId) {
             return pictureTarget;
         }
+        // ----- Model (gizmo translate) -----
+        if (selected?.type === "model" && showModel) {
+            return modelRef?.current || null;
+        }
 
         return null;
     }, [
@@ -1272,6 +1713,8 @@ export default function SceneInner({
         selectedNode?.id,
         selectedRoom?.id,
         selectedPictureId,
+        selected?.type,
+        modelRef,
         rooms,
         pictureRefs,
         pictureTarget,
@@ -1366,42 +1809,47 @@ export default function SceneInner({
             {/* Global lighting */}
             {showLights ? (
                 <>
-                    {/* Image-based environment for nice PBR response */}
-                    <Environment preset="warehouse" intensity={0.8} />
+                    {lightingPrefs.envPreset !== "none" && (
+                        <Environment
+                            preset={lightingPrefs.envPreset}
+                            intensity={lightingPrefs.envIntensity}
+                        />
+                    )}
 
-                    {/* Soft sky/ground ambient so nothing goes pitch black */}
                     <hemisphereLight
-                        skyColor="#ffffff"
-                        groundColor="#404040"
-                        intensity={0.7}
+                        intensity={lightingPrefs.hemiIntensity}
+                        color={"#ffffff"}
+                        groundColor={"#1b2a44"}
                     />
 
-                    {/* Main “sun” light */}
                     <directionalLight
-                        color="#ffffff"
-                        position={[6, 8, 6]}
-                        intensity={2.4}
-                        castShadow={shadowsOn && perf !== "low"}
-                        shadow-bias={-0.0005}
-                        shadow-normalBias={0.02}
+                        position={[lightingPrefs.sunPosX, lightingPrefs.sunPosY, lightingPrefs.sunPosZ]}
+                        intensity={lightingPrefs.sunIntensity}
+                        castShadow={enableShadows}
                         shadow-mapSize={[2048, 2048]}
+                        shadow-camera-near={0.5}
+                        shadow-camera-far={60}
+                        shadow-camera-left={-30}
+                        shadow-camera-right={30}
+                        shadow-camera-top={30}
+                        shadow-camera-bottom={-30}
+                        shadow-bias={-0.0002}
+                        shadow-normalBias={0.02}
                     />
 
-                    {/* Fill light from the opposite side to open up shadows */}
                     <directionalLight
-                        color="#ffffff"
-                        position={[-5, 4, -3]}
-                        intensity={1.0}
+                        position={[lightingPrefs.fillPosX, lightingPrefs.fillPosY, lightingPrefs.fillPosZ]}
+                        intensity={lightingPrefs.fillIntensity}
+                        castShadow={false}
                     />
                 </>
             ) : (
-                // Soft fallback so the scene isn't totally dark when lights are off
                 <ambientLight intensity={0.4} />
             )}
 
             {/* Model */}
             {showModel && modelDescriptor && (
-                <group ref={modelRef} scale={modelScale}>
+                <group ref={modelRef} scale={modelScale} position={safeModelPosition}>
                     <ImportedModel
                         descriptor={modelDescriptor}
                         wireframe={wireframe}
@@ -1413,7 +1861,7 @@ export default function SceneInner({
                         perf={perf}
                         shadingMode="leanPBR"
                         onScene={(scene) => {
-                            if (modelRef) modelRef.current = scene;
+                            modelSceneRef.current = scene;
                             if (typeof onModelScene === "function") onModelScene(scene);
                         }}
                     />
@@ -1494,6 +1942,7 @@ export default function SceneInner({
                             else setSelected?.({ type: "node", id });
                         }}
 
+                        onSwitchPress={onSwitchPress}
 
                         showLights={showLights}
                         showLightBoundsGlobal={showLightBounds}
@@ -1510,7 +1959,7 @@ export default function SceneInner({
                 );
             })}
 
-            /* Links */
+            {/* Links */}
             {allLinks.map((l) => {
                 const a = nodeMap[l.from];
                 const b = nodeMap[l.to];
@@ -1561,7 +2010,7 @@ export default function SceneInner({
                 const isSelected = selected?.type === "link" && selected.id === l.id;
 
                 // 👉 NEW: for animated/curve styles, optionally treat breakpoints as ONE continuous path
-                const curveStyles = new Set(["sweep", "particles", "wavy", "icons", "epic"]);
+                const curveStyles = new Set(["sweep", "particles", "wavy", "icons", "epic", "packet"]);
                 const curvePathMode = l.pathMode ?? l.sweep?.pathMode ?? "auto"; // "auto" | "single" | "segments"
                 const wantSinglePath =
                     segCount > 1 &&
@@ -1620,7 +2069,7 @@ export default function SceneInner({
                 <TransformControls
                     ref={tcRef}
                     object={tcTarget}
-                    mode={selectedPictureId ? "translate" : transformMode}
+                    mode={(selectedPictureId || selected?.type === "model") ? "translate" : transformMode}
                     onDragStart={() => {
                         tcDraggingRef.current = true;
                         dragState?.set?.(true);
@@ -1742,6 +2191,12 @@ export default function SceneInner({
                             if (missGuardRef) missGuardRef.current = performance.now();
                             return;
                         }
+                        // 3.5) Model – translate only
+                        if (selected?.type === "model" && modelRef?.current && obj === modelRef.current) {
+                            onEntityTransform?.({ type: "model" }, [p.x, p.y, p.z]);
+                            if (missGuardRef) missGuardRef.current = performance.now();
+                            return;
+                        }
 
 
                         // 4) Single node / room
@@ -1793,11 +2248,165 @@ export default function SceneInner({
                             frames={60}
                         />
                     )}
-                    <Grid args={[20, 20]} sectionColor="#1f2a44" cellColor="#0f1628" infiniteGrid />
-                    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.001, 0]} receiveShadow>
-                        <planeGeometry args={[50, 50]} />
-                        <meshStandardMaterial color="#0d1322" roughness={0.95} metalness={0.0} />
-                    </mesh>
+
+                    {gridEnabled && (
+                        <>
+                            {/* Configurable ground grid */}
+                            <Grid
+                                args={[gridSize, gridSize]}
+                                position={[0, gridY + 0.002, 0]}
+                                cellSize={gridCellSize}
+                                sectionSize={gridSectionSize}
+                                cellThickness={gridCellThickness}
+                                sectionThickness={gridSectionThickness}
+                                cellColor={gridCellColor}
+                                sectionColor={gridSectionColor}
+                                infiniteGrid={gridInfinite}
+                                followCamera={gridFollowCamera}
+                                fadeDistance={gridFadeDistance}
+                                fadeStrength={gridFadeStrength}
+                            />
+
+
+                            {/* Floors / Decks (extra horizontal layers) */}
+                            {floorsEnabled && visibleFloors && visibleFloors.length > 1 && (
+                                <>
+                                    {visibleFloors
+                                        .filter((f) => f && f.id !== "ground")
+                                        .map((f) => {
+                                            const base = new THREE.Color(gridGroundBlend);
+                                            const tgt = new THREE.Color(f.color || gridColor);
+                                            const op = Number.isFinite(Number(f.opacity)) ? Number(f.opacity) : Math.max(0.06, Math.min(0.35, gridOpacity * 0.65));
+                                            const cellCol = base.clone().lerp(tgt, Math.max(0.05, Math.min(1, op * 0.7))).getStyle();
+                                            const secCol = base.clone().lerp(tgt, Math.max(0.05, Math.min(1, op * 1.1))).getStyle();
+
+                                            return (
+                                                <Grid
+                                                    key={`floor_${f.id}`}
+                                                    args={[gridSize, gridSize]}
+                                                    position={[0, (Number(f.y) || gridY) + 0.002, 0]}
+                                                    cellSize={gridCellSize}
+                                                    sectionSize={gridSectionSize}
+                                                    cellThickness={gridCellThickness}
+                                                    sectionThickness={gridSectionThickness}
+                                                    cellColor={cellCol}
+                                                    sectionColor={secCol}
+                                                    infiniteGrid={gridInfinite}
+                                                    followCamera={gridFollowCamera}
+                                                    fadeDistance={gridFadeDistance}
+                                                    fadeStrength={gridFadeStrength}
+                                                />
+                                            );
+                                        })}
+                                </>
+                            )}
+
+                            {/* Optional 3D grid space (multiple wall planes) */}
+                            {gridSpace3D && (
+                                <>
+                                    {gridSpace3DXY && gridSpaceOffsets.map((off) => (
+                                        <Grid
+                                            key={`grid_xy_\${off}`}
+                                            args={[gridSize, gridSize]}
+                                            rotation={[Math.PI / 2, 0, 0]}
+                                            position={[0, gridY, (gridPlaneOffsetZ + off)]}
+                                            cellSize={gridCellSize}
+                                            sectionSize={gridSectionSize}
+                                            cellThickness={gridCellThickness}
+                                            sectionThickness={gridSectionThickness}
+                                            cellColor={gridCellColor}
+                                            sectionColor={gridSectionColor}
+                                            infiniteGrid={gridInfinite}
+                                            followCamera={gridFollowCamera}
+                                            fadeDistance={gridFadeDistance}
+                                            fadeStrength={gridFadeStrength}
+                                        />
+                                    ))}
+                                    {gridSpace3DYZ && gridSpaceOffsets.map((off) => (
+                                        <Grid
+                                            key={`grid_yz_\${off}`}
+                                            args={[gridSize, gridSize]}
+                                            rotation={[0, 0, Math.PI / 2]}
+                                            position={[(gridPlaneOffsetX + off), gridY, 0]}
+                                            cellSize={gridCellSize}
+                                            sectionSize={gridSectionSize}
+                                            cellThickness={gridCellThickness}
+                                            sectionThickness={gridSectionThickness}
+                                            cellColor={gridCellColor}
+                                            sectionColor={gridSectionColor}
+                                            infiniteGrid={gridInfinite}
+                                            followCamera={gridFollowCamera}
+                                            fadeDistance={gridFadeDistance}
+                                            fadeStrength={gridFadeStrength}
+                                        />
+                                    ))}
+                                </>
+                            )}
+
+                            {/* Selection highlight (which grid cell(s) the selection occupies) */}
+                            {selectionGridRect && (
+                                <mesh
+                                    rotation={[-Math.PI / 2, 0, 0]}
+                                    position={[selectionGridRect.cx, gridY + 0.004, selectionGridRect.cz]}
+                                    renderOrder={1000}
+                                >
+                                    <planeGeometry args={[selectionGridRect.w, selectionGridRect.d]} />
+                                    <meshBasicMaterial
+                                        color={gridHighlightColor}
+                                        transparent
+                                        opacity={gridHighlightOpacity}
+                                        depthWrite={false}
+                                    />
+                                </mesh>
+                            )}
+
+
+
+                            {/* Snap preview ghost (during drag) */}
+                            {snapGhost && (
+                                <>
+                                    <mesh
+                                        rotation={[-Math.PI / 2, 0, 0]}
+                                        position={[snapGhost.x, snapGhost.baseY + 0.006, snapGhost.z]}
+                                        renderOrder={999}
+                                    >
+                                        <planeGeometry args={[snapGhost.w, snapGhost.d]} />
+                                        <meshBasicMaterial
+                                            color={snapGhostColor}
+                                            transparent
+                                            opacity={Math.max(0.08, snapGhostOpacity * 0.9)}
+                                            depthWrite={false}
+                                        />
+                                    </mesh>
+                                    <mesh
+                                        position={[snapGhost.x, snapGhost.y, snapGhost.z]}
+                                        renderOrder={999}
+                                    >
+                                        <boxGeometry args={[snapGhost.w, snapGhost.h, snapGhost.d]} />
+                                        <meshStandardMaterial
+                                            color={snapGhostColor}
+                                            transparent
+                                            opacity={snapGhostOpacity}
+                                            roughness={0.4}
+                                            metalness={0.0}
+                                            depthWrite={false}
+                                        />
+                                    </mesh>
+                                </>
+                            )}
+
+                            {/* Optional origin axes helper */}
+                            {gridShowAxes && <axesHelper args={[2.25]} />}
+                        </>
+                    )}
+
+                    {/* Ground plane */}
+                    {gridShowPlane && (
+                        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, gridY + 0.001, 0]} receiveShadow>
+                            <planeGeometry args={[50, 50]} />
+                            <meshStandardMaterial color="#0d1322" roughness={0.95} metalness={0.0} />
+                        </mesh>
+                    )}
                 </>
             )}
 

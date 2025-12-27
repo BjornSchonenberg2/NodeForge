@@ -698,6 +698,7 @@ export function OutgoingLinksEditor({
                             <option value="particles">particles</option>
                             <option value="wavy">wavy</option>
                             <option value="icons">icons</option>
+                            <option value="packet">packet</option>
                             <option value="dashed">dashed</option>
                             <option value="solid">solid</option>
                             <option value="epic">epic</option>
@@ -743,13 +744,462 @@ export function OutgoingLinksEditor({
                     >
                         <input
                             type="checkbox"
-                            checked={!!l.active}
+                            checked={l.active !== false}
                             onChange={(e) =>
-                                patch(l.id, { active: e.target.checked })
+                                patch(l.id, { active: e.target.checked ? true : false })
                             }
                         />{" "}
                         Active
                     </label>
+
+                    {/* Packet settings (style = packet) */}
+                    {((l.style || "particles") === "packet") && (
+                        <div style={{
+                            marginTop: 10,
+                            paddingTop: 10,
+                            borderTop: "1px dashed rgba(255,255,255,0.12)",
+                            display: "grid",
+                            gap: 10,
+                        }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Packet Flow</div>
+
+                            {(() => {
+                                const pkt = l.packet || {};
+                                const visual = pkt.visual || {};
+                                const path = pkt.path || {};
+                                const timing = pkt.timing || {};
+                                const success = pkt.success || {};
+                                const emit = pkt.emit || {};
+                                const setPkt = (patchObj) => {
+                                    patch(l.id, {
+                                        packet: {
+                                            ...pkt,
+                                            ...patchObj,
+                                        },
+                                    });
+                                };
+                                const setVisual = (patchObj) => setPkt({ visual: { ...visual, ...patchObj } });
+                                const setPath = (patchObj) => setPkt({ path: { ...path, ...patchObj } });
+                                const setTiming = (patchObj) => setPkt({ timing: { ...timing, ...patchObj } });
+                                const setSuccess = (patchObj) => setPkt({ success: { ...success, ...patchObj } });
+                                const setEmit = (patchObj) => setPkt({ emit: { ...emit, ...patchObj } });
+
+                                return (
+                                    <>
+                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                            <label>
+                                                Packet Shape
+                                                <select
+                                                    value={visual.shape || "orb"}
+                                                    onChange={(e) => setVisual({ shape: e.target.value })}
+                                                >
+                                                    <option value="orb">orb</option>
+                                                    <option value="square">square</option>
+                                                    <option value="ring">ring</option>
+                                                    <option value="shard">shard</option>
+                                                    <option value="comet">comet</option>
+                                                    <option value="waves">waves</option>
+                                                    <option value="envelope">envelope</option>
+                                                    <option value="static">static</option>
+                                                    <option value="text">text</option>
+                                                </select>
+                                            </label>
+                                            <label>
+                                                Packet Color
+                                                <input
+                                                    type="color"
+                                                    value={visual.color || l.color || "#7cf"}
+                                                    onChange={(e) => setVisual({ color: e.target.value })}
+                                                />
+                                            </label>
+                                        </div>
+
+                                        {((visual.shape || "orb") === "text") && (
+                                            <label>
+                                                Text
+                                                <input
+                                                    type="text"
+                                                    value={visual.text || "PING"}
+                                                    onChange={(e) => setVisual({ text: e.target.value })}
+                                                />
+                                            </label>
+                                        )}
+
+                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                            <label style={{ display: "block" }}>
+                                                Size
+                                                <input
+                                                    type="range"
+                                                    min={0.04}
+                                                    max={0.6}
+                                                    step={0.01}
+                                                    value={visual.size ?? 0.14}
+                                                    onChange={(e) => setVisual({ size: Number(e.target.value) })}
+                                                />
+                                            </label>
+                                            <label style={{ display: "block" }}>
+                                                Glow
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={4}
+                                                    step={0.05}
+                                                    value={visual.glow ?? 1.2}
+                                                    onChange={(e) => setVisual({ glow: Number(e.target.value) })}
+                                                />
+                                            </label>
+                                        </div>
+
+                                        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={visual.trail !== false}
+                                                onChange={(e) => setVisual({ trail: e.target.checked ? true : false })}
+                                            />
+                                            Trail
+                                        </label>
+
+                                        <div style={{ borderTop: "1px dashed rgba(255,255,255,0.12)", paddingTop: 10, display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Path Layer</div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Path Style
+                                                    <select
+                                                        value={path.style || "invisible"}
+                                                        onChange={(e) => setPath({ style: e.target.value })}
+                                                    >
+                                                        <option value="invisible">invisible</option>
+                                                        <option value="line">line</option>
+                                                        <option value="dashed">dashed</option>
+                                                        <option value="particles">particles</option>
+                                                        <option value="pulse">pulse</option>
+                                                    </select>
+                                                </label>
+
+                                                <label>
+                                                    Path Color
+                                                    <input
+                                                        type="color"
+                                                        value={path.color || l.color || "#7cf"}
+                                                        onChange={(e) => setPath({ color: e.target.value })}
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!path.showBaseLink}
+                                                    onChange={(e) => setPath({ showBaseLink: e.target.checked ? true : false })}
+                                                />
+                                                Show normal link underneath (optional)
+                                            </label>
+
+                                            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={(path.onlyWhenActive ?? true) !== false}
+                                                    onChange={(e) => setPath({ onlyWhenActive: e.target.checked ? true : false })}
+                                                />
+                                                Path visible only when packets run
+                                            </label>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label style={{ display: "block" }}>
+                                                    Path Opacity
+                                                    <input
+                                                        type="range"
+                                                        min={0}
+                                                        max={1}
+                                                        step={0.01}
+                                                        value={path.opacity ?? 0.75}
+                                                        onChange={(e) => setPath({ opacity: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                                <label style={{ display: "block" }}>
+                                                    Path Speed
+                                                    <input
+                                                        type="range"
+                                                        min={0}
+                                                        max={4}
+                                                        step={0.01}
+                                                        value={path.speed ?? 1}
+                                                        onChange={(e) => setPath({ speed: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ borderTop: "1px dashed rgba(255,255,255,0.12)", paddingTop: 10, display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Timing Layer</div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Start Delay (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={timing.startDelay ?? 0}
+                                                        onChange={(e) => setTiming({ startDelay: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                                <label>
+                                                    Travel Duration (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={timing.travelDuration ?? 1.2}
+                                                        onChange={(e) => setTiming({ travelDuration: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Easing
+                                                    <select
+                                                        value={timing.easing || "linear"}
+                                                        onChange={(e) => setTiming({ easing: e.target.value })}
+                                                    >
+                                                        <option value="linear">linear</option>
+                                                        <option value="easeIn">easeIn</option>
+                                                        <option value="easeOut">easeOut</option>
+                                                        <option value="easeInOut">easeInOut</option>
+                                                    </select>
+                                                </label>
+                                                <label>
+                                                    Linger (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={timing.linger ?? 0}
+                                                        onChange={(e) => setTiming({ linger: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ borderTop: "1px dashed rgba(255,255,255,0.12)", paddingTop: 10, display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Success FX (on target)</div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Type
+                                                    <select
+                                                        value={success.type || "pulse"}
+                                                        onChange={(e) => setSuccess({ type: e.target.value })}
+                                                    >
+                                                        <option value="none">none</option>
+                                                        <option value="pulse">pulse</option>
+                                                        <option value="burst">burst</option>
+                                                        <option value="sparkles">sparkles</option>
+                                                    </select>
+                                                </label>
+                                                <label>
+                                                    Color
+                                                    <input
+                                                        type="color"
+                                                        value={success.color || l.color || "#7cf"}
+                                                        onChange={(e) => setSuccess({ color: e.target.value })}
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Size
+                                                    <input
+                                                        type="range"
+                                                        min={0.1}
+                                                        max={3}
+                                                        step={0.05}
+                                                        value={success.size ?? 1}
+                                                        onChange={(e) => setSuccess({ size: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                                <label>
+                                                    Duration (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={success.duration ?? 0.6}
+                                                        onChange={(e) => setSuccess({ duration: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <label style={{ display: "block" }}>
+                                                Intensity
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={3}
+                                                    step={0.05}
+                                                    value={success.intensity ?? 1}
+                                                    onChange={(e) => setSuccess({ intensity: Number(e.target.value) })}
+                                                />
+                                            </label>
+
+                                            {(success.type || "pulse") !== "none" && (
+                                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                    <label style={{ display: "block" }}>
+                                                        Rings
+                                                        <input
+                                                            type="range"
+                                                            min={0}
+                                                            max={6}
+                                                            step={1}
+                                                            value={success.ringCount ?? 1}
+                                                            onChange={(e) => setSuccess({ ringCount: Number(e.target.value) })}
+                                                        />
+                                                    </label>
+
+                                                    <label style={{ display: "block" }}>
+                                                        Ring Thickness
+                                                        <input
+                                                            type="range"
+                                                            min={0.02}
+                                                            max={0.35}
+                                                            step={0.01}
+                                                            value={success.ringThickness ?? 0.10}
+                                                            onChange={(e) => setSuccess({ ringThickness: Number(e.target.value) })}
+                                                        />
+                                                    </label>
+                                                    <label style={{ display: "block" }}>
+                                                        Ring Delay
+                                                        <input
+                                                            type="range"
+                                                            min={0}
+                                                            max={0.6}
+                                                            step={0.01}
+                                                            value={success.ringDelay ?? 0.04}
+                                                            onChange={(e) => setSuccess({ ringDelay: Number(e.target.value) })}
+                                                        />
+                                                    </label>
+
+                                                    <label style={{ display: "block" }}>
+                                                        Ring Opacity
+                                                        <input
+                                                            type="range"
+                                                            min={0}
+                                                            max={1}
+                                                            step={0.01}
+                                                            value={success.ringOpacity ?? 0.85}
+                                                            onChange={(e) => setSuccess({ ringOpacity: Number(e.target.value) })}
+                                                        />
+                                                    </label>
+                                                </div>
+                                            )}
+
+                                            {((success.type || "pulse") === "burst" || (success.type || "pulse") === "sparkles") && (
+                                                <div style={{ display: "grid", gap: 8 }}>
+                                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                        <label style={{ display: "block" }}>
+                                                            Sparks
+                                                            <input
+                                                                type="range"
+                                                                min={0}
+                                                                max={64}
+                                                                step={1}
+                                                                value={success.sparkCount ?? ((success.type || "pulse") === "burst" ? 16 : 10)}
+                                                                onChange={(e) => setSuccess({ sparkCount: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                        <label style={{ display: "block" }}>
+                                                            Spark Speed
+                                                            <input
+                                                                type="range"
+                                                                min={0}
+                                                                max={4}
+                                                                step={0.05}
+                                                                value={success.sparkSpeed ?? 1.35}
+                                                                onChange={(e) => setSuccess({ sparkSpeed: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                    </div>
+
+                                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                        <label style={{ display: "block" }}>
+                                                            Spark Size
+                                                            <input
+                                                                type="range"
+                                                                min={0.02}
+                                                                max={0.5}
+                                                                step={0.01}
+                                                                value={success.sparkSize ?? 0.16}
+                                                                onChange={(e) => setSuccess({ sparkSize: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                        <label style={{ display: "block" }}>
+                                                            Spread
+                                                            <input
+                                                                type="range"
+                                                                min={0}
+                                                                max={1}
+                                                                step={0.01}
+                                                                value={success.sparkSpread ?? 1}
+                                                                onChange={(e) => setSuccess({ sparkSpread: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                    </div>
+
+                                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                        <label style={{ display: "block" }}>
+                                                            Drag
+                                                            <input
+                                                                type="range"
+                                                                min={0}
+                                                                max={1}
+                                                                step={0.01}
+                                                                value={success.sparkDrag ?? 0.18}
+                                                                onChange={(e) => setSuccess({ sparkDrag: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                        <label>
+                                                            Spark Shape
+                                                            <select
+                                                                value={success.sparkShape || "sphere"}
+                                                                onChange={(e) => setSuccess({ sparkShape: e.target.value })}
+                                                            >
+                                                                <option value="sphere">sphere</option>
+                                                                <option value="tetra">tetra</option>
+                                                                <option value="cube">cube</option>
+                                                            </select>
+                                                        </label>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div style={{ borderTop: "1px dashed rgba(255,255,255,0.12)", paddingTop: 10, display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Emit Defaults</div>
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Packets per Send
+                                                    <input
+                                                        type="number"
+                                                        step={1}
+                                                        value={emit.count ?? 1}
+                                                        onChange={(e) => setEmit({ count: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
+                                                    />
+                                                </label>
+                                                <label>
+                                                    Interval (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={emit.interval ?? 0.15}
+                                                        onChange={(e) => setEmit({ interval: Math.max(0, Number(e.target.value) || 0) })}
+                                                    />
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </>
+                                );
+                            })()}
+                        </div>
+                    )}
 
                     {/* Common meta */}
                     <div
@@ -1517,6 +1967,598 @@ export function OutgoingLinksEditor({
                                 </div>
                             )}
                     </div>
+
+                    {/* Packet (per-link flow simulation) */}
+                    {l.style === "packet" && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop: "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div style={{ fontWeight: 800, marginBottom: 4 }}>Packet</div>
+
+                            {/* Visual */}
+                            <div style={{ fontWeight: 700, marginTop: 6, opacity: 0.9 }}>Visual</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Shape
+                                <select
+                                    value={l.packet?.visual?.shape || "orb"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "shape"], e.target.value)
+                                    }
+                                >
+                                    <option value="orb">orb</option>
+                                    <option value="cube">cube</option>
+                                    <option value="ring">ring</option>
+                                    <option value="shard">shard</option>
+                                    <option value="comet">comet</option>
+                                    <option value="waves">waves</option>
+                                    <option value="envelope">envelope</option>
+                                    <option value="static">static</option>
+                                    <option value="text">text</option>
+                                </select>
+                            </label>
+
+                            {(l.packet?.visual?.shape || "orb") === "text" && (
+                                <label style={{ display: "block", marginTop: 6 }}>
+                                    Text
+                                    <input
+                                        type="text"
+                                        value={l.packet?.visual?.text ?? "PING"}
+                                        onChange={(e) =>
+                                            patchNested(l.id, ["packet", "visual", "text"], e.target.value)
+                                        }
+                                    />
+                                </label>
+                            )}
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Packet Color
+                                <input
+                                    type="color"
+                                    value={l.packet?.visual?.color || l.color || "#7cf"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "color"], e.target.value)
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Size
+                                <input
+                                    type="range"
+                                    min={0.05}
+                                    max={0.7}
+                                    step={0.01}
+                                    value={l.packet?.visual?.size ?? 0.16}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "size"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Glow
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.packet?.visual?.glow ?? 1.6}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "glow"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Pulse
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={l.packet?.visual?.pulse ?? 0.22}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "pulse"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Spin
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={10}
+                                    step={0.05}
+                                    value={l.packet?.visual?.spin ?? 1.2}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "spin"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Trail
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={l.packet?.visual?.trail ?? 0.35}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "trail"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            {/* Path */}
+                            <div style={{ fontWeight: 700, marginTop: 10, opacity: 0.9 }}>Path</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Path Style
+                                <select
+                                    value={l.packet?.path?.style || "hidden"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "style"], e.target.value)
+                                    }
+                                >
+                                    <option value="hidden">hidden</option>
+                                    <option value="line">line</option>
+                                    <option value="dashes">dashes</option>
+                                    <option value="particles">particles</option>
+                                    <option value="pulse">pulse</option>
+                                </select>
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Path Color
+                                <input
+                                    type="color"
+                                    value={l.packet?.path?.color || l.packet?.visual?.color || l.color || "#7cf"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "color"], e.target.value)
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Opacity
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.05}
+                                    value={l.packet?.path?.opacity ?? 0.55}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "opacity"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Path Speed
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={6}
+                                    step={0.05}
+                                    value={l.packet?.path?.speed ?? 1.2}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "speed"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            {(l.packet?.path?.style || "hidden") === "particles" && (
+                                <>
+                                    <label style={{ display: "block", marginTop: 6 }}>
+                                        Particle Count
+                                        <input
+                                            type="range"
+                                            min={4}
+                                            max={120}
+                                            step={1}
+                                            value={l.packet?.path?.particleCount ?? 34}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "path", "particleCount"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+                                    <label style={{ display: "block", marginTop: 6 }}>
+                                        Particle Size
+                                        <input
+                                            type="range"
+                                            min={0.02}
+                                            max={0.35}
+                                            step={0.01}
+                                            value={l.packet?.path?.particleSize ?? 0.06}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "path", "particleSize"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+                                </>
+                            )}
+
+                            {(l.packet?.path?.style || "hidden") === "pulse" && (
+                                <label style={{ display: "block", marginTop: 6 }}>
+                                    Pulse Width
+                                    <input
+                                        type="range"
+                                        min={0.04}
+                                        max={0.6}
+                                        step={0.01}
+                                        value={l.packet?.path?.pulseWidth ?? 0.18}
+                                        onChange={(e) =>
+                                            patchNested(l.id, ["packet", "path", "pulseWidth"], Number(e.target.value))
+                                        }
+                                    />
+                                </label>
+                            )}
+
+                            <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!(l.packet?.path?.onlyWhenActive ?? true)}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "onlyWhenActive"], e.target.checked)
+                                    }
+                                />
+                                Show path only when active
+                            </label>
+
+                            {/* Timing */}
+                            <div style={{ fontWeight: 700, marginTop: 10, opacity: 0.9 }}>Timeframe</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Start Delay (s)
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={5}
+                                    step={0.05}
+                                    value={l.packet?.timing?.startDelay ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "timing", "startDelay"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Travel Duration (s)
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={12}
+                                    step={0.05}
+                                    value={l.packet?.timing?.travelDuration ?? 1.1}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "timing", "travelDuration"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Easing
+                                <select
+                                    value={l.packet?.timing?.easing || "easeInOut"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "timing", "easing"], e.target.value)
+                                    }
+                                >
+                                    <option value="linear">linear</option>
+                                    <option value="easeIn">easeIn</option>
+                                    <option value="easeOut">easeOut</option>
+                                    <option value="easeInOut">easeInOut</option>
+                                </select>
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Linger at target (s)
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.packet?.timing?.linger ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "timing", "linger"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            {/* Emit Defaults */}
+                            <div style={{ fontWeight: 700, marginTop: 10, opacity: 0.9 }}>Send Defaults</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Packets per burst
+                                <input
+                                    type="range"
+                                    min={1}
+                                    max={50}
+                                    step={1}
+                                    value={l.packet?.emit?.count ?? 1}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "count"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Interval in burst (s)
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={3}
+                                    step={0.02}
+                                    value={l.packet?.emit?.interval ?? 0.12}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "interval"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!(l.packet?.emit?.loop ?? false)}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "loop"], e.target.checked)
+                                    }
+                                />
+                                Loop bursts
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Burst interval (s)
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={10}
+                                    step={0.05}
+                                    value={l.packet?.emit?.burstInterval ?? 1.0}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "burstInterval"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Bursts (0 = infinite)
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={50}
+                                    step={1}
+                                    value={l.packet?.emit?.bursts ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "bursts"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!(l.packet?.emit?.clearOnStart ?? true)}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "clearOnStart"], e.target.checked)
+                                    }
+                                />
+                                Clear existing on start
+                            </label>
+
+                            {/* Success */}
+                            <div style={{ fontWeight: 700, marginTop: 10, opacity: 0.9 }}>On Success (Target)</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Effect
+                                <select
+                                    value={l.packet?.success?.type || "pulse"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "type"], e.target.value)
+                                    }
+                                >
+                                    <option value="none">none</option>
+                                    <option value="pulse">pulse</option>
+                                    <option value="burst">burst</option>
+                                    <option value="sparkles">sparkles</option>
+                                </select>
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Effect Color
+                                <input
+                                    type="color"
+                                    value={l.packet?.success?.color || l.packet?.visual?.color || l.color || "#7cf"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "color"], e.target.value)
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Size
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={2.5}
+                                    step={0.05}
+                                    value={l.packet?.success?.size ?? 0.7}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "size"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Duration (s)
+                                <input
+                                    type="range"
+                                    min={0.05}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.packet?.success?.duration ?? 0.55}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "duration"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Intensity
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={3}
+                                    step={0.05}
+                                    value={l.packet?.success?.intensity ?? 1.2}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "intensity"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            {(l.packet?.success?.type || "pulse") !== "none" && (
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+                                    <label style={{ display: "block" }}>
+                                        Rings
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={6}
+                                            step={1}
+                                            value={l.packet?.success?.ringCount ?? 1}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "success", "ringCount"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Ring Thickness
+                                        <input
+                                            type="range"
+                                            min={0.02}
+                                            max={0.35}
+                                            step={0.01}
+                                            value={l.packet?.success?.ringThickness ?? 0.10}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "success", "ringThickness"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Ring Delay
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={0.6}
+                                            step={0.01}
+                                            value={l.packet?.success?.ringDelay ?? 0.04}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "success", "ringDelay"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Ring Opacity
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={1}
+                                            step={0.01}
+                                            value={l.packet?.success?.ringOpacity ?? 0.85}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "success", "ringOpacity"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+                                </div>
+                            )}
+
+                            {((l.packet?.success?.type || "pulse") === "burst" || (l.packet?.success?.type || "pulse") === "sparkles") && (
+                                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                        <label style={{ display: "block" }}>
+                                            Sparks
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={64}
+                                                step={1}
+                                                value={l.packet?.success?.sparkCount ?? ((l.packet?.success?.type || "pulse") === "burst" ? 16 : 10)}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkCount"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                        <label style={{ display: "block" }}>
+                                            Spark Speed
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={4}
+                                                step={0.05}
+                                                value={l.packet?.success?.sparkSpeed ?? 1.35}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkSpeed"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                    </div>
+
+                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                        <label style={{ display: "block" }}>
+                                            Spark Size
+                                            <input
+                                                type="range"
+                                                min={0.02}
+                                                max={0.5}
+                                                step={0.01}
+                                                value={l.packet?.success?.sparkSize ?? 0.16}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkSize"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                        <label style={{ display: "block" }}>
+                                            Spread
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={1}
+                                                step={0.01}
+                                                value={l.packet?.success?.sparkSpread ?? 1}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkSpread"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                    </div>
+
+                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                        <label style={{ display: "block" }}>
+                                            Drag
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={1}
+                                                step={0.01}
+                                                value={l.packet?.success?.sparkDrag ?? 0.18}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkDrag"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                        <label>
+                                            Spark Shape
+                                            <select
+                                                value={l.packet?.success?.sparkShape || "sphere"}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkShape"], e.target.value)
+                                                }
+                                            >
+                                                <option value="sphere">sphere</option>
+                                                <option value="tetra">tetra</option>
+                                                <option value="cube">cube</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     {/* Particles / Wavy */}
                     {(l.style === "particles" || l.style === "wavy") && (
