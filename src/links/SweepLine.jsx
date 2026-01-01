@@ -67,6 +67,7 @@ function SweepPass({
                        selected = false,
                        animate = true,
                        rainbow = false,
+                       opacityMult = 1,
                        // visibility
                        fillMode = "trail",  // "trail"|"fill"
                        trailLength = 0.18,  // 0..1 window length
@@ -118,6 +119,8 @@ function SweepPass({
             uUseGradient: { value: gradient ? 1 : 0 },
             uProg: { value: 0 },
             uGlobalFade: { value: 0 },
+            // External fade multiplier (e.g. node/room cinematic fades). Default 1.
+            uOpacityMult: { value: 1 },
             uFeather: { value: Math.min(0.80, Math.max(0.0, feather)) },
             uEmissiveBoost: { value: glow },
             uPulse: { value: 1.0 },
@@ -156,7 +159,7 @@ function SweepPass({
             fragmentShader: `
         uniform vec3 uColor, uColor2;
         uniform int uUseGradient;
-        uniform float uProg, uGlobalFade, uFeather, uEmissiveBoost, uPulse;
+        uniform float uProg, uGlobalFade, uOpacityMult, uFeather, uEmissiveBoost, uPulse;
         uniform float uTrail, uFill, uInvert;
         uniform float uTime;
         uniform float uTailFade, uTailFadePow;
@@ -205,7 +208,7 @@ function SweepPass({
           }
           alpha *= pattern;
 
-          float vis = alpha * (1.0 - uGlobalFade);
+          float vis = alpha * (1.0 - uGlobalFade) * uOpacityMult;
           if (vis <= 0.0001) discard;
 
           vec3 col = (uUseGradient == 1) ? mix(uColor, uColor2, sRaw) : uColor;
@@ -327,9 +330,11 @@ function SweepPass({
         mat.uniforms.uShimmerAmp.value = THREE.MathUtils.clamp(shimmerAmp, 0, 1);
         mat.uniforms.uShimmerFreq.value = Math.max(0.001, shimmerFreq);
         mat.uniforms.uGlobalFade.value = THREE.MathUtils.clamp(uFade, 0, 1);
+        mat.uniforms.uOpacityMult.value = Math.max(0, Math.min(1, Number(opacityMult) || 1));
+        const __om = mat.uniforms.uOpacityMult.value;
 
         const boost = (selected ? 1.25 : 1.0) * (glow || 1.0);
-        baseMat.opacity = (baseVisible ? 1.0 : 0.0) * (selected ? 0.42 : 0.32) * (1.0 - mat.uniforms.uGlobalFade.value) * Math.min(1.6, boost);
+        baseMat.opacity = (baseVisible ? 1.0 : 0.0) * (selected ? 0.42 : 0.32) * (1.0 - mat.uniforms.uGlobalFade.value) * Math.min(1.6, boost) * Math.max(0, Math.min(1, Number(opacityMult) || 1));
 
         // head (respect invert for position)
         if (headRef.current) {
@@ -344,6 +349,8 @@ function SweepPass({
             const sPulse = 1.0 + (headPulseAmp || 0) * Math.sin(t * (headPulseFreq || 1.6) * Math.PI * 2.0);
             const s = (0.35 * headSize + Math.sin(t * 6.28) * 0.15) * (thickness * thicknessMult * 14) * sPulse;
             headRef.current.scale.setScalar(Math.max(0.0001, s));
+            const hm = headRef.current.material;
+            if (hm && hm.opacity != null) hm.opacity = 0.7 * __om;
         }
 
         // End FX
@@ -390,7 +397,7 @@ function SweepPass({
                     const m = mesh.material;
                     m.color = new THREE.Color(endFx.color ?? color);
                     const fade = (endFx.type === "ripple") ? (1.0 - e * 0.8) : (1.0 - e);
-                    m.opacity = Math.max(0, fade) * 0.85;
+                    m.opacity = Math.max(0, fade) * 0.85 * __om;
                 }
             }
 
@@ -407,7 +414,7 @@ function SweepPass({
                     const m = mesh.material;
                     m.color = new THREE.Color(endFx.color ?? color);
                     const fall = Math.pow(1.0 - e, 1.0 - soft*0.85);
-                    m.opacity = fall * 0.9;
+                    m.opacity = fall * 0.9 * __om;
                 }
             }
         } else {
@@ -499,6 +506,7 @@ export default function SweepLine(props) {
         invert = false,
         // fx
         endFx,
+        opacityMult = 1,
     } = props;
 
     const geom = useMemo(() => {
@@ -568,6 +576,7 @@ export default function SweepLine(props) {
                     invert={invert}
                     endFx={endFx}
                     timeOffset={it.tOff}
+                    opacityMult={opacityMult}
                 />
             ))}
         </group>

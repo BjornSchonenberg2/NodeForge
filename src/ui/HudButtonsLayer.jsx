@@ -14,6 +14,73 @@ import React from "react";
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
+// ---------------- HUD action helpers ----------------
+// Supports triggering global scene effects directly from HUD actions (even if the host app's
+// runAction() doesn't implement them yet).
+function __dispatchWindowEvent(name, detail) {
+  if (typeof window === "undefined") return false;
+  if (!name) return false;
+  try {
+    window.dispatchEvent(new CustomEvent(name, { detail }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Fade support: dispatch EPIC3D_FADE_CTRL with a payload like:
+// { action: 'in'|'out'|'toggle'|'set', nodeId?, roomId?, deckId?, nodeIds?, roomIds?, deckIds?, all?, durationIn?, durationOut?, duration? }
+function __maybeDispatchFadeFromAction(action) {
+  if (!action || typeof action !== "object") return false;
+  const kind = String(action.kind || action.type || action.actionType || "").toLowerCase();
+
+  // Allow multiple shapes for authoring.
+  const fadeRaw =
+      action.fade ??
+      action.fx?.fade ??
+      action.effect?.fade ??
+      action.payload?.fade ??
+      null;
+
+  const isFade = !!fadeRaw || kind.includes("fade");
+  if (!isFade) return false;
+
+  const detail = {};
+
+  if (typeof fadeRaw === "string") {
+    detail.action = fadeRaw;
+  } else if (fadeRaw && typeof fadeRaw === "object") {
+    // If the author nested the detail, respect it.
+    const d = fadeRaw.detail && typeof fadeRaw.detail === "object" ? fadeRaw.detail : fadeRaw;
+    Object.assign(detail, d);
+  } else if (action.payload && typeof action.payload === "object") {
+    Object.assign(detail, action.payload);
+  }
+
+  // Defaults
+  if (!detail.action && kind.includes("fade")) detail.action = "toggle";
+  const eventName = detail.eventName || fadeRaw?.eventName || "EPIC3D_FADE_CTRL";
+  delete detail.eventName;
+
+  return __dispatchWindowEvent(eventName, detail);
+}
+
+// Generic support: HUD action can dispatch any CustomEvent.
+// Shapes supported:
+// action.dispatchEvent = { name: 'EVENT', detail: {...} }
+// action.emitEvent / action.event = { ... }
+function __maybeDispatchCustomEventFromAction(action) {
+  if (!action || typeof action !== "object") return false;
+  const ev = action.dispatchEvent || action.emitEvent || action.event || null;
+  if (!ev) return false;
+  if (typeof ev === "string") return __dispatchWindowEvent(ev, action.eventDetail || action.detail || {});
+  if (typeof ev !== "object") return false;
+  const name = ev.name || ev.type || ev.eventName;
+  if (!name) return false;
+  const detail = ev.detail ?? ev.payload ?? ev.data ?? {};
+  return __dispatchWindowEvent(name, detail);
+}
+
 const DEFAULT_BTN = {
   x: 0,
   y: 0,
@@ -975,6 +1042,10 @@ export default function HudButtonsLayer({ uiHidden = false,  actions, setActions
                         if (cfg.edit) {
                           setSelId(a.id);
                         }
+                        // Allow certain actions to directly dispatch global events (fade, or generic events)
+                        __maybeDispatchFadeFromAction(a);
+                        __maybeDispatchCustomEventFromAction(a);
+
                         if (runAction) {
                           runAction(a);
                         }

@@ -264,6 +264,29 @@ export default function InteractionLayer({
     return g;
   }, [activeRoomMode, points, hoverXZ]);
 
+  const pointsFillGeo = useMemo(() => {
+    if (activeRoomMode !== "points") return null;
+    const pts = [...points];
+    if (hoverXZ && points.length) pts.push(hoverXZ);
+    if (pts.length < 3) return null;
+    const shape = new THREE.Shape();
+    pts.forEach(([x, z], i) => {
+      if (i === 0) shape.moveTo(x, z);
+      else shape.lineTo(x, z);
+    });
+    shape.closePath();
+    const geo = new THREE.ShapeGeometry(shape);
+    geo.computeVertexNormals();
+    return geo;
+  }, [activeRoomMode, points, hoverXZ]);
+
+  useEffect(() => {
+    return () => {
+      pointsFillGeo?.dispose?.();
+      pointsLineGeo?.dispose?.();
+    };
+  }, [pointsFillGeo, pointsLineGeo]);
+
   // Invisible ground + preview helpers
   return (
       <>
@@ -283,6 +306,12 @@ export default function InteractionLayer({
         {/* Points draw preview */}
         {activeRoomMode === "points" && points.length > 0 && (
             <group>
+              {pointsFillGeo && (
+                  <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]} geometry={pointsFillGeo}>
+                    <meshBasicMaterial transparent opacity={0.15} depthWrite={false} side={THREE.DoubleSide} />
+                  </mesh>
+              )}
+
               {points.map(([x, z], i) => (
                   <mesh key={i} position={[x, 0.03, z]}>
                     <sphereGeometry args={[0.06, 14, 14]} />

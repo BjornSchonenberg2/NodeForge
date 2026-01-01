@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { QuadraticBezierLine } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
@@ -16,6 +16,12 @@ const TMP_V2 = new THREE.Vector3();
 function clamp01(x) {
     return Math.max(0, Math.min(1, x));
 }
+
+function easeInOutCubic(t) {
+    t = clamp01(t);
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
 
 function hash01(n) {
     // deterministic pseudo-random in [0..1]
@@ -203,7 +209,56 @@ export default React.memo(function Link3D({
                                               onPointerDown,
                                               animate = true,
                                               cableOffsets: cableOffsetsProp,
+                                              // cinematic fade (SceneInner passes the same timing used elsewhere)
+                                              fadeTarget = 1,
+                                              fadeInDuration = 0.6,
+                                              fadeOutDuration = 0.6,
                                           }) {
+
+    /* ---------- cinematic fade (smooth, matches Node3D curve) ---------- */
+    const [fadeAlpha, setFadeAlpha] = useState(() => clamp01(Number(fadeTarget ?? 1)));
+    const fadeAlphaRef = useRef(fadeAlpha);
+    useEffect(() => {
+        fadeAlphaRef.current = fadeAlpha;
+    }, [fadeAlpha]);
+
+    const fadeAnimRef = useRef(null);
+
+    useEffect(() => {
+        const cur = clamp01(fadeAlphaRef.current);
+        const to = clamp01(Number(fadeTarget ?? 1));
+        if (Math.abs(to - cur) < 0.0001) return;
+
+        const wantsIn = to >= cur;
+        const dur = wantsIn
+            ? Math.max(0, Number(fadeInDuration) || 0)
+            : Math.max(0, Number(fadeOutDuration) || 0);
+
+        if (dur <= 0.0001) {
+            fadeAnimRef.current = null;
+            setFadeAlpha(to);
+            return;
+        }
+
+        fadeAnimRef.current = { from: cur, to, dur, elapsed: 0 };
+    }, [fadeTarget, fadeInDuration, fadeOutDuration]);
+
+    useFrame((_, dt) => {
+        const a = fadeAnimRef.current;
+        if (!a) return;
+        a.elapsed += dt;
+        const t = a.dur <= 0 ? 1 : clamp01(a.elapsed / a.dur);
+        const e = easeInOutCubic(t);
+        const v = a.from + (a.to - a.from) * e;
+        if (Math.abs(v - fadeAlphaRef.current) > 0.0005) setFadeAlpha(v);
+        if (t >= 1) {
+            fadeAnimRef.current = null;
+            setFadeAlpha(a.to);
+        }
+    });
+
+    const uiAlpha = clamp01(fadeAlpha);
+
     // Ensure stable numeric arrays for external components
     const fromArr = useMemo(() => toArr3(from), [from]);
     const toArr = useMemo(() => toArr3(to), [to]);
@@ -416,8 +471,44 @@ export default React.memo(function Link3D({
     }, [cableOffsetsProp, mergedStyle, fromArr, toArr, cableCount, cableSpread, cableRough, cableScram]);
 
     // ---------------- Packet runtime (event-driven) ----------------
-    const isPacket = mergedStyle === "packet";
-    const pktCfg = useMemo(() => normalizePacket(link, mergedColor), [link, mergedColor]);
+    const isPacketStyle = mergedStyle === "packet";
+    const [packetOverlayOn, setPacketOverlayOn] = useState(false);
+    const [packetPresetOverride, setPacketPresetOverride] = useState(null);
+    // Packet overlay can be enabled temporarily (e.g., Packet Tracer sends) even on non-packet links.
+    const isPacket = isPacketStyle || packetOverlayOn;
+    const basePktCfg = useMemo(() => normalizePacket(link, mergedColor), [link, mergedColor]);
+    const pktCfg = useMemo(() => {
+        const o = packetPresetOverride;
+        if (!o) return basePktCfg;
+
+        const normStyle = (styleRaw) => {
+            const s0 = String(styleRaw || '').toLowerCase();
+            let s = s0;
+            if (s === 'square') s = 'cube';
+            if (s === 'shard') s = 'diamond';
+            if (s === 'static') s = 'cube';
+            if (s === 'comet') s = 'orb';
+            return s || null;
+        };
+
+        const v = (o && typeof o === 'object') ? (o.visual && typeof o.visual === 'object' ? o.visual : {}) : {};
+        const styleRaw = o.packetStyle ?? o.style ?? o.shape ?? v.shape ?? v.packetShape ?? v.style;
+        const style = styleRaw != null ? normStyle(styleRaw) : null;
+        const textIn = o.text ?? o.label ?? v.text;
+        const colorIn = o.color ?? v.color;
+        const sizeIn = (o.size != null ? o.size : (v.size != null ? v.size : null));
+        const opacityIn = (o.opacity != null ? o.opacity : null);
+
+        // Merge shallow packet style overrides while preserving the link's timing/success/path config.
+        return {
+            ...basePktCfg,
+            ...(style != null ? { style } : {}),
+            ...(textIn != null ? { text: String(textIn) } : {}),
+            ...(colorIn != null ? { color: colorIn } : {}),
+            ...(sizeIn != null ? { size: Number(sizeIn) || basePktCfg.size } : {}),
+            ...(opacityIn != null ? { opacity: Math.max(0, Math.min(1, Number(opacityIn) || 0)) } : {}),
+        };
+    }, [basePktCfg, packetPresetOverride]);
     const pktCfgRef = useRef(pktCfg);
     useEffect(() => {
         pktCfgRef.current = pktCfg;
@@ -609,6 +700,16 @@ export default React.memo(function Link3D({
                 "bursts",
                 "burstsLimit",
                 "clearOnStart",
+                "packetStyle",
+                "style",
+                "shape",
+                "text",
+                "label",
+                "color",
+                "size",
+                "opacity",
+                "packetPreset",
+                "visual",
             ];
             for (const k of allow) {
                 if (d[k] != null && out[k] == null) out[k] = d[k];
@@ -619,7 +720,12 @@ export default React.memo(function Link3D({
         const handler = (ev) => {
             const d = ev?.detail || {};
             if (!d) return;
-            if (!isPacket) return;
+            // Allow packet overlay on non-packet links when explicitly requested.
+            const allowNonPacket = d.allowNonPacket === true || d.packetOverlay === true || d.overlay === true;
+            if (!isPacketStyle && allowNonPacket && !packetOverlayOn) {
+                try { setPacketOverlayOn(true); } catch {}
+            }
+            if (!isPacket && !allowNonPacket) return;
 
             const linkId = link?.id;
             if (!linkId) return;
@@ -650,9 +756,47 @@ export default React.memo(function Link3D({
 
             if (action === "start" || action === "send" || action === "run") {
                 // queue start so the frame loop uses a consistent clock
+                const overrides = pickOverrides(d);
+
+                // If the caller provides a packet visual preset (e.g., tracer packets), apply it
+                // so multi-hop routing keeps the same icon/shape/text across all links.
+                const preset = (() => {
+                    const o = overrides || {};
+                    const raw = (o.packetPreset && typeof o.packetPreset === 'object') ? o.packetPreset :
+                        (o.visual && typeof o.visual === 'object') ? o.visual : null;
+                    const normStyle = (styleRaw) => {
+                        const s0 = String(styleRaw || '').toLowerCase();
+                        let s = s0;
+                        if (s === 'square') s = 'cube';
+                        if (s === 'shard') s = 'diamond';
+                        if (s === 'static') s = 'cube';
+                        if (s === 'comet') s = 'orb';
+                        return s || null;
+                    };
+                    const styleRaw = o.packetStyle ?? o.style ?? o.shape ?? (raw ? (raw.packetStyle ?? raw.style ?? raw.shape ?? raw.packetShape ?? raw.kind) : null);
+                    const style = styleRaw != null ? normStyle(styleRaw) : null;
+                    const textIn = o.text ?? o.label ?? (raw ? raw.text : null);
+                    const colorIn = o.color ?? (raw ? raw.color : null);
+                    const sizeIn = (o.size != null ? o.size : (raw && raw.size != null ? raw.size : null));
+                    const opacityIn = (o.opacity != null ? o.opacity : (raw && raw.opacity != null ? raw.opacity : null));
+                    if (style == null && textIn == null && colorIn == null && sizeIn == null && opacityIn == null) return null;
+                    return {
+                        ...(style != null ? { style, packetStyle: style } : {}),
+                        ...(textIn != null ? { text: String(textIn) } : {}),
+                        ...(colorIn != null ? { color: colorIn } : {}),
+                        ...(sizeIn != null ? { size: sizeIn } : {}),
+                        ...(opacityIn != null ? { opacity: opacityIn } : {}),
+                    };
+                })();
+
+                if (preset) {
+                    try { setPacketPresetOverride(preset); } catch {}
+                }
+
+                // queue start so the frame loop uses a consistent clock
                 pktRuntime.current.queuedStart = {
                     at: timeRef.current,
-                    overrides: pickOverrides(d),
+                    overrides,
                 };
             }
         };
@@ -667,7 +811,7 @@ export default React.memo(function Link3D({
         return () => {
             for (const n of events) window.removeEventListener(n, handler);
         };
-    }, [isPacket, link?.id, link?.from, link?.to]);
+    }, [isPacketStyle, packetOverlayOn, isPacket, link?.id, link?.from, link?.to]);
 
     // Auto start (optional)
     useEffect(() => {
@@ -805,6 +949,18 @@ export default React.memo(function Link3D({
 
         // Update packets + write instanced matrices
         const inst = packetMeshRef.current;
+        // Ensure packet material opacity respects cinematic fade
+        try {
+            const mat = inst?.material;
+            const baseOp = clamp01((pktCfgRef.current?.opacity ?? 1)) * uiAlpha;
+            if (mat) {
+                if (Array.isArray(mat)) {
+                    for (const m of mat) if (m && m.opacity != null) m.opacity = baseOp;
+                } else if (mat.opacity != null) {
+                    mat.opacity = baseOp;
+                }
+            }
+        } catch {}
         if (inst && packetGeo && packetMat) {
             const tmp = new THREE.Object3D();
             const qTmp = new THREE.Quaternion();
@@ -985,7 +1141,7 @@ export default React.memo(function Link3D({
 
             // InstancedMesh has a single shared material; approximate by using the max ring alpha.
             const mat = ringInst.material;
-            if (mat && mat.opacity != null) mat.opacity = alphaMax;
+            if (mat && mat.opacity != null) mat.opacity = alphaMax * uiAlpha;
         }
 
         // Update sparks
@@ -1035,13 +1191,13 @@ export default React.memo(function Link3D({
             sparkInst.instanceMatrix.needsUpdate = true;
 
             const mat = sparkInst.material;
-            if (mat && mat.opacity != null) mat.opacity = alphaMax;
+            if (mat && mat.opacity != null) mat.opacity = alphaMax * uiAlpha;
         }
     });
 
     if (!active) return null;
 
-    const pointerProps = onPointerDown ? { onPointerDown } : {};
+    const pointerProps = (onPointerDown && uiAlpha > 0.02) ? { onPointerDown } : {};
 
     // Selected should be clickable even when packet path hidden
     const showPacketPath =
@@ -1059,7 +1215,7 @@ export default React.memo(function Link3D({
                     color={mergedColor}
                     lineWidth={width * scale}
                     transparent
-                    opacity={selected ? 1 : 0.92}
+                    opacity={(selected ? 1 : 0.92) * uiAlpha}
                     depthWrite={false}
                 />
             )}
@@ -1076,7 +1232,7 @@ export default React.memo(function Link3D({
                     dashScale={link?.dash?.length ?? 1}
                     dashSize={link?.dash?.gap ?? 0.25}
                     transparent
-                    opacity={selected ? 1 : 0.96}
+                    opacity={(selected ? 1 : 0.96) * uiAlpha}
                     depthWrite={false}
                 />
             )}
@@ -1090,7 +1246,7 @@ export default React.memo(function Link3D({
                     sizeMult={scale}
                     rainbow={(fx.rainbow ?? false) || (byKind.effects?.rainbow ?? false)}
                     speed={(speed || 1) * (mergedStyle === "wavy" ? 1.1 : 1)}
-                    opacity={link?.particles?.opacity ?? 1}
+                    opacity={(link?.particles?.opacity ?? 1) * uiAlpha}
                     waveAmp={link?.particles?.waveAmp ?? (mergedStyle === "wavy" ? 0.18 : 0.06)}
                     waveFreq={link?.particles?.waveFreq ?? 2}
                     shape={link?.particles?.shape || "sphere"}
@@ -1109,7 +1265,7 @@ export default React.memo(function Link3D({
                     sizeMult={scale}
                     rainbow={(fx.rainbow ?? false) || (byKind.effects?.rainbow ?? false)}
                     speed={speed || 1}
-                    opacity={0.95}
+                    opacity={0.95 * uiAlpha}
                     selected={!!selected}
                     animate={animate}
                 />
@@ -1152,6 +1308,7 @@ export default React.memo(function Link3D({
                     rainbow={(fx.rainbow ?? false) || (byKind.effects?.rainbow ?? false)}
                     selected={!!selected}
                     animate={animate}
+                    opacityMult={uiAlpha}
                 />
             )}
 
@@ -1185,7 +1342,7 @@ export default React.memo(function Link3D({
                                 color={mergedColor}
                                 lineWidth={width * scale * (idx === 0 ? 1.0 : 0.7)}
                                 transparent
-                                opacity={selected ? 1 : 0.94}
+                                opacity={(selected ? 1 : 0.94) * uiAlpha}
                                 depthWrite={false}
                             />
                         );
@@ -1207,6 +1364,7 @@ export default React.memo(function Link3D({
                     thicknessMult={scale}
                     rainbow={(fx.rainbow ?? false) || (byKind.effects?.rainbow ?? false)}
                     sparks={(fx.sparks ?? false) || (byKind.effects?.sparks ?? false)}
+                    opacityMult={uiAlpha}
                 />
             )}
 
@@ -1219,7 +1377,7 @@ export default React.memo(function Link3D({
                             <lineBasicMaterial
                                 color={pktCfg.path.color}
                                 transparent
-                                opacity={pktCfg.path.opacity}
+                                opacity={pktCfg.path.opacity * uiAlpha}
                                 depthWrite={false}
                             />
                         </line>
@@ -1230,7 +1388,7 @@ export default React.memo(function Link3D({
                             <lineDashedMaterial
                                 color={pktCfg.path.color}
                                 transparent
-                                opacity={pktCfg.path.opacity}
+                                opacity={pktCfg.path.opacity * uiAlpha}
                                 dashSize={pktCfg.path.dashSize}
                                 gapSize={pktCfg.path.gapSize}
                                 depthWrite={false}
@@ -1247,7 +1405,7 @@ export default React.memo(function Link3D({
                             sizeMult={scale}
                             rainbow={false}
                             speed={(speed || 1) * pktCfg.path.particleSpeed}
-                            opacity={pktCfg.path.opacity}
+                            opacity={pktCfg.path.opacity * uiAlpha}
                             waveAmp={0.0}
                             waveFreq={1.5}
                             shape={"sphere"}
@@ -1279,6 +1437,7 @@ export default React.memo(function Link3D({
                             rainbow={false}
                             selected={!!selected}
                             animate={animate}
+                            opacityMult={uiAlpha}
                         />
                     )}
                 </group>

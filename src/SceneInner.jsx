@@ -53,11 +53,20 @@ function readLightingPrefs() {
     if (typeof window === "undefined") return fallback;
 
     try {
+        // IMPORTANT:
+        // localStorage.getItem(k) returns null when the key is missing.
+        // Number(null) === 0 (finite), which can accidentally zero-out lights
+        // and make the whole scene appear "invisible" on startup.
         const getNum = (k, f) => {
-            const v = Number(localStorage.getItem(k));
+            const raw = localStorage.getItem(k);
+            if (raw === null || raw === "") return f;
+            const v = Number(raw);
             return Number.isFinite(v) ? v : f;
         };
-        const getStr = (k, f) => localStorage.getItem(k) || f;
+        const getStr = (k, f) => {
+            const raw = localStorage.getItem(k);
+            return raw === null || raw === "" ? f : raw;
+        };
 
         return {
             envPreset: getStr("epic3d.lighting.envPreset.v1", fallback.envPreset),
@@ -159,6 +168,139 @@ export default function SceneInner({
                                        // scene ready callback
                                        onModelScene
                                    }) {
+    // ------------------------------------------------------------
+    // Link FX hiding bridge for cinematic fades
+    //
+    // Your node/room/deck/group fade system animates the targets themselves,
+    // but links are separate objects. To ensure "scene fade" also hides the
+    // animated link flows between any faded endpoints, we listen to the same
+    // fade control event and temporarily omit rendering of links that touch
+    // faded targets.
+    //
+    // IMPORTANT: We intentionally do NOT touch Link3D materials/shaders here
+    // (to avoid the performance / "everything disappears" regressions).
+    // This is an on/off visibility bridge specifically for link visuals.
+    // ------------------------------------------------------------
+    const fadeLinkHideRef = useRef(null);
+    if (!fadeLinkHideRef.current) {
+        fadeLinkHideRef.current = {
+            all: false,
+            nodes: new Set(),
+            rooms: new Set(),
+            decks: new Set(),
+            groups: new Set(),
+            // last-known fade durations (used so links fade at the same speed as nodes)
+            inDur: 0.6,
+            outDur: 0.6,
+            version: 0,
+        };
+    }
+
+    const [, forceFadeLinksRerender] = useState(0);
+
+    useEffect(() => {
+        const store = fadeLinkHideRef.current;
+        if (!store) return;
+
+        const normArr = (v) => {
+            if (!v) return [];
+            if (Array.isArray(v)) return v;
+            return [v];
+        };
+
+        const toId = (v) => {
+            if (v == null) return "";
+            const s = String(v);
+            return s.trim();
+        };
+
+        const applyMode = (set, ids, mode) => {
+            if (!set || !ids || !ids.length) return;
+            for (const raw of ids) {
+                const id = toId(raw);
+                if (!id) continue;
+                if (mode === "hide") set.add(id);
+                else if (mode === "show") set.delete(id);
+                else if (mode === "toggle") {
+                    if (set.has(id)) set.delete(id);
+                    else set.add(id);
+                }
+            }
+        };
+
+        const onFade = (ev) => {
+            const d = ev?.detail || {};
+
+            // Optional: allow a hard reset from any caller
+            if (d.reset === true || d.clear === true) {
+                store.all = false;
+                store.nodes.clear();
+                store.rooms.clear();
+                store.decks.clear();
+                store.groups.clear();
+                forceFadeLinksRerender((x) => x + 1);
+                return;
+            }
+
+            const type = String(ev?.type || "");
+            let action = String(d.action || d.mode || d.fadeAction || "").toLowerCase().trim();
+            if (!action) {
+                if (type.includes("_IN")) action = "in";
+                else if (type.includes("_OUT")) action = "out";
+                else if (type.includes("_TOGGLE")) action = "toggle";
+                else action = "toggle";
+            }
+            if (action === "fadein") action = "in";
+            if (action === "fadeout") action = "out";
+
+            let mode = null; // show | hide | toggle
+            if (action === "in" || action === "show") mode = "show";
+            else if (action === "out" || action === "hide") mode = "hide";
+            else if (action === "toggle") mode = "toggle";
+            else if (action === "set") {
+                const a = Number(d.alpha ?? d.opacity ?? 1);
+                mode = a >= 0.5 ? "show" : "hide";
+            }
+
+            // Unknown/unsupported actions shouldn't affect link visibility
+            if (!mode) return;
+
+            // Track last durations (so Link3D can match Node3D timing).
+            // These are global hints and are only applied to links affected by this event.
+            const inHint = d.durationIn ?? d.fadeInDuration ?? d.fadeIn ?? d.inDuration ?? d.in;
+            const outHint = d.durationOut ?? d.fadeOutDuration ?? d.fadeOut ?? d.outDuration ?? d.out;
+            const durHint = d.duration;
+            if (durHint != null && Number.isFinite(Number(durHint))) {
+                const v = Math.max(0, Number(durHint) || 0);
+                store.inDur = v;
+                store.outDur = v;
+            } else {
+                if (inHint != null && Number.isFinite(Number(inHint))) store.inDur = Math.max(0, Number(inHint) || 0);
+                if (outHint != null && Number.isFinite(Number(outHint))) store.outDur = Math.max(0, Number(outHint) || 0);
+            }
+
+            // Global
+            if (d.all === true) {
+                if (mode === "toggle") store.all = !store.all;
+                else store.all = mode === "hide";
+            }
+
+            // Targeted
+            applyMode(store.nodes, [...normArr(d.nodeIds), ...normArr(d.nodeId)], mode);
+            applyMode(store.rooms, [...normArr(d.roomIds), ...normArr(d.roomId)], mode);
+            applyMode(store.decks, [...normArr(d.deckIds), ...normArr(d.deckId)], mode);
+            applyMode(store.groups, [...normArr(d.groupIds), ...normArr(d.groupId)], mode);
+
+            store.version = (store.version || 0) + 1;
+            forceFadeLinksRerender((x) => x + 1);
+        };
+
+        const events = ["EPIC3D_FADE_CTRL", "EPIC3D_FADE_IN", "EPIC3D_FADE_OUT", "EPIC3D_FADE_TOGGLE"];
+        for (const n of events) window.addEventListener(n, onFade);
+        return () => {
+            for (const n of events) window.removeEventListener(n, onFade);
+        };
+    }, []);
     // ---------- grid config (ground + snapping helpers) ----------
     const __grid = gridConfig || {};
     // Keep cell size & snap in lockstep when gridConfig.linkSnap is enabled (default true).
@@ -1964,6 +2106,24 @@ export default function SceneInner({
                 const a = nodeMap[l.from];
                 const b = nodeMap[l.to];
                 if (!a || !b) return null;
+
+                // Cinematic fades: links should fade with the exact same timing
+                // as nodes/rooms/decks/groups (no instant pop-off).
+                const __fade = fadeLinkHideRef.current;
+                const aFadeHidden =
+                    (__fade?.nodes?.has?.(String(a.id)) ?? false) ||
+                    (a.roomId && (__fade?.rooms?.has?.(String(a.roomId)) ?? false)) ||
+                    (a.deckId && (__fade?.decks?.has?.(String(a.deckId)) ?? false)) ||
+                    (a.groupId && (__fade?.groups?.has?.(String(a.groupId)) ?? false));
+                const bFadeHidden =
+                    (__fade?.nodes?.has?.(String(b.id)) ?? false) ||
+                    (b.roomId && (__fade?.rooms?.has?.(String(b.roomId)) ?? false)) ||
+                    (b.deckId && (__fade?.decks?.has?.(String(b.deckId)) ?? false)) ||
+                    (b.groupId && (__fade?.groups?.has?.(String(b.groupId)) ?? false));
+                const fadeTarget = (__fade?.all || aFadeHidden || bFadeHidden) ? 0 : 1;
+                const fadeInDuration = Math.max(0, Number(__fade?.inDur ?? 0.6) || 0.6);
+                const fadeOutDuration = Math.max(0, Number(__fade?.outDur ?? 0.6) || 0.6);
+
                 const aHidden =
                     (a.deckId && hiddenDeck.has(a.deckId)) ||
                     (a.roomId && hiddenRooms.has(a.roomId));
@@ -2026,6 +2186,9 @@ export default function SceneInner({
                             from={start}
                             to={end}
                             points={points}
+                            fadeTarget={fadeTarget}
+                            fadeInDuration={fadeInDuration}
+                            fadeOutDuration={fadeOutDuration}
                             cableOffsets={cableOffsets}
                             selected={isSelected}
                             onPointerDown={(e) => {
@@ -2048,6 +2211,9 @@ export default function SceneInner({
                         to={points[idx + 1]}
                         segmentIndex={idx}
                         segmentCount={segCount}
+                        fadeTarget={fadeTarget}
+                        fadeInDuration={fadeInDuration}
+                        fadeOutDuration={fadeOutDuration}
                         cableOffsets={cableOffsets}
                         selected={isSelected}
                         onPointerDown={(e) => {

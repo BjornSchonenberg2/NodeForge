@@ -637,6 +637,26 @@ export default memo(function ImportedModel({
       rafRef.current = requestAnimationFrame(loop);
     };
 
+    // If we start in regular (non-wireframe) mode, don't animate from "fully hidden"
+    // (the wireStroke reveal) on initial mount. That animation relies on having a
+    // snapshot of original material flags; without it, surfaces can remain transparent.
+    if (last.current.enabled === undefined && !enabled) {
+      gltf.scene.traverse((mesh) => {
+        if (!(mesh.isMesh || mesh.isSkinnedMesh) || !mesh.material) return;
+        // Ensure no stale injected shaders
+        matsOf(mesh).forEach((m) => clearSurfaceMaskFade(m));
+        // Ensure base surfaces render normally
+        showBaseMaterials(mesh);
+        // Hide overlays if any
+        showOnlyOverlay(mesh, detail, false);
+        // If a snapshot exists (e.g. hot-reload), restore it
+        restoreMaterials(mesh);
+      });
+      last.current = { enabled, detail };
+      invalidate();
+      return;
+    }
+
     if (enabled && cfg.enabled) {
       // Wireframe ON: fade OUT surfaces, draw IN lines
       gltf.scene.traverse((mesh) => {
@@ -707,6 +727,9 @@ export default memo(function ImportedModel({
       // Wireframe OFF: undraw lines, fade IN surfaces
       gltf.scene.traverse((mesh) => {
         if (!(mesh.isMesh || mesh.isSkinnedMesh) || !mesh.material) return;
+        // Snapshot original flags the first time we ever fade surfaces back in.
+        // Without this, restoreMaterials(...) can't undo transparent/depthWrite changes.
+        snapshotMaterials(mesh);
         const ls = wfCache(mesh).overlays?.[detail] || ensureOverlay(mesh, detail);
         ensureStrokeAttrib(ls.geometry);
         const meta = ls.userData && ls.userData._reveal;

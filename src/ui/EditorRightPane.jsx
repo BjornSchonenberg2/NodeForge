@@ -1,5 +1,5 @@
 // ui/EditorRightPane.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Panel, Btn, Input, Select, Checkbox, Slider } from "./Controls.jsx";
 import { DEFAULT_CLUSTERS } from "../utils/clusters.js";
 import { OutgoingLinksEditor } from "../Interactive3DNodeShowcase.helpers.hud.jsx";
@@ -187,6 +187,52 @@ function __applySwitchProfileToNode({ nodeId, profile, setNodeById }) {
     });
 }
 
+
+// ---------------- Text box clipboard (Copy/Paste) ----------------
+const TEXTBOX_CLIPBOARD_KEY = "epic3d.textBoxClipboard.v1";
+let __textBoxClipboard = null;
+
+function __loadTextBoxClipboard() {
+    if (__textBoxClipboard) return __textBoxClipboard;
+    try {
+        const raw = localStorage.getItem(TEXTBOX_CLIPBOARD_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") return null;
+        __textBoxClipboard = parsed;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function __saveTextBoxClipboard(profile) {
+    __textBoxClipboard = profile ? __deepClone(profile) : null;
+    try {
+        if (!profile) localStorage.removeItem(TEXTBOX_CLIPBOARD_KEY);
+        else localStorage.setItem(TEXTBOX_CLIPBOARD_KEY, JSON.stringify(profile));
+    } catch {}
+}
+
+function __pickTextBoxProfileFromNode(node) {
+    const tb = node?.textBox && typeof node.textBox === "object" ? node.textBox : {};
+    return {
+        __kind: "textBoxProfile",
+        __v: 1,
+        textBox: __deepClone(tb) || {},
+    };
+}
+
+function __applyTextBoxProfileToNode({ nodeId, profile, setNodeById }) {
+    if (!nodeId || !profile || typeof profile !== "object") return;
+    const tb = profile.textBox && typeof profile.textBox === "object" ? profile.textBox : {};
+    setNodeById(nodeId, () => {
+        return {
+            textBox: { ...(__deepClone(tb) || {}), enabled: true },
+        };
+    });
+}
+
 const NumberInput = ({ value, onChange, step = 0.05, min = 0.0 }) => {
     const safeVal =
         typeof value === "number" && !Number.isNaN(value) ? value : min ?? 0;
@@ -232,6 +278,7 @@ export default function EditorRightPane({
                                             setLightEnabled,
                                             setRoom,
                                             duplicateRoom,
+                                            duplicateNodeWithLinks,
                                             requestDelete,
                                             mode,
                                             setMode,
@@ -448,6 +495,7 @@ export default function EditorRightPane({
                         setNodeById={setNodeById}
                         setLightEnabled={setLightEnabled}
                         setLinks={setLinks}
+                        duplicateNodeWithLinks={duplicateNodeWithLinks}
                         mode={mode}
                         setMode={setMode}
                         requestDelete={requestDelete}
@@ -515,6 +563,7 @@ function NodeInspector({
                            setNodeById,
                            setLightEnabled,
                            setLinks,
+                           duplicateNodeWithLinks,
                            mode,
                            setMode,
                            requestDelete,
@@ -534,6 +583,15 @@ function NodeInspector({
     const [openMasterId, setOpenMasterId] = useState(null);
     const [lightProfileClipboard, setLightProfileClipboard] = useState(() => __loadLightProfileClipboard());
     const [switchProfileClipboard, setSwitchProfileClipboard] = useState(() => __loadSwitchProfileClipboard());
+    const [textBoxClipboard, setTextBoxClipboard] = useState(() => __loadTextBoxClipboard());
+
+    // Duplicate controls
+    const [dupLinks, setDupLinks] = useState(false);
+    const [dupAlsoNeighbours, setDupAlsoNeighbours] = useState(false);
+    const textBoxTextAreaRef = useRef(null);
+    useEffect(() => {
+        if (!dupLinks) setDupAlsoNeighbours(false);
+    }, [dupLinks]);
 
 
     // Downstream chain (daisy-chain) starting at this node.
@@ -548,6 +606,23 @@ function NodeInspector({
         typeof lightProfileClipboard === "object" &&
         lightProfileClipboard.__kind === "lightProfile"
     );
+
+    const canPasteTextBoxProfile = !!(
+        textBoxClipboard &&
+        typeof textBoxClipboard === "object" &&
+        textBoxClipboard.__kind === "textBoxProfile"
+    );
+
+    const copyTextBoxProfile = () => {
+        const prof = __pickTextBoxProfileFromNode(n);
+        __saveTextBoxClipboard(prof);
+        setTextBoxClipboard(prof);
+    };
+
+    const pasteTextBoxProfile = (nodeId) => {
+        if (!canPasteTextBoxProfile) return;
+        __applyTextBoxProfileToNode({ nodeId, profile: textBoxClipboard, setNodeById });
+    };
 
     const copyLightProfile = () => {
         const prof = __pickLightProfileFromNode(n);
@@ -579,6 +654,9 @@ function NodeInspector({
             }
             if (e.key === SWITCH_PROFILE_CLIPBOARD_KEY) {
                 setSwitchProfileClipboard(__loadSwitchProfileClipboard());
+            }
+            if (e.key === TEXTBOX_CLIPBOARD_KEY) {
+                setTextBoxClipboard(__loadTextBoxClipboard());
             }
         };
         window.addEventListener?.("storage", onStorage);
@@ -892,7 +970,41 @@ function NodeInspector({
                     >
                         Delete
                     </Btn>
+
                 </div>
+
+                <Panel title="Duplicate">
+                    <div style={{ display: "grid", gap: 8 }}>
+                        <Checkbox
+                            checked={dupLinks}
+                            onChange={(v) => setDupLinks(!!v)}
+                            label="Duplicate links"
+                        />
+                        {dupLinks && (
+                            <Checkbox
+                                checked={dupAlsoNeighbours}
+                                onChange={(v) => setDupAlsoNeighbours(!!v)}
+                                label="Also neighbours (duplicate linked nodes)"
+                            />
+                        )}
+
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <Btn
+                                variant="primary"
+                                disabled={!duplicateNodeWithLinks}
+                                onClick={() =>
+                                    duplicateNodeWithLinks?.(n.id, {
+                                        duplicateLinks: dupLinks,
+                                        alsoNeighbours: dupAlsoNeighbours,
+                                    })
+                                }
+                            >
+                                Duplicate
+                            </Btn>
+                            <div style={{ fontSize: 11, opacity: 0.75 }}>Snaps to nearest free grid space.</div>
+                        </div>
+                    </div>
+                </Panel>
 
 
                 <label
@@ -912,9 +1024,9 @@ function NodeInspector({
                     Label Scale
                     <input
                         type="range"
-                        min={0.5}
-                        max={13}
-                        step={0.01}
+                        min={0}
+                        max={50}
+                        step={0.05}
                         value={n.labelScale ?? 1}
                         onChange={(e) =>
                             setNode(n.id, {
@@ -923,6 +1035,237 @@ function NodeInspector({
                         }
                     />
                 </label>
+
+                <div
+                    style={{
+                        display: "grid",
+                        gridTemplateColumns: "1fr 1fr",
+                        gap: 8,
+                        marginTop: 6,
+                    }}
+                >
+                    <label>
+                        Scale (numeric)
+                        <NumberInput
+                            min={0}
+                            step={0.1}
+                            value={n.labelScale ?? 1}
+                            onChange={(v) =>
+                                setNode(n.id, { labelScale: Number(v || 0) })
+                            }
+                        />
+                    </label>
+
+                    <label>
+                        Label Max Width (0 = no wrap)
+                        <NumberInput
+                            min={0}
+                            step={1}
+                            value={n.labelMaxWidth ?? 24}
+                            onChange={(v) =>
+                                setNode(n.id, {
+                                    labelMaxWidth: Number(v || 0),
+                                })
+                            }
+                        />
+                    </label>
+                </div>
+
+                <label
+                    style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        marginTop: 6,
+                    }}
+                >
+                    <input
+                        type="checkbox"
+                        checked={n.labelWrap ?? true}
+                        onChange={(e) =>
+                            setNode(n.id, { labelWrap: e.target.checked })
+                        }
+                    />
+                    <span>Wrap label text</span>
+                </label>
+
+                <label style={{ display: "block", marginTop: 6 }}>
+                    Alignment
+                    <select
+                        value={n.labelAlign ?? "center"}
+                        onChange={(e) =>
+                            setNode(n.id, { labelAlign: e.target.value })
+                        }
+                        style={{ width: "100%", marginTop: 4 }}
+                    >
+                        <option value="left">Left</option>
+                        <option value="center">Center</option>
+                        <option value="right">Right</option>
+                    </select>
+                </label>
+
+                <details style={{ marginTop: 8 }}>
+                    <summary style={{ cursor: "pointer", opacity: 0.85 }}>
+                        Advanced Label Style
+                    </summary>
+
+                    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                        <label style={{ display: "block" }}>
+                            Font URL (optional)
+                            <Input
+                                value={n.labelFont ?? ""}
+                                placeholder="https://…/font.woff"
+                                onChange={(e) =>
+                                    setNode(n.id, {
+                                        labelFont: e.target.value || null,
+                                    })
+                                }
+                            />
+                        </label>
+
+                        <div
+                            style={{
+                                display: "grid",
+                                gridTemplateColumns: "1fr 1fr",
+                                gap: 8,
+                            }}
+                        >
+                            <label>
+                                Fill Opacity
+                                <NumberInput
+                                    min={0}
+                                    step={0.05}
+                                    value={n.labelFillOpacity ?? 1}
+                                    onChange={(v) =>
+                                        setNode(n.id, {
+                                            labelFillOpacity: Number(v ?? 1),
+                                        })
+                                    }
+                                />
+                            </label>
+
+                            <label>
+                                Outline Blur
+                                <NumberInput
+                                    min={0}
+                                    step={0.1}
+                                    value={n.labelOutlineBlur ?? 0}
+                                    onChange={(v) =>
+                                        setNode(n.id, {
+                                            labelOutlineBlur: Number(v ?? 0),
+                                        })
+                                    }
+                                />
+                            </label>
+                        </div>
+
+                        <div
+                            style={{
+                                display: "grid",
+                                gridTemplateColumns: "1fr 1fr",
+                                gap: 8,
+                            }}
+                        >
+                            <label>
+                                Letter Spacing
+                                <NumberInput
+                                    step={0.01}
+                                    value={n.labelLetterSpacing ?? 0}
+                                    onChange={(v) =>
+                                        setNode(n.id, {
+                                            labelLetterSpacing: Number(v ?? 0),
+                                        })
+                                    }
+                                />
+                            </label>
+
+                            <label>
+                                Line Height
+                                <NumberInput
+                                    min={0.5}
+                                    step={0.05}
+                                    value={n.labelLineHeight ?? 1}
+                                    onChange={(v) =>
+                                        setNode(n.id, {
+                                            labelLineHeight: Number(v ?? 1),
+                                        })
+                                    }
+                                />
+                            </label>
+                        </div>
+
+                        <div
+                            style={{
+                                display: "grid",
+                                gridTemplateColumns: "1fr 1fr",
+                                gap: 8,
+                            }}
+                        >
+                            <label>
+                                Stroke Width
+                                <NumberInput
+                                    min={0}
+                                    step={0.001}
+                                    value={n.labelStrokeWidth ?? 0}
+                                    onChange={(v) =>
+                                        setNode(n.id, {
+                                            labelStrokeWidth: Number(v ?? 0),
+                                        })
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block" }}>
+                                Stroke Color
+                                <input
+                                    type="color"
+                                    value={n.labelStrokeColor ?? "#000000"}
+                                    onChange={(e) =>
+                                        setNode(n.id, {
+                                            labelStrokeColor: e.target.value,
+                                        })
+                                    }
+                                />
+                            </label>
+                        </div>
+
+                        <div
+                            style={{
+                                display: "grid",
+                                gridTemplateColumns: "1fr 1fr",
+                                gap: 8,
+                            }}
+                        >
+                            <label>
+                                3D Layers
+                                <NumberInput
+                                    min={1}
+                                    step={1}
+                                    value={n.label3DLayers ?? 8}
+                                    onChange={(v) =>
+                                        setNode(n.id, {
+                                            label3DLayers: Number(v ?? 8),
+                                        })
+                                    }
+                                />
+                            </label>
+
+                            <label>
+                                3D Step
+                                <NumberInput
+                                    min={0}
+                                    step={0.005}
+                                    value={n.label3DStep ?? 0.01}
+                                    onChange={(v) =>
+                                        setNode(n.id, {
+                                            label3DStep: Number(v ?? 0.01),
+                                        })
+                                    }
+                                />
+                            </label>
+                        </div>
+                    </div>
+                </details>
 
                 {/* Label appearance */}
                 <div style={{ marginTop: 10, fontWeight: 700 }}>Label</div>
@@ -1020,12 +1363,36 @@ function NodeInspector({
                             label="Enable text box"
                         />
 
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            <Btn
+                                onClick={(e) => {
+                                    e.preventDefault();
+                                    copyTextBoxProfile();
+                                }}
+                            >
+                                Copy text box
+                            </Btn>
+                            <Btn
+                                disabled={!canPasteTextBoxProfile}
+                                onClick={(e) => {
+                                    e.preventDefault();
+                                    pasteTextBoxProfile(n.id);
+                                }}
+                            >
+                                Paste text box
+                            </Btn>
+                        </div>
+                        <div style={{ fontSize: 11, opacity: 0.7 }}>
+                            Paste includes content + styling/timers (use SHIFT+wheel to scroll inside a textbox).
+                        </div>
+
                         {n.textBox?.enabled && (
                             <>
                                 {/* Text content */}
                                 <label>
                                     Text
                                     <textarea
+                                        ref={textBoxTextAreaRef}
                                         value={n.textBox?.text || ""}
                                         onChange={(e) =>
                                             setNode(n.id, {
@@ -1048,6 +1415,152 @@ function NodeInspector({
                                         }}
                                     />
                                 </label>
+
+                                {/* Rich text + sizing */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <Checkbox
+                                        checked={!!n.textBox?.richText}
+                                        onChange={(v) =>
+                                            setNode(n.id, {
+                                                textBox: {
+                                                    ...(n.textBox || {}),
+                                                    richText: v,
+                                                },
+                                            })
+                                        }
+                                        label="Rich text (Markdown)"
+                                    />
+
+                                    <Checkbox
+                                        checked={!!n.textBox?.fitContent}
+                                        onChange={(v) =>
+                                            setNode(n.id, {
+                                                textBox: {
+                                                    ...(n.textBox || {}),
+                                                    fitContent: v,
+                                                },
+                                            })
+                                        }
+                                        label="Fit size to content"
+                                    />
+
+                                    {n.textBox?.richText && (
+                                        <div style={{ display: "grid", gap: 8 }}>
+                                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                                {[
+                                                    { label: "B", wrap: ["**", "**"], ph: "bold" },
+                                                    { label: "I", wrap: ["*", "*"], ph: "italic" },
+                                                    { label: "U", wrap: ["__", "__"], ph: "underline" },
+                                                    { label: "S", wrap: ["~~", "~~"], ph: "strike" },
+                                                    { label: "`", wrap: ["`", "`"], ph: "code" },
+                                                    { label: "Link", wrap: ["[", "](https://)"], ph: "label" },
+                                                    { label: "• List", list: "ul" },
+                                                    { label: "1. List", list: "ol" },
+                                                    { label: "```", wrap: ["```\n", "\n```"], ph: "code block" },
+                                                ].map((b) => (
+                                                    <Btn
+                                                        key={b.label}
+                                                        onClick={(e) => {
+                                                            e.preventDefault();
+                                                            const tb = n.textBox || {};
+                                                            const cur = tb.text || "";
+                                                            const ta = textBoxTextAreaRef.current;
+
+                                                            const setText = (next) =>
+                                                                setNode(n.id, {
+                                                                    textBox: { ...tb, text: next },
+                                                                });
+
+                                                            // Fallback: append if we can't read selection
+                                                            if (!ta) {
+                                                                if (b.list === "ul") {
+                                                                    return setText(
+                                                                        cur + (cur ? "\n" : "") + "- item",
+                                                                    );
+                                                                }
+                                                                if (b.list === "ol") {
+                                                                    return setText(
+                                                                        cur + (cur ? "\n" : "") + "1. item",
+                                                                    );
+                                                                }
+                                                                const pre = b.wrap?.[0] || "";
+                                                                const post = b.wrap?.[1] || "";
+                                                                const inner = b.ph || "text";
+                                                                return setText(cur + (cur ? " " : "") + pre + inner + post);
+                                                            }
+
+                                                            const start = ta.selectionStart ?? 0;
+                                                            const end = ta.selectionEnd ?? 0;
+                                                            const selected = cur.slice(start, end);
+                                                            const hasSel = selected.length > 0;
+
+                                                            if (b.list) {
+                                                                const block = hasSel ? selected : "item";
+                                                                const lines = block.split("\n");
+                                                                const nextBlock =
+                                                                    b.list === "ul"
+                                                                        ? lines
+                                                                            .map((ln) =>
+                                                                                ln.trim()
+                                                                                    ? `- ${ln}`
+                                                                                    : ln,
+                                                                            )
+                                                                            .join("\n")
+                                                                        : lines
+                                                                            .map((ln, i) =>
+                                                                                ln.trim()
+                                                                                    ? `${i + 1}. ${ln}`
+                                                                                    : ln,
+                                                                            )
+                                                                            .join("\n");
+
+                                                                const next =
+                                                                    cur.slice(0, start) +
+                                                                    nextBlock +
+                                                                    cur.slice(end);
+                                                                setText(next);
+                                                                requestAnimationFrame(() => {
+                                                                    ta.focus();
+                                                                    ta.setSelectionRange(
+                                                                        start,
+                                                                        start + nextBlock.length,
+                                                                    );
+                                                                });
+                                                                return;
+                                                            }
+
+                                                            const pre = b.wrap?.[0] || "";
+                                                            const post = b.wrap?.[1] || "";
+                                                            const inner = hasSel ? selected : b.ph || "text";
+                                                            const next =
+                                                                cur.slice(0, start) +
+                                                                pre +
+                                                                inner +
+                                                                post +
+                                                                cur.slice(end);
+                                                            setText(next);
+                                                            requestAnimationFrame(() => {
+                                                                ta.focus();
+                                                                ta.setSelectionRange(
+                                                                    start + pre.length,
+                                                                    start + pre.length + inner.length,
+                                                                );
+                                                            });
+                                                        }}
+                                                    >
+                                                        {b.label}
+                                                    </Btn>
+                                                ))}
+                                            </div>
+
+                                            <div style={{ fontSize: 11, opacity: 0.7 }}>
+                                                Supported: <code>**bold**</code>, <code>*italic*</code>,{" "}
+                                                <code>__underline__</code>, <code>~~strike~~</code>,{" "}
+                                                <code>`code`</code>, <code>[label](url)</code>, lists, code blocks.
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
 
                                 {/* TIMER MODE TOGGLE */}
                                 <Checkbox
@@ -1132,7 +1645,7 @@ function NodeInspector({
                                     }}
                                 >
                                     <label>
-                                        Width
+                                        Width (0 = auto)
                                         <NumberInput
                                             value={n.textBox?.width ?? 1.6}
                                             step={0.1}
@@ -1148,7 +1661,7 @@ function NodeInspector({
                                         />
                                     </label>
                                     <label>
-                                        Height
+                                        Height (0 = auto)
                                         <NumberInput
                                             value={n.textBox?.height ?? 0.8}
                                             step={0.1}
@@ -1158,6 +1671,45 @@ function NodeInspector({
                                                         ...(n.textBox || {}),
                                                         height:
                                                             Number(v || 0),
+                                                    },
+                                                })
+                                            }
+                                        />
+                                    </label>
+                                </div>
+
+                                <div
+                                    style={{
+                                        display: "grid",
+                                        gridTemplateColumns: "repeat(2, 1fr)",
+                                        gap: 8,
+                                    }}
+                                >
+                                    <label>
+                                        Max Width (0 = none)
+                                        <NumberInput
+                                            value={n.textBox?.maxWidth ?? 0}
+                                            step={0.1}
+                                            onChange={(v) =>
+                                                setNode(n.id, {
+                                                    textBox: {
+                                                        ...(n.textBox || {}),
+                                                        maxWidth: Number(v || 0),
+                                                    },
+                                                })
+                                            }
+                                        />
+                                    </label>
+                                    <label>
+                                        Max Height (0 = none)
+                                        <NumberInput
+                                            value={n.textBox?.maxHeight ?? 0}
+                                            step={0.1}
+                                            onChange={(v) =>
+                                                setNode(n.id, {
+                                                    textBox: {
+                                                        ...(n.textBox || {}),
+                                                        maxHeight: Number(v || 0),
                                                     },
                                                 })
                                             }
@@ -1263,6 +1815,415 @@ function NodeInspector({
                                         }
                                     />
                                 </label>
+
+                                <details style={{ marginTop: 8 }}>
+                                    <summary style={{ cursor: "pointer", opacity: 0.85 }}>
+                                        Advanced Style
+                                    </summary>
+
+                                    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+                                        <label style={{ display: "block" }}>
+                                            Text Align
+                                            <select
+                                                value={n.textBox?.align ?? "left"}
+                                                onChange={(e) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            align: e.target.value,
+                                                        },
+                                                    })
+                                                }
+                                                style={{ width: "100%", marginTop: 4 }}
+                                            >
+                                                <option value="left">Left</option>
+                                                <option value="center">Center</option>
+                                                <option value="right">Right</option>
+                                            </select>
+                                        </label>
+
+                                        <label style={{ display: "block" }}>
+                                            Wrap / White-space
+                                            <select
+                                                value={n.textBox?.wrap ?? "pre-wrap"}
+                                                onChange={(e) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            wrap: e.target.value,
+                                                        },
+                                                    })
+                                                }
+                                                style={{ width: "100%", marginTop: 4 }}
+                                            >
+                                                <option value="pre-wrap">Preserve line breaks (pre-wrap)</option>
+                                                <option value="normal">Normal wrapping</option>
+                                                <option value="nowrap">No wrap (horizontal scroll)</option>
+                                            </select>
+                                        </label>
+
+                                        <label style={{ display: "block" }}>
+                                            Font Family (CSS)
+                                            <Input
+                                                value={n.textBox?.fontFamily ?? ""}
+                                                placeholder='e.g. "Inter", system-ui'
+                                                onChange={(e) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            fontFamily: e.target.value,
+                                                        },
+                                                    })
+                                                }
+                                            />
+                                        </label>
+
+                                        <label
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={n.textBox?.forwardWheelToCanvas !== false}
+                                                onChange={(e) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            forwardWheelToCanvas: e.target.checked,
+                                                        },
+                                                    })
+                                                }
+                                            />
+                                            <span>Keep zoom while hovering (forward wheel to canvas)</span>
+                                        </label>
+
+                                        <div
+                                            style={{
+                                                display: "grid",
+                                                gridTemplateColumns: "1fr 1fr",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <label style={{ display: "block" }}>
+                                                Font Weight
+                                                <select
+                                                    value={n.textBox?.fontWeight ?? "normal"}
+                                                    onChange={(e) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                fontWeight: e.target.value,
+                                                            },
+                                                        })
+                                                    }
+                                                    style={{ width: "100%", marginTop: 4 }}
+                                                >
+                                                    <option value="normal">Normal</option>
+                                                    <option value="bold">Bold</option>
+                                                    <option value="100">100</option>
+                                                    <option value="200">200</option>
+                                                    <option value="300">300</option>
+                                                    <option value="400">400</option>
+                                                    <option value="500">500</option>
+                                                    <option value="600">600</option>
+                                                    <option value="700">700</option>
+                                                    <option value="800">800</option>
+                                                    <option value="900">900</option>
+                                                </select>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Font Style
+                                                <select
+                                                    value={n.textBox?.fontStyle ?? "normal"}
+                                                    onChange={(e) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                fontStyle: e.target.value,
+                                                            },
+                                                        })
+                                                    }
+                                                    style={{ width: "100%", marginTop: 4 }}
+                                                >
+                                                    <option value="normal">Normal</option>
+                                                    <option value="italic">Italic</option>
+                                                </select>
+                                            </label>
+                                        </div>
+
+                                        <div
+                                            style={{
+                                                display: "grid",
+                                                gridTemplateColumns: "1fr 1fr",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <label>
+                                                Letter Spacing (px)
+                                                <NumberInput
+                                                    step={0.25}
+                                                    value={n.textBox?.letterSpacing ?? 0}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                letterSpacing: Number(v ?? 0),
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+
+                                            <label>
+                                                Line Height
+                                                <NumberInput
+                                                    min={0.5}
+                                                    step={0.05}
+                                                    value={n.textBox?.lineHeight ?? 1.4}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                lineHeight: Number(v ?? 1.4),
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+                                        </div>
+
+                                        <div
+                                            style={{
+                                                display: "grid",
+                                                gridTemplateColumns: "1fr 1fr",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <label>
+                                                Padding (px)
+                                                <NumberInput
+                                                    min={0}
+                                                    step={1}
+                                                    value={n.textBox?.padding ?? 10}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                padding: Number(v ?? 10),
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+
+                                            <label>
+                                                Border Radius (px)
+                                                <NumberInput
+                                                    min={0}
+                                                    step={1}
+                                                    value={n.textBox?.borderRadius ?? 10}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                borderRadius: Number(v ?? 10),
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+                                        </div>
+
+                                        <div
+                                            style={{
+                                                display: "grid",
+                                                gridTemplateColumns: "1fr 1fr",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <label>
+                                                Border Width (px)
+                                                <NumberInput
+                                                    min={0}
+                                                    step={1}
+                                                    value={n.textBox?.borderWidth ?? 0}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                borderWidth: Number(v ?? 0),
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+
+                                            <label>
+                                                Border Opacity
+                                                <NumberInput
+                                                    min={0}
+                                                    step={0.05}
+                                                    value={n.textBox?.borderOpacity ?? 1}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                borderOpacity: Number(v ?? 1),
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+                                        </div>
+
+                                        <label style={{ display: "block" }}>
+                                            Border Color
+                                            <input
+                                                type="color"
+                                                value={n.textBox?.borderColor ?? "#ffffff"}
+                                                onChange={(e) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            borderColor: e.target.value,
+                                                        },
+                                                    })
+                                                }
+                                            />
+                                        </label>
+
+                                        <label
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={n.textBox?.shadow ?? true}
+                                                onChange={(e) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            shadow: e.target.checked,
+                                                        },
+                                                    })
+                                                }
+                                            />
+                                            <span>Shadow</span>
+                                        </label>
+
+                                        <label
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                // Default ON so clicking the textbox selects the node.
+                                                checked={n.textBox?.allowPointerEvents !== false}
+                                                onChange={(e) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            allowPointerEvents: e.target.checked,
+                                                        },
+                                                    })
+                                                }
+                                            />
+                                            <span>Allow mouse interaction</span>
+                                        </label>
+
+                                        <label
+                                            style={{
+                                                display: "flex",
+                                                alignItems: "center",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={n.textBox?.forwardWheelToCanvas !== false}
+                                                onChange={(e) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            forwardWheelToCanvas: e.target.checked,
+                                                        },
+                                                    })
+                                                }
+                                            />
+                                            <span>Keep zoom working on hover (Wheel ➜ canvas)</span>
+                                        </label>
+
+                                        <div
+                                            style={{
+                                                display: "grid",
+                                                gridTemplateColumns: "1fr 1fr",
+                                                gap: 8,
+                                            }}
+                                        >
+                                            <label>
+                                                Backdrop Blur (px)
+                                                <NumberInput
+                                                    min={0}
+                                                    step={1}
+                                                    value={n.textBox?.backdropBlur ?? 0}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                backdropBlur: Number(v ?? 0),
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+
+                                            <label>
+                                                Backdrop Saturate (%)
+                                                <NumberInput
+                                                    min={0}
+                                                    step={5}
+                                                    value={n.textBox?.backdropSaturate ?? 100}
+                                                    onChange={(v) =>
+                                                        setNode(n.id, {
+                                                            textBox: {
+                                                                ...(n.textBox || {}),
+                                                                backdropSaturate: Number(v ?? 100),
+                                                            },
+                                                        })
+                                                    }
+                                                />
+                                            </label>
+                                        </div>
+
+                                        <label>
+                                            Distance Factor (optional)
+                                            <NumberInput
+                                                min={0}
+                                                step={0.1}
+                                                value={n.textBox?.distanceFactor ?? 0}
+                                                onChange={(v) =>
+                                                    setNode(n.id, {
+                                                        textBox: {
+                                                            ...(n.textBox || {}),
+                                                            distanceFactor: Number(v ?? 0),
+                                                        },
+                                                    })
+                                                }
+                                            />
+                                        </label>
+                                    </div>
+                                </details>
+
 
                                 {/* Mode + test timed fade */}
                                 <div

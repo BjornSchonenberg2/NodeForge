@@ -4,6 +4,7 @@ import * as THREE from "three";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { v4 as uuid } from "uuid";
+import { simulationConfig, resolveAutoSimulationZipUrl } from "./simulationConfig.js";
 
 import { Html, Text, StatsGl, PerformanceMonitor, AdaptiveDpr, Preload } from "@react-three/drei";
 
@@ -2464,6 +2465,7 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
         nodes = [],
         links = [],
         groups = [],
+        decks = [],
         cameraPresets = [],
         runAction,
         keepLeftScroll,
@@ -2490,6 +2492,7 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
         { value: 'setWireframe', label: 'Wireframe On/Off (Global)' },
         { value: 'cameraMove', label: 'Camera Move / Track' },
         { value: 'hudFade', label: 'HUD: Fade Button' },
+        { value: 'fade', label: 'Scene: Fade (Node / Room / Group / Deck)' },
         { value: 'setTextBox', label: 'Text Box On/Off (Node)' },
         { value: 'setRoomVisible', label: 'Room: Show/Hide/Toggle' },
         { value: 'setGroupVisible', label: 'Group: Show/Hide/Toggle' },
@@ -2921,6 +2924,7 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                 const isPacketSend = s.type === 'packetSend';
                                                 const isPacketStop = s.type === 'packetStop';
                                                 const isPacket = isPacketSend || isPacketStop;
+                                                const isFade = s.type === 'fade';
 
                                                 return (
                                                     <div
@@ -3003,6 +3007,34 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                             patch.clearExisting = undefined;
                                                                             patch.stopLoopsOnly = undefined;
                                                                             patch.clearInFlight = undefined;
+                                                                        } else if (type === 'fade') {
+                                                                            patch.nodeId = null;
+                                                                            patch.roomId = s.roomId || '';
+                                                                            patch.groupId = s.groupId || '';
+                                                                            patch.deckId = s.deckId || '';
+                                                                            patch.targetKind = s.targetKind || 'node';
+                                                                            patch.fadeAction = s.fadeAction || 'toggle';
+                                                                            patch.alpha = (s.alpha ?? 1);
+                                                                            patch.durationIn = (s.durationIn ?? 0.6);
+                                                                            patch.durationOut = (s.durationOut ?? 0.6);
+                                                                            patch.includeNodesInRooms = (s.includeNodesInRooms ?? true);
+                                                                            patch.force = (s.force ?? true);
+                                                                            patch.value = undefined;
+                                                                            patch.mode = undefined;
+                                                                            patch.fromPresetId = undefined;
+                                                                            patch.toPresetId = undefined;
+                                                                            patch.hudTargetId = undefined;
+                                                                            patch.hudMode = undefined;
+                                                                            patch.hudDuration = undefined;
+                                                                            patch.linkId = undefined;
+                                                                            patch.count = undefined;
+                                                                            patch.interval = undefined;
+                                                                            patch.loop = undefined;
+                                                                            patch.burstInterval = undefined;
+                                                                            patch.burstsLimit = undefined;
+                                                                            patch.clearExisting = undefined;
+                                                                            patch.stopLoopsOnly = undefined;
+                                                                            patch.clearInFlight = undefined;
                                                                         } else if (type === 'packetSend') {
                                                                             patch.nodeId = null;
                                                                             patch.linkId = s.linkId || '__ALL_PACKET__';
@@ -3013,6 +3045,10 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                             patch.burstInterval = (s.burstInterval ?? 1.0);
                                                                             patch.burstsLimit = (s.burstsLimit ?? 0);
                                                                             patch.clearExisting = !!s.clearExisting;
+                                                                            patch.packetMode = s.packetMode || 'trace';
+                                                                            patch.sourceNodeId = s.sourceNodeId || s.sourceId || '';
+                                                                            patch.targetNodeId = s.targetNodeId || s.targetId || '';
+                                                                            patch.cast = s.cast || s.castMode || 'unicast';
                                                                             patch.duration = undefined;
                                                                             patch.fromPresetId = undefined;
                                                                             patch.toPresetId = undefined;
@@ -3084,18 +3120,181 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                     </Select>
                                                                 </label>
                                                             ) : isPacket ? (
-                                                                <label>
-                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Link</div>
-                                                                    <Select
-                                                                        value={s.linkId || '__ALL_PACKET__'}
-                                                                        onChange={(e) => patchStep(a.id, i, { linkId: e.target.value || '__ALL_PACKET__' })}
-                                                                    >
-                                                                        <option value='__ALL_PACKET__'>(all packet links)</option>
-                                                                        {(links || []).map((lnk) => (
-                                                                            <option key={lnk.id} value={lnk.id}>{linkLabelById?.[lnk.id] || lnk.id}</option>
-                                                                        ))}
-                                                                    </Select>
-                                                                </label>
+                                                                <div style={{ display: 'grid', gap: 6 }}>
+                                                                    {isPacketSend && (
+                                                                        <>
+                                                                            <label>
+                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Packet Mode</div>
+                                                                                <Select
+                                                                                    value={s.packetMode || 'trace'}
+                                                                                    onChange={(e) => patchStep(a.id, i, { packetMode: e.target.value || 'trace' })}
+                                                                                >
+                                                                                    <option value='trace'>Trace (source → target)</option>
+                                                                                    <option value='link'>By Link</option>
+                                                                                </Select>
+                                                                            </label>
+
+                                                                            {(s.packetMode || 'trace') === 'trace' ? (
+                                                                                <div style={{ display: 'grid', gap: 6 }}>
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Source Node</div>
+                                                                                        <Select
+                                                                                            value={s.sourceNodeId || ''}
+                                                                                            onChange={(e) => patchStep(a.id, i, { sourceNodeId: e.target.value || '' })}
+                                                                                        >
+                                                                                            <option value=''> (none) </option>
+                                                                                            {(nodes || []).map((n) => (
+                                                                                                <option key={n.id} value={n.id}>{n.label || n.id}</option>
+                                                                                            ))}
+                                                                                        </Select>
+                                                                                    </label>
+
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Target Node</div>
+                                                                                        <Select
+                                                                                            value={s.targetNodeId || ''}
+                                                                                            onChange={(e) => patchStep(a.id, i, { targetNodeId: e.target.value || '' })}
+                                                                                        >
+                                                                                            <option value=''> (none) </option>
+                                                                                            {(nodes || []).map((n) => (
+                                                                                                <option key={n.id} value={n.id}>{n.label || n.id}</option>
+                                                                                            ))}
+                                                                                        </Select>
+                                                                                    </label>
+
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Cast</div>
+                                                                                        <Select
+                                                                                            value={s.cast || 'unicast'}
+                                                                                            onChange={(e) => patchStep(a.id, i, { cast: e.target.value || 'unicast' })}
+                                                                                        >
+                                                                                            <option value='unicast'>Unicast</option>
+                                                                                            <option value='multicast'>Multicast</option>
+                                                                                        </Select>
+                                                                                    </label>
+                                                                                </div>
+                                                                            ) : (
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Link</div>
+                                                                                    <Select
+                                                                                        value={s.linkId || '__ALL_PACKET__'}
+                                                                                        onChange={(e) => patchStep(a.id, i, { linkId: e.target.value || '__ALL_PACKET__' })}
+                                                                                    >
+                                                                                        <option value='__ALL_PACKET__'>(all packet links)</option>
+                                                                                        {(links || []).map((lnk) => (
+                                                                                            <option key={lnk.id} value={lnk.id}>{linkLabelById?.[lnk.id] || lnk.id}</option>
+                                                                                        ))}
+                                                                                    </Select>
+                                                                                </label>
+                                                                            )}
+                                                                        </>
+                                                                    )}
+
+                                                                    {isPacketStop && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Target Link</div>
+                                                                            <Select
+                                                                                value={s.linkId || '__ALL_PACKET__'}
+                                                                                onChange={(e) => patchStep(a.id, i, { linkId: e.target.value || '__ALL_PACKET__' })}
+                                                                            >
+                                                                                <option value='__ALL_PACKET__'>(all packet links)</option>
+                                                                                {(links || []).map((lnk) => (
+                                                                                    <option key={lnk.id} value={lnk.id}>{linkLabelById?.[lnk.id] || lnk.id}</option>
+                                                                                ))}
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+                                                                </div>
+                                                            ) : isFade ? (
+                                                                <div style={{ display: 'grid', gap: 6 }}>
+                                                                    <label>
+                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Fade Target</div>
+                                                                        <Select
+                                                                            value={s.targetKind || 'node'}
+                                                                            onChange={(e) => patchStep(a.id, i, { targetKind: e.target.value || 'node' })}
+                                                                        >
+                                                                            <option value='node'>Node</option>
+                                                                            <option value='room'>Room</option>
+                                                                            <option value='group'>Group</option>
+                                                                            <option value='deck'>Deck</option>
+                                                                            <option value='all'>All</option>
+                                                                        </Select>
+                                                                    </label>
+
+                                                                    {((s.targetKind || 'node') === 'node') && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Node</div>
+                                                                            <Select
+                                                                                value={s.nodeId || ''}
+                                                                                onChange={(e) => patchStep(a.id, i, { nodeId: e.target.value || null })}
+                                                                            >
+                                                                                <option value=''> (none) </option>
+                                                                                {nodes.map((n) => (
+                                                                                    <option key={n.id} value={n.id}>{n.label}</option>
+                                                                                ))}
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+
+                                                                    {((s.targetKind || 'node') === 'room') && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Room</div>
+                                                                            <Select
+                                                                                value={s.roomId || ''}
+                                                                                onChange={(e) => patchStep(a.id, i, { roomId: e.target.value || '' })}
+                                                                            >
+                                                                                <option value=''> (none) </option>
+                                                                                <option value='__ALL__'>(all rooms)</option>
+                                                                                {rooms.map((r) => (
+                                                                                    <option key={r.id} value={r.id}>{r.name || r.id}</option>
+                                                                                ))}
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+
+                                                                    {((s.targetKind || 'node') === 'group') && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Group</div>
+                                                                            <Select
+                                                                                value={s.groupId || ''}
+                                                                                onChange={(e) => patchStep(a.id, i, { groupId: e.target.value || '' })}
+                                                                            >
+                                                                                <option value=''> (none) </option>
+                                                                                <option value='__ALL__'>(all groups)</option>
+                                                                                {groups.map((gg) => (
+                                                                                    <option key={gg.id} value={gg.id}>{gg.name || gg.id}</option>
+                                                                                ))}
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+
+                                                                    {((s.targetKind || 'node') === 'deck') && (
+                                                                        <label>
+                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Deck</div>
+                                                                            <Select
+                                                                                value={s.deckId || ''}
+                                                                                onChange={(e) => patchStep(a.id, i, { deckId: e.target.value || '' })}
+                                                                            >
+                                                                                <option value=''> (none) </option>
+                                                                                <option value='__ALL__'>(all decks)</option>
+                                                                                {decks.map((d) => (
+                                                                                    <option key={d.id} value={d.id}>{d.name || d.id}</option>
+                                                                                ))}
+                                                                            </Select>
+                                                                        </label>
+                                                                    )}
+
+                                                                    {((s.targetKind || 'node') === 'all') && (
+                                                                        <div style={{
+                                                                            fontSize: 12,
+                                                                            opacity: 0.8,
+                                                                            padding: '7px 10px',
+                                                                            borderRadius: 10,
+                                                                            border: '1px solid rgba(255,255,255,0.12)',
+                                                                            background: 'rgba(255,255,255,0.04)',
+                                                                        }}>All scene objects</div>
+                                                                    )}
+                                                                </div>
                                                             ) : isGroupVis ? (
                                                                 <label>
                                                                     <div style={{ fontSize: 11, opacity: 0.8 }}>Target Group</div>
@@ -3185,6 +3384,71 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                         />
                                                                     </label>
 
+
+                                                                    {isFade && (
+                                                                        <div style={{ display: 'grid', gap: 6 }}>
+                                                                            <label>
+                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Fade Mode</div>
+                                                                                <Select
+                                                                                    value={s.fadeAction || 'toggle'}
+                                                                                    onChange={(e) => patchStep(a.id, i, { fadeAction: e.target.value || 'toggle' })}
+                                                                                >
+                                                                                    <option value='toggle'>Toggle</option>
+                                                                                    <option value='in'>Fade In</option>
+                                                                                    <option value='out'>Fade Out</option>
+                                                                                    <option value='set'>Set Opacity</option>
+                                                                                </Select>
+                                                                            </label>
+
+                                                                            {(String(s.fadeAction || 'toggle') === 'set') && (
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Opacity (0–1)</div>
+                                                                                    <SmoothNumberInput
+                                                                                        step={0.05}
+                                                                                        value={s.alpha ?? 1}
+                                                                                        onCommit={(v) => patchStep(a.id, i, { alpha: Math.max(0, Math.min(1, Number(v) || 0)) })}
+                                                                                    />
+                                                                                </label>
+                                                                            )}
+
+                                                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Duration In (s)</div>
+                                                                                    <SmoothNumberInput
+                                                                                        step={0.1}
+                                                                                        value={s.durationIn ?? 0.6}
+                                                                                        onCommit={(v) => patchStep(a.id, i, { durationIn: Math.max(0, Number(v) || 0) })}
+                                                                                    />
+                                                                                </label>
+                                                                                <label>
+                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Duration Out (s)</div>
+                                                                                    <SmoothNumberInput
+                                                                                        step={0.1}
+                                                                                        value={s.durationOut ?? 0.6}
+                                                                                        onCommit={(v) => patchStep(a.id, i, { durationOut: Math.max(0, Number(v) || 0) })}
+                                                                                    />
+                                                                                </label>
+                                                                            </div>
+
+                                                                            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                <input
+                                                                                    type='checkbox'
+                                                                                    checked={(s.includeNodesInRooms ?? true) !== false}
+                                                                                    onChange={(e) => patchStep(a.id, i, { includeNodesInRooms: e.target.checked })}
+                                                                                />
+                                                                                <span style={{ fontSize: 11, opacity: 0.85 }}>Include nodes in rooms</span>
+                                                                            </label>
+
+                                                                            <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                <input
+                                                                                    type='checkbox'
+                                                                                    checked={(s.force ?? true) !== false}
+                                                                                    onChange={(e) => patchStep(a.id, i, { force: e.target.checked })}
+                                                                                />
+                                                                                <span style={{ fontSize: 11, opacity: 0.85 }}>Force fade</span>
+                                                                            </label>
+                                                                        </div>
+                                                                    )}
                                                                     {(isRoomVis || isGroupVis) && (
                                                                         <label>
                                                                             <div style={{ fontSize: 11, opacity: 0.8 }}>Visibility</div>
@@ -3406,6 +3670,7 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                     const cIsPacketSend = c.type === 'packetSend';
                                                                     const cIsPacketStop = c.type === 'packetStop';
                                                                     const cIsPacket = cIsPacketSend || cIsPacketStop;
+                                                                    const cIsFade = c.type === 'fade';
                                                                     const cIsRoomVis = c.type === 'setRoomVisible';
                                                                     const cIsGroupVis = c.type === 'setGroupVisible';
                                                                     return (
@@ -3463,6 +3728,34 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                                             patch.clearExisting = undefined;
                                                                                             patch.stopLoopsOnly = undefined;
                                                                                             patch.clearInFlight = undefined;
+                                                                                        } else if (type === 'fade') {
+                                                                                            patch.nodeId = null;
+                                                                                            patch.roomId = c.roomId || '';
+                                                                                            patch.groupId = c.groupId || '';
+                                                                                            patch.deckId = c.deckId || '';
+                                                                                            patch.targetKind = c.targetKind || 'node';
+                                                                                            patch.fadeAction = c.fadeAction || 'toggle';
+                                                                                            patch.alpha = (c.alpha ?? 1);
+                                                                                            patch.durationIn = (c.durationIn ?? 0.6);
+                                                                                            patch.durationOut = (c.durationOut ?? 0.6);
+                                                                                            patch.includeNodesInRooms = (c.includeNodesInRooms ?? true);
+                                                                                            patch.force = (c.force ?? true);
+                                                                                            patch.value = undefined;
+                                                                                            patch.mode = undefined;
+                                                                                            patch.fromPresetId = undefined;
+                                                                                            patch.toPresetId = undefined;
+                                                                                            patch.hudTargetId = undefined;
+                                                                                            patch.hudMode = undefined;
+                                                                                            patch.hudDuration = undefined;
+                                                                                            patch.linkId = undefined;
+                                                                                            patch.count = undefined;
+                                                                                            patch.interval = undefined;
+                                                                                            patch.loop = undefined;
+                                                                                            patch.burstInterval = undefined;
+                                                                                            patch.burstsLimit = undefined;
+                                                                                            patch.clearExisting = undefined;
+                                                                                            patch.stopLoopsOnly = undefined;
+                                                                                            patch.clearInFlight = undefined;
                                                                                         } else if (type === 'packetSend') {
                                                                                             patch.nodeId = null;
                                                                                             patch.linkId = c.linkId || '__ALL_PACKET__';
@@ -3473,6 +3766,10 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                                             patch.burstInterval = (c.burstInterval ?? 1.0);
                                                                                             patch.burstsLimit = (c.burstsLimit ?? 0);
                                                                                             patch.clearExisting = !!c.clearExisting;
+                                                                                            patch.packetMode = c.packetMode || 'trace';
+                                                                                            patch.sourceNodeId = c.sourceNodeId || c.sourceId || '';
+                                                                                            patch.targetNodeId = c.targetNodeId || c.targetId || '';
+                                                                                            patch.cast = c.cast || c.castMode || 'unicast';
                                                                                         } else if (type === 'packetStop') {
                                                                                             patch.nodeId = null;
                                                                                             patch.linkId = c.linkId || '__ALL_PACKET__';
@@ -3504,18 +3801,181 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                                     }}>Global: Wireframe</div>
                                                                                 </label>
                                                                             ) : cIsPacket ? (
-                                                                                <label>
-                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Link</div>
-                                                                                    <Select
-                                                                                        value={c.linkId || '__ALL_PACKET__'}
-                                                                                        onChange={(e) => patchChildStep(a.id, i, ci, { linkId: e.target.value || '__ALL_PACKET__' })}
-                                                                                    >
-                                                                                        <option value='__ALL_PACKET__'>(all packet links)</option>
-                                                                                        {(links || []).map((lnk) => (
-                                                                                            <option key={lnk.id} value={lnk.id}>{linkLabelById?.[lnk.id] || lnk.id}</option>
-                                                                                        ))}
-                                                                                    </Select>
-                                                                                </label>
+                                                                                <div style={{ display: 'grid', gap: 6 }}>
+                                                                                    {cIsPacketSend && (
+                                                                                        <>
+                                                                                            <label>
+                                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Packet Mode</div>
+                                                                                                <Select
+                                                                                                    value={c.packetMode || 'trace'}
+                                                                                                    onChange={(e) => patchChildStep(a.id, i, ci, { packetMode: e.target.value || 'trace' })}
+                                                                                                >
+                                                                                                    <option value='trace'>Trace (source → target)</option>
+                                                                                                    <option value='link'>By Link</option>
+                                                                                                </Select>
+                                                                                            </label>
+
+                                                                                            {(c.packetMode || 'trace') === 'trace' ? (
+                                                                                                <div style={{ display: 'grid', gap: 6 }}>
+                                                                                                    <label>
+                                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Source Node</div>
+                                                                                                        <Select
+                                                                                                            value={c.sourceNodeId || ''}
+                                                                                                            onChange={(e) => patchChildStep(a.id, i, ci, { sourceNodeId: e.target.value || '' })}
+                                                                                                        >
+                                                                                                            <option value=''> (none) </option>
+                                                                                                            {(nodes || []).map((n) => (
+                                                                                                                <option key={n.id} value={n.id}>{n.label || n.id}</option>
+                                                                                                            ))}
+                                                                                                        </Select>
+                                                                                                    </label>
+
+                                                                                                    <label>
+                                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Target Node</div>
+                                                                                                        <Select
+                                                                                                            value={c.targetNodeId || ''}
+                                                                                                            onChange={(e) => patchChildStep(a.id, i, ci, { targetNodeId: e.target.value || '' })}
+                                                                                                        >
+                                                                                                            <option value=''> (none) </option>
+                                                                                                            {(nodes || []).map((n) => (
+                                                                                                                <option key={n.id} value={n.id}>{n.label || n.id}</option>
+                                                                                                            ))}
+                                                                                                        </Select>
+                                                                                                    </label>
+
+                                                                                                    <label>
+                                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Cast</div>
+                                                                                                        <Select
+                                                                                                            value={c.cast || 'unicast'}
+                                                                                                            onChange={(e) => patchChildStep(a.id, i, ci, { cast: e.target.value || 'unicast' })}
+                                                                                                        >
+                                                                                                            <option value='unicast'>Unicast</option>
+                                                                                                            <option value='multicast'>Multicast</option>
+                                                                                                        </Select>
+                                                                                                    </label>
+                                                                                                </div>
+                                                                                            ) : (
+                                                                                                <label>
+                                                                                                    <div style={{ fontSize: 11, opacity: 0.8 }}>Target Link</div>
+                                                                                                    <Select
+                                                                                                        value={c.linkId || '__ALL_PACKET__'}
+                                                                                                        onChange={(e) => patchChildStep(a.id, i, ci, { linkId: e.target.value || '__ALL_PACKET__' })}
+                                                                                                    >
+                                                                                                        <option value='__ALL_PACKET__'>(all packet links)</option>
+                                                                                                        {(links || []).map((lnk) => (
+                                                                                                            <option key={lnk.id} value={lnk.id}>{linkLabelById?.[lnk.id] || lnk.id}</option>
+                                                                                                        ))}
+                                                                                                    </Select>
+                                                                                                </label>
+                                                                                            )}
+                                                                                        </>
+                                                                                    )}
+
+                                                                                    {cIsPacketStop && (
+                                                                                        <label>
+                                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Target Link</div>
+                                                                                            <Select
+                                                                                                value={c.linkId || '__ALL_PACKET__'}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { linkId: e.target.value || '__ALL_PACKET__' })}
+                                                                                            >
+                                                                                                <option value='__ALL_PACKET__'>(all packet links)</option>
+                                                                                                {(links || []).map((lnk) => (
+                                                                                                    <option key={lnk.id} value={lnk.id}>{linkLabelById?.[lnk.id] || lnk.id}</option>
+                                                                                                ))}
+                                                                                            </Select>
+                                                                                        </label>
+                                                                                    )}
+                                                                                </div>
+                                                                            ) : cIsFade ? (
+                                                                                <div style={{ display: 'grid', gap: 6 }}>
+                                                                                    <label>
+                                                                                        <div style={{ fontSize: 11, opacity: 0.8 }}>Fade Target</div>
+                                                                                        <Select
+                                                                                            value={c.targetKind || 'node'}
+                                                                                            onChange={(e) => patchChildStep(a.id, i, ci, { targetKind: e.target.value || 'node' })}
+                                                                                        >
+                                                                                            <option value='node'>Node</option>
+                                                                                            <option value='room'>Room</option>
+                                                                                            <option value='group'>Group</option>
+                                                                                            <option value='deck'>Deck</option>
+                                                                                            <option value='all'>All</option>
+                                                                                        </Select>
+                                                                                    </label>
+
+                                                                                    {((c.targetKind || 'node') === 'node') && (
+                                                                                        <label>
+                                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Node</div>
+                                                                                            <Select
+                                                                                                value={c.nodeId || ''}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { nodeId: e.target.value || null })}
+                                                                                            >
+                                                                                                <option value=''> (none) </option>
+                                                                                                {nodes.map((n) => (
+                                                                                                    <option key={n.id} value={n.id}>{n.label}</option>
+                                                                                                ))}
+                                                                                            </Select>
+                                                                                        </label>
+                                                                                    )}
+
+                                                                                    {((c.targetKind || 'node') === 'room') && (
+                                                                                        <label>
+                                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Room</div>
+                                                                                            <Select
+                                                                                                value={c.roomId || ''}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { roomId: e.target.value || '' })}
+                                                                                            >
+                                                                                                <option value=''> (none) </option>
+                                                                                                <option value='__ALL__'>(all rooms)</option>
+                                                                                                {rooms.map((r) => (
+                                                                                                    <option key={r.id} value={r.id}>{r.name || r.id}</option>
+                                                                                                ))}
+                                                                                            </Select>
+                                                                                        </label>
+                                                                                    )}
+
+                                                                                    {((c.targetKind || 'node') === 'group') && (
+                                                                                        <label>
+                                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Group</div>
+                                                                                            <Select
+                                                                                                value={c.groupId || ''}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { groupId: e.target.value || '' })}
+                                                                                            >
+                                                                                                <option value=''> (none) </option>
+                                                                                                <option value='__ALL__'>(all groups)</option>
+                                                                                                {(groups || []).map((g) => (
+                                                                                                    <option key={g.id} value={g.id}>{g.name || g.id}</option>
+                                                                                                ))}
+                                                                                            </Select>
+                                                                                        </label>
+                                                                                    )}
+
+                                                                                    {((c.targetKind || 'node') === 'deck') && (
+                                                                                        <label>
+                                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Deck</div>
+                                                                                            <Select
+                                                                                                value={c.deckId || ''}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { deckId: e.target.value || '' })}
+                                                                                            >
+                                                                                                <option value=''> (none) </option>
+                                                                                                <option value='__ALL__'>(all decks)</option>
+                                                                                                {decks.map((d) => (
+                                                                                                    <option key={d.id} value={d.id}>{d.name || d.id}</option>
+                                                                                                ))}
+                                                                                            </Select>
+                                                                                        </label>
+                                                                                    )}
+
+                                                                                    {((c.targetKind || 'node') === 'all') && (
+                                                                                        <div style={{
+                                                                                            fontSize: 12,
+                                                                                            opacity: 0.8,
+                                                                                            padding: '5px 8px',
+                                                                                            borderRadius: 10,
+                                                                                            border: '1px solid rgba(255,255,255,0.12)',
+                                                                                            background: 'rgba(255,255,255,0.03)',
+                                                                                        }}>All scene objects</div>
+                                                                                    )}
+                                                                                </div>
                                                                             ) : cIsGroupVis ? (
                                                                                 <label>
                                                                                     <div style={{ fontSize: 11, opacity: 0.8 }}>Target Group</div>
@@ -3569,6 +4029,71 @@ const ActionsPanelInner = React.memo(function ActionsPanelInner({ ctx }) {
                                                                                     />
                                                                                 </label>
 
+
+                                                                                {cIsFade && (
+                                                                                    <div style={{ display: 'grid', gap: 6 }}>
+                                                                                        <label>
+                                                                                            <div style={{ fontSize: 11, opacity: 0.8 }}>Fade Mode</div>
+                                                                                            <Select
+                                                                                                value={c.fadeAction || 'toggle'}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { fadeAction: e.target.value || 'toggle' })}
+                                                                                            >
+                                                                                                <option value='toggle'>Toggle</option>
+                                                                                                <option value='in'>Fade In</option>
+                                                                                                <option value='out'>Fade Out</option>
+                                                                                                <option value='set'>Set Opacity</option>
+                                                                                            </Select>
+                                                                                        </label>
+
+                                                                                        {(String(c.fadeAction || 'toggle') === 'set') && (
+                                                                                            <label>
+                                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Opacity (0–1)</div>
+                                                                                                <SmoothNumberInput
+                                                                                                    step={0.05}
+                                                                                                    value={c.alpha ?? 1}
+                                                                                                    onCommit={(v) => patchChildStep(a.id, i, ci, { alpha: Math.max(0, Math.min(1, Number(v) || 0)) })}
+                                                                                                />
+                                                                                            </label>
+                                                                                        )}
+
+                                                                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                                                                                            <label>
+                                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Duration In (s)</div>
+                                                                                                <SmoothNumberInput
+                                                                                                    step={0.1}
+                                                                                                    value={c.durationIn ?? 0.6}
+                                                                                                    onCommit={(v) => patchChildStep(a.id, i, ci, { durationIn: Math.max(0, Number(v) || 0) })}
+                                                                                                />
+                                                                                            </label>
+                                                                                            <label>
+                                                                                                <div style={{ fontSize: 11, opacity: 0.8 }}>Duration Out (s)</div>
+                                                                                                <SmoothNumberInput
+                                                                                                    step={0.1}
+                                                                                                    value={c.durationOut ?? 0.6}
+                                                                                                    onCommit={(v) => patchChildStep(a.id, i, ci, { durationOut: Math.max(0, Number(v) || 0) })}
+                                                                                                />
+                                                                                            </label>
+                                                                                        </div>
+
+                                                                                        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                            <input
+                                                                                                type='checkbox'
+                                                                                                checked={(c.includeNodesInRooms ?? true) !== false}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { includeNodesInRooms: e.target.checked })}
+                                                                                            />
+                                                                                            <span style={{ fontSize: 11, opacity: 0.85 }}>Include nodes in rooms</span>
+                                                                                        </label>
+
+                                                                                        <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                                                                            <input
+                                                                                                type='checkbox'
+                                                                                                checked={(c.force ?? true) !== false}
+                                                                                                onChange={(e) => patchChildStep(a.id, i, ci, { force: e.target.checked })}
+                                                                                            />
+                                                                                            <span style={{ fontSize: 11, opacity: 0.85 }}>Force fade</span>
+                                                                                        </label>
+                                                                                    </div>
+                                                                                )}
                                                                                 {(cIsRoomVis || cIsGroupVis) && (
                                                                                     <label>
                                                                                         <div style={{ fontSize: 11, opacity: 0.8 }}>Visibility</div>
@@ -5469,7 +5994,7 @@ export default function Interactive3DNodeShowcase() {
     const [moveMode, setMoveMode] = useState(true);
     const [transformMode, setTransformMode] = useState("translate"); // 'translate' | 'rotate' | 'scale'
 // Production mode: hide all UI except bottom action buttons
-    const [prodMode, setProdMode] = useState(false);
+    const [prodMode, setProdMode] = useState(() => simulationConfig.showUI === false);
 
 // Show/hide on-screen Action Buttons layer (HUD) – handy to clear the view while editing
     const [hudButtonsVisible, setHudButtonsVisible] = useState(() => {
@@ -6026,8 +6551,32 @@ export default function Interactive3DNodeShowcase() {
     const [labelMode, setLabelMode] = useState("billboard"); // "billboard" | "3d" | "static"
     const [labelSize, setLabelSize] = useState(0.24);        // world units
 
-    const [showLights, setShowLights] = useState(true);
-    const [showLightBounds, setShowLightBounds] = useState(false);
+    // Persist Lights toggle so startup state matches last user choice.
+    const [showLights, setShowLights] = useState(() => {
+        try {
+            const v = localStorage.getItem("epic3d.showLights.v1");
+            if (v === null) return true;
+            return v !== "0";
+        } catch {
+            return true;
+        }
+    });
+    useEffect(() => {
+        try { localStorage.setItem("epic3d.showLights.v1", showLights ? "1" : "0"); } catch {}
+    }, [showLights]);
+
+    const [showLightBounds, setShowLightBounds] = useState(() => {
+        try {
+            const v = localStorage.getItem("epic3d.showLightBounds.v1");
+            if (v === null) return false;
+            return v === "1";
+        } catch {
+            return false;
+        }
+    });
+    useEffect(() => {
+        try { localStorage.setItem("epic3d.showLightBounds.v1", showLightBounds ? "1" : "0"); } catch {}
+    }, [showLightBounds]);
     const [showGround, setShowGround] = useState(() => {
         try {
             return localStorage.getItem("epic3d.showGround.v1") !== "0";
@@ -8772,6 +9321,97 @@ export default function Interactive3DNodeShowcase() {
             alert("Import failed: " + (err?.message || String(err)));
         }
     };
+    const didAutoImportRef = useRef(false);
+
+    useEffect(() => {
+        const autoUrl = resolveAutoSimulationZipUrl(simulationConfig);
+        if (!simulationConfig.autoSimulation || !autoUrl) return;
+
+        // React 18 StrictMode runs effects twice in dev; guard it.
+        if (didAutoImportRef.current) return;
+        didAutoImportRef.current = true;
+
+        let cancelled = false;
+
+        const fetchZipAsFile = async (zipUrl) => {
+            const busted = `${zipUrl}${zipUrl.includes("?") ? "&" : "?"}v=${Date.now()}`;
+
+            const res = await fetch(busted, { cache: "no-store" });
+            const buf = await res.arrayBuffer();
+
+            const contentType = res.headers.get("content-type") || "";
+            const byteLength = buf.byteLength;
+
+            console.info("AutoSimulation fetch:", {
+                url: res.url,
+                status: res.status,
+                statusText: res.statusText,
+                contentType,
+                byteLength,
+            });
+
+            if (!res.ok) {
+                throw new Error(
+                    `AutoSimulation fetch failed: HTTP ${res.status} ${res.statusText}\nURL: ${res.url}`
+                );
+            }
+
+            const headText = new TextDecoder("utf-8")
+                .decode(new Uint8Array(buf.slice(0, 160)))
+                .trimStart();
+
+            if (headText.startsWith("<!DOCTYPE") || headText.startsWith("<html")) {
+                throw new Error(
+                    `AutoSimulation URL returned HTML, not a ZIP.\nURL: ${res.url}\nFirst bytes: ${headText.slice(0, 160)}`
+                );
+            }
+
+            if (byteLength < 22) {
+                throw new Error(
+                    `AutoSimulation response too small to be a ZIP (bytes=${byteLength}).\nURL: ${res.url}`
+                );
+            }
+
+            const b = new Uint8Array(buf);
+            if (!(b[0] === 0x50 && b[1] === 0x4b)) {
+                throw new Error(
+                    `AutoSimulation response does not look like a ZIP (missing "PK" header).\nURL: ${res.url}\nFirst bytes: ${headText.slice(0, 160)}`
+                );
+            }
+
+            const nameFromUrl = new URL(res.url).pathname.split("/").pop() || "autoSimulation.zip";
+            const filename = nameFromUrl.toLowerCase().endsWith(".zip") ? nameFromUrl : "autoSimulation.zip";
+
+            const blob = new Blob([buf], { type: "application/zip" });
+            return new File([blob], filename, { type: "application/zip" });
+        };
+
+        (async () => {
+            try {
+                const file = await fetchZipAsFile(autoUrl);
+                if (cancelled) return;
+
+                await importPackage(file);
+                if (cancelled) return;
+
+                if (typeof simulationConfig.showUI === "boolean") {
+                    setProdMode(!simulationConfig.showUI);
+                }
+
+                console.info("✅ Auto simulation imported:", autoUrl);
+            } catch (err) {
+                console.error("Auto simulation import failed:", err);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+
+
 // Accept BOTH [x,y,z] and THREE.Vector3-ish inputs
     const toArr3 = (v) => {
         if (!v) return null;
@@ -9040,6 +9680,56 @@ export default function Interactive3DNodeShowcase() {
             const roomClamped = clampNodeToRoomBounds(node, pos);
             const deckClamped = clampNodeToPictureDecks(node, roomClamped);
             setNode(target.id, { position: deckClamped });
+            return;
+        }
+
+        // ----- ROOM VERTEX MOVE (vertex editing) -----
+        // When a vertex handle is dragged, we update only that vertex in room.poly (local XZ),
+        // keeping room.center stable so the whole room does NOT jump/recenter.
+        if (target?.type === "roomVertex" || (target?.type === "room" && target?.vertexIndex != null)) {
+            const roomId = target.roomId ?? target.id;
+            const rawIdx = target.index ?? target.vertexIndex ?? target.vertIndex;
+            const vIdx = Number.isFinite(Number(rawIdx)) ? Math.floor(Number(rawIdx)) : null;
+            if (!roomId || vIdx == null) return;
+
+            setRooms((prev) =>
+                prev.map((r) => {
+                    if (r.id !== roomId) return r;
+                    const poly = Array.isArray(r.poly) ? r.poly.map((p) => [Number(p?.[0]) || 0, Number(p?.[1]) || 0]) : null;
+                    if (!poly || poly.length < 3 || vIdx < 0 || vIdx >= poly.length) return r;
+
+                    const size = r.size || [3, 1.6, 2.2];
+                    const h = Number(size[1]) || 1.6;
+                    const center = r.center || [0, h * 0.5, 0];
+                    const rot = r.rotation || [0, 0, 0];
+
+                    const q = new THREE.Quaternion().setFromEuler(
+                        new THREE.Euler(rot[0] || 0, rot[1] || 0, rot[2] || 0, "XYZ")
+                    );
+                    q.invert();
+
+                    const local = new THREE.Vector3(pos[0] - center[0], pos[1] - center[1], pos[2] - center[2]).applyQuaternion(q);
+
+                    const nextPoly = poly.map((p, i) => (i === vIdx ? [local.x, local.z] : p));
+
+                    // keep room.size large enough to cover the edited polygon (used by bounds/clamping elsewhere)
+                    let minX = Infinity;
+                    let maxX = -Infinity;
+                    let minZ = Infinity;
+                    let maxZ = -Infinity;
+                    for (const [x, z] of nextPoly) {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (z < minZ) minZ = z;
+                        if (z > maxZ) maxZ = z;
+                    }
+                    const halfW = Math.max(Math.abs(minX), Math.abs(maxX));
+                    const halfD = Math.max(Math.abs(minZ), Math.abs(maxZ));
+                    const nextSize = [Math.max(0.05, halfW * 2), size[1], Math.max(0.05, halfD * 2)];
+
+                    return { ...r, poly: nextPoly, size: nextSize };
+                })
+            );
             return;
         }
 
@@ -11746,6 +12436,255 @@ This will UNGROUP its rooms/nodes (it won’t delete them).`
 
             const runPkt = () => {
 
+                // Packet Tracer-style routing (source → target)
+                const pktMode = String(step.packetMode || '').toLowerCase();
+                const srcId = step.sourceNodeId || step.sourceId || '';
+                const dstId = step.targetNodeId || step.targetId || '';
+                const cast = String(step.cast || step.castMode || 'unicast').toLowerCase();
+                const wantsTrace = step.type === 'packetSend' && (pktMode === 'trace' || pktMode === 'tracer' || (srcId && dstId));
+
+                if (wantsTrace && srcId && dstId) {
+                    const nodesById = new Map((nodes || []).map((n) => [n.id, n]));
+                    const linksArr = Array.isArray(links) ? links : [];
+                    const linksById = new Map(linksArr.map((l) => [l.id, l]));
+
+                    const outAdj = new Map();
+                    const inAdj = new Map();
+                    for (const l of linksArr) {
+                        if (!l || !l.from || !l.to) continue;
+                        if (!outAdj.has(l.from)) outAdj.set(l.from, []);
+                        outAdj.get(l.from).push({ to: l.to, link: l });
+                        if (!inAdj.has(l.to)) inAdj.set(l.to, []);
+                        inAdj.get(l.to).push({ from: l.from, link: l });
+                    }
+
+                    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+                    const dist3 = (a, b) => {
+                        const aa = a && a.position ? a.position : a;
+                        const bb = b && b.position ? b.position : b;
+                        const ax = (aa && aa[0]) ?? aa?.x ?? 0;
+                        const ay = (aa && aa[1]) ?? aa?.y ?? 0;
+                        const az = (aa && aa[2]) ?? aa?.z ?? 0;
+                        const bx = (bb && bb[0]) ?? bb?.x ?? 0;
+                        const by = (bb && bb[1]) ?? bb?.y ?? 0;
+                        const bz = (bb && bb[2]) ?? bb?.z ?? 0;
+                        const dx = ax - bx, dy = ay - by, dz = az - bz;
+                        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    };
+
+                    const getTravelSec = (link) => {
+                        if (!link) return 1.0;
+                        const p = link.packet || {};
+                        const t = (p.timing && p.timing.travel != null) ? p.timing.travel : (p.travel != null ? p.travel : null);
+                        const tt = Number(t);
+                        if (Number.isFinite(tt) && tt > 0) return clamp(tt, 0.05, 8);
+                        // fallback: based on node distance (units/sec tuned for nice pacing)
+                        const a = nodesById.get(link.from);
+                        const b = nodesById.get(link.to);
+                        const d = dist3(a?.position, b?.position);
+                        const sec = d / 2.4;
+                        return clamp(sec, 0.25, 4.0);
+                    };
+
+                    const normalizePacketStyle = (styleRaw) => {
+                        const s0 = String(styleRaw || '').toLowerCase();
+                        let s = s0;
+                        if (s === 'square') s = 'cube';
+                        if (s === 'shard') s = 'diamond';
+                        if (s === 'static') s = 'cube';
+                        if (s === 'comet') s = 'orb';
+                        return s || null;
+                    };
+
+                    const getPacketPresetFromLink = (link) => {
+                        if (!link) return null;
+                        const p = link.packet || {};
+                        const v = p.visual || {};
+                        const styleRaw = p.style || p.packetStyle || v.shape || v.packetShape || v.style || null;
+                        const style = styleRaw ? normalizePacketStyle(styleRaw) : null;
+                        const text = p.text || p.label || v.text || null;
+                        const color = p.color || v.color || null;
+                        const size = (p.size != null ? p.size : (v.size != null ? v.size : null));
+                        const opacity = (p.opacity != null ? p.opacity : null);
+                        if (style == null && text == null && color == null && size == null && opacity == null) return null;
+                        return { style, text, color, size, opacity };
+                    };
+
+                    let packetPreset = null;
+                    {
+                        const profileId = step.packetProfileLinkId || step.packetLinkId || step.profileLinkId || step.linkId || null;
+                        if (profileId && linksById.get(profileId)) {
+                            packetPreset = getPacketPresetFromLink(linksById.get(profileId));
+                        }
+                    }
+
+                    const baseDelay = Math.max(0, Number(step.delay ?? 0) || 0);
+                    const clearOnStart = !!step.clearExisting;
+
+                    const dispatchOnLink = (linkId, tStart, travelSec, packetPreset) => {
+                        const run = () => {
+                            try {
+                                const preset = (packetPreset && typeof packetPreset === 'object') ? packetPreset : null;
+                                const presetOverrides = preset ? {
+                                    packetPreset: preset,
+                                    packetStyle: preset.style,
+                                    style: preset.style,
+                                    text: preset.text,
+                                    color: preset.color,
+                                    size: preset.size,
+                                    opacity: preset.opacity,
+                                } : {};
+
+                                window.dispatchEvent(new CustomEvent('EPIC3D_PACKET_CTRL', {
+                                    detail: {
+                                        action: 'start',
+                                        linkId,
+                                        allowNonPacket: true,
+                                        overrides: {
+                                            count: 1,
+                                            interval: 0,
+                                            loop: false,
+                                            clearOnStart,
+                                            travel: travelSec,
+                                            delay: 0,
+                                            ...presetOverrides,
+                                        },
+                                    },
+                                }));
+                            } catch (err) {
+                                if (process.env.NODE_ENV !== 'production') console.warn('Packet tracer dispatch failed', err);
+                            }
+                        };
+                        if (tStart <= 0) run();
+                        else setTimeout(run, tStart * 1000);
+                    };
+
+                    // Unicast: shortest path by hop count
+                    const sendUnicast = () => {
+                        const prev = new Map();
+                        const q = [srcId];
+                        prev.set(srcId, null);
+                        while (q.length) {
+                            const u = q.shift();
+                            if (u === dstId) break;
+                            const outs = outAdj.get(u) || [];
+                            for (const e of outs) {
+                                const v = e.to;
+                                if (!v || prev.has(v)) continue;
+                                prev.set(v, { p: u, linkId: e.link?.id });
+                                q.push(v);
+                            }
+                        }
+                        if (!prev.has(dstId)) return false;
+                        const hops = [];
+                        let cur = dstId;
+                        while (cur && cur !== srcId) {
+                            const info = prev.get(cur);
+                            if (!info || !info.linkId) break;
+                            hops.push({ linkId: info.linkId, from: info.p, to: cur });
+                            cur = info.p;
+                        }
+                        hops.reverse();
+
+                        if (!packetPreset && hops.length > 0) {
+                            const firstLink = linksById.get(hops[0].linkId);
+                            packetPreset = getPacketPresetFromLink(firstLink);
+                        }
+
+                        let t = baseDelay;
+                        for (const h of hops) {
+                            const link = linksById.get(h.linkId);
+                            const travel = getTravelSec(link);
+                            dispatchOnLink(h.linkId, t, travel, packetPreset);
+                            t += travel;
+                        }
+                        return hops.length > 0;
+                    };
+
+                    // Multicast: flood-forward like Packet Tracer (branch at intermediate nodes).
+                    // We keep it safe via maxEdges/maxHops and basic loop-avoidance.
+                    const sendMulticast = () => {
+                        const dist = new Map();
+                        dist.set(dstId, 0);
+                        const q = [dstId];
+                        while (q.length) {
+                            const v = q.shift();
+                            const dv = dist.get(v) || 0;
+                            const ins = inAdj.get(v) || [];
+                            for (const e of ins) {
+                                const u = e.from;
+                                if (!u || dist.has(u)) continue;
+                                dist.set(u, dv + 1);
+                                q.push(u);
+                            }
+                        }
+                        if (!dist.has(srcId)) return false;
+
+                        if (!packetPreset) {
+                            const outs0 = outAdj.get(srcId) || [];
+                            // prefer a link that already has packet settings
+                            const preferred = outs0.find((e) => e?.link?.packet) || outs0[0];
+                            packetPreset = getPacketPresetFromLink(preferred?.link);
+                        }
+
+                        const maxEdges = Math.max(20, Math.min(2400, Number(step.maxEdges ?? 640) || 640));
+                        const baseHops = dist.get(srcId) || 0;
+                        const maxHops = Math.max(1, Math.min(64, Number(step.maxHops ?? (baseHops + 10)) || (baseHops + 10)));
+
+                        let scheduled = 0;
+                        const bestHops = new Map();
+                        const qq = [{ node: srcId, t: baseDelay, prev: null, hops: 0 }];
+                        bestHops.set(srcId, 0);
+
+                        while (qq.length && scheduled < maxEdges) {
+                            const st = qq.shift();
+                            const u = st.node;
+                            if (u === dstId) continue;
+                            if (st.hops >= maxHops) continue;
+
+                            const outs = outAdj.get(u) || [];
+                            const du = dist.get(u);
+                            const sorted = outs.slice().sort((a, b) => {
+                                const da = dist.has(a.to) ? dist.get(a.to) : 1e9;
+                                const db = dist.has(b.to) ? dist.get(b.to) : 1e9;
+                                // prefer routes that are closer-to-target (but still allow detours)
+                                if (da !== db) return da - db;
+                                return String(a.to).localeCompare(String(b.to));
+                            });
+
+                            for (const e of sorted) {
+                                const v = e.to;
+                                if (!v) continue;
+                                if (st.prev && v === st.prev) continue; // avoid immediate bounce-back
+
+                                // Optional prune: require reachability to target.
+                                // Default behavior: still allow detours, but only if destination can reach target OR user explicitly wants full flood.
+                                const floodAll = (step.multicastFloodAll ?? true) === true;
+                                if (!floodAll && !dist.has(v)) continue;
+
+                                const nextHops = st.hops + 1;
+                                const best = bestHops.get(v);
+                                if (best != null && best <= nextHops) continue;
+                                bestHops.set(v, nextHops);
+
+                                const link = e.link;
+                                const travel = getTravelSec(link);
+                                dispatchOnLink(link.id, st.t, travel, packetPreset);
+                                scheduled++;
+                                qq.push({ node: v, t: st.t + travel, prev: u, hops: nextHops });
+                                if (scheduled >= maxEdges) break;
+                            }
+                        }
+                        return scheduled > 0;
+                    };
+
+                    const ok = (cast === 'multicast') ? sendMulticast() : sendUnicast();
+                    if (!ok && process.env.NODE_ENV !== 'production') {
+                        console.warn('Packet tracer: no path from', srcId, 'to', dstId);
+                    }
+                    return;
+                }
+
                 const linkId = step.linkId || "__ALL_PACKET__";
 
                 const isAll = linkId === "__ALL_PACKET__" || linkId === "__ALL__" || linkId === "*";
@@ -11766,7 +12705,7 @@ This will UNGROUP its rooms/nodes (it won’t delete them).`
 
                             burstsLimit: Math.max(0, Math.round(Number(step.burstsLimit ?? 0) || 0)),
 
-                            clearExisting: !!step.clearExisting,
+                            clearOnStart: !!step.clearExisting,
 
                         };
 
@@ -11856,6 +12795,74 @@ This will UNGROUP its rooms/nodes (it won’t delete them).`
 
             else setTimeout(runPkt, startSec * 1000);
 
+        };
+
+
+        const scheduleFadeStep = (step, startSec) => {
+            const runFade = () => {
+                try {
+                    const action = String(step.fadeAction || step.action || step.mode || 'toggle').toLowerCase().trim();
+                    const targetKind = String(step.targetKind || 'node');
+
+                    const detail = {
+                        action: action || 'toggle',
+                        force: (step.force ?? true) !== false,
+                        includeNodesInRooms: (step.includeNodesInRooms ?? true) !== false,
+                    };
+
+                    // Only include durations when user actually set a positive value.
+                    // (Many numeric inputs serialize as 0 by default; 0 would make fades instant.)
+                    const numPos = (v) => {
+                        if (v === '' || v == null) return null;
+                        const n = Number(v);
+                        if (!Number.isFinite(n)) return null;
+                        return n > 0 ? n : null;
+                    };
+
+                    const dIn = numPos(step.durationIn);
+                    const dOut = numPos(step.durationOut);
+                    const dAny = numPos(step.duration);
+                    if (dIn != null) detail.durationIn = dIn;
+                    if (dOut != null) detail.durationOut = dOut;
+                    if (dAny != null) detail.duration = dAny;
+                    if (detail.action === 'set') detail.alpha = Math.max(0, Math.min(1, Number(step.alpha ?? step.opacity ?? 1) || 0));
+
+                    const isAllToken = (v) => v === '__ALL__' || v === '__ALL_GROUP__' || v === '__ALL_PACKET__' || v === '*' || v === '__ALL_DECK__';
+
+                    if (targetKind === 'all') {
+                        detail.all = true;
+                    } else if (targetKind === 'node') {
+                        if (isAllToken(step.nodeId)) detail.nodeIds = (nodes || []).map((n) => n.id);
+                        else if (step.nodeId) detail.nodeId = step.nodeId;
+                    } else if (targetKind === 'room') {
+                        if (isAllToken(step.roomId)) detail.roomIds = (rooms || []).map((r) => r.id);
+                        else if (step.roomId) detail.roomId = step.roomId;
+                    } else if (targetKind === 'deck') {
+                        if (isAllToken(step.deckId)) detail.deckIds = (decks || []).map((d) => d.id);
+                        else if (step.deckId) detail.deckId = step.deckId;
+                    } else if (targetKind === 'group') {
+                        const gid = step.groupId;
+                        if (!gid) return;
+                        const gids = isAllToken(gid) ? (groups || []).map((g) => g.id) : [gid];
+                        if (gids.length === 0) return;
+                        detail.groupIds = gids;
+                        if (!isAllToken(gid)) detail.groupId = gid;
+
+                        // Also expand to explicit roomIds/nodeIds so nodes inside grouped rooms fade too
+                        const roomIds = (rooms || []).filter((r) => r.groupId && gids.includes(r.groupId)).map((r) => r.id);
+                        const nodeIds = (nodes || []).filter((n) => n.groupId && gids.includes(n.groupId)).map((n) => n.id);
+                        if (roomIds.length) detail.roomIds = Array.from(new Set([...(detail.roomIds || []), ...roomIds]));
+                        if (nodeIds.length) detail.nodeIds = Array.from(new Set([...(detail.nodeIds || []), ...nodeIds]));
+                    }
+
+                    window.dispatchEvent(new CustomEvent('EPIC3D_FADE_CTRL', { detail }));
+                } catch (err) {
+                    if (process.env.NODE_ENV !== 'production') console.warn('Fade action dispatch failed', err);
+                }
+            };
+
+            if (startSec <= 0) runFade();
+            else setTimeout(runFade, startSec * 1000);
         };
 
         const scheduleNodeStep = (step, startSec) => {
@@ -11976,34 +12983,94 @@ This will UNGROUP its rooms/nodes (it won’t delete them).`
             }
 
             const runRoom = () => {
-                const r = rooms.find((x) => x.id === step.roomId);
-                if (!r) return;
-                const mode = step.mode || step.value || 'toggle';
-                const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !r.hidden;
+                const mode = String(step.mode || step.value || 'toggle').toLowerCase().trim();
+                const isAll = step.roomId === '__ALL__' || step.roomId === '*' || step.roomId === '__ALL_ROOM__';
+                const targetIds = isAll ? (rooms || []).map((x) => x.id) : [step.roomId];
+                if (targetIds.length === 0) return;
 
-                setRooms((prev) => prev.map((rm) => (rm.id === r.id ? { ...rm, hidden: nextHidden } : rm)));
+                const fadeDurRaw = (step.fadeDuration ?? step.transitionDuration ?? step.durationFade ?? step.fadeSeconds ?? null);
+                const fadeDur = (fadeDurRaw === '' || fadeDurRaw == null)
+                    ? 0.6
+                    : Math.max(0.01, Number(fadeDurRaw) || 0.6);
 
-                if (nextHidden) {
-                    // clear selection if it becomes hidden
+                const nowRooms = rooms || [];
+                const nextHiddenById = new Map();
+                for (const rid of targetIds) {
+                    const r = nowRooms.find((x) => x.id === rid);
+                    if (!r) continue;
+                    const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !r.hidden;
+                    if (nextHidden !== r.hidden) nextHiddenById.set(rid, nextHidden);
+                }
+
+                const toHide = [...nextHiddenById.entries()].filter(([, h]) => h).map(([id]) => id);
+                const toShow = [...nextHiddenById.entries()].filter(([, h]) => !h).map(([id]) => id);
+
+                const dispatchFade = (detail) => {
+                    try {
+                        window.dispatchEvent(new CustomEvent('EPIC3D_FADE_CTRL', { detail }));
+                    } catch (err) {
+                        if (process.env.NODE_ENV !== 'production') console.warn('Room fade dispatch failed', err);
+                    }
+                };
+
+                // Hide: fade first, then actually set room.hidden so SceneInner unmounts it.
+                if (toHide.length > 0) {
+                    // Clear selection immediately (avoid interacting with a fading-out entity)
                     setSelected((sel) => {
                         if (!sel) return sel;
-                        if (sel.type === 'room' && sel.id === r.id) return null;
+                        if (sel.type === 'room' && toHide.includes(sel.id)) return null;
                         if (sel.type === 'node') {
                             const n = nodes.find((x) => x.id === sel.id);
-                            if (n && n.roomId === r.id) return null;
+                            if (n && n.roomId && toHide.includes(n.roomId)) return null;
                         }
                         return sel;
                     });
                     setMultiSel((prev) =>
                         (prev || []).filter((it) => {
-                            if (it.type === 'room') return it.id !== r.id;
+                            if (it.type === 'room') return !toHide.includes(it.id);
                             if (it.type === 'node') {
                                 const n = nodes.find((x) => x.id === it.id);
-                                return !(n && n.roomId === r.id);
+                                return !(n && n.roomId && toHide.includes(n.roomId));
                             }
                             return true;
                         })
                     );
+
+                    dispatchFade({
+                        action: 'out',
+                        force: true,
+                        includeNodesInRooms: true,
+                        roomIds: toHide,
+                        durationOut: fadeDur,
+                    });
+
+                    setTimeout(() => {
+                        setRooms((prev) => prev.map((rm) => (toHide.includes(rm.id) ? { ...rm, hidden: true } : rm)));
+                    }, Math.round(fadeDur * 1000));
+                }
+
+                // Show: unhide first (mount), then snap alpha to 0 and fade in.
+                if (toShow.length > 0) {
+                    setRooms((prev) => prev.map((rm) => (toShow.includes(rm.id) ? { ...rm, hidden: false } : rm)));
+
+                    setTimeout(() => {
+                        // Snap to invisible, then fade in (requires nodes to be mounted first)
+                        dispatchFade({
+                            action: 'set',
+                            alpha: 0,
+                            force: true,
+                            includeNodesInRooms: true,
+                            roomIds: toShow,
+                            duration: 0.0001,
+                        });
+                        dispatchFade({
+                            action: 'in',
+                            force: true,
+                            includeNodesInRooms: true,
+                            roomIds: toShow,
+                            durationIn: fadeDur,
+                        });
+                    }, 0);
                 }
             };
 
@@ -12021,64 +13088,118 @@ This will UNGROUP its rooms/nodes (it won’t delete them).`
             }
 
             const runGroup = () => {
-                const mode = step.mode || step.value || 'toggle';
+                const mode = String(step.mode || step.value || 'toggle').toLowerCase().trim();
 
-                // Determine which group IDs will be hidden after this step (best-effort)
-                let willHideIds = new Set();
-                if (step.groupId === '__ALL__') {
-                    for (const g of (groups || [])) {
-                        const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !g.hidden;
-                        if (nextHidden) willHideIds.add(g.id);
-                    }
-                } else {
-                    const g = (groups || []).find((x) => x.id === step.groupId);
-                    if (!g) return;
+                const isAll = step.groupId === '__ALL__' || step.groupId === '*' || step.groupId === '__ALL_GROUP__';
+                const targetIds = isAll ? (groups || []).map((g) => g.id) : [step.groupId];
+                if (targetIds.length === 0) return;
+
+                const fadeDurRaw = (step.fadeDuration ?? step.transitionDuration ?? step.durationFade ?? step.fadeSeconds ?? null);
+                const fadeDur = (fadeDurRaw === '' || fadeDurRaw == null)
+                    ? 0.6
+                    : Math.max(0.01, Number(fadeDurRaw) || 0.6);
+
+                const nowGroups = groups || [];
+                const nextHiddenById = new Map();
+                for (const gid of targetIds) {
+                    const g = nowGroups.find((x) => x.id === gid);
+                    if (!g) continue;
                     const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !g.hidden;
-                    if (nextHidden) willHideIds.add(g.id);
+                    if (nextHidden !== g.hidden) nextHiddenById.set(gid, nextHidden);
                 }
 
-                setGroups((prev) => {
-                    const list = prev || [];
-                    if (step.groupId === '__ALL__') {
-                        return list.map((g) => {
-                            const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !g.hidden;
-                            return { ...g, hidden: nextHidden };
-                        });
-                    }
-                    const cur = list.find((x) => x.id === step.groupId);
-                    if (!cur) return prev;
-                    const nextHidden = (mode === 'hide') ? true : (mode === 'show') ? false : !cur.hidden;
-                    return list.map((g) => (g.id === step.groupId ? { ...g, hidden: nextHidden } : g));
-                });
+                const toHide = [...nextHiddenById.entries()].filter(([, h]) => h).map(([id]) => id);
+                const toShow = [...nextHiddenById.entries()].filter(([, h]) => !h).map(([id]) => id);
 
-                if (willHideIds.size > 0) {
-                    // Clear selection if it becomes hidden
+                const dispatchFade = (detail) => {
+                    try {
+                        window.dispatchEvent(new CustomEvent('EPIC3D_FADE_CTRL', { detail }));
+                    } catch (err) {
+                        if (process.env.NODE_ENV !== 'production') console.warn('Group fade dispatch failed', err);
+                    }
+                };
+
+                const roomIdsForGroups = (gids) => (rooms || []).filter((r) => r.groupId && gids.includes(r.groupId)).map((r) => r.id);
+                const nodeIdsForGroups = (gids) => (nodes || []).filter((n) => n.groupId && gids.includes(n.groupId)).map((n) => n.id);
+
+                // Hide: fade first while group is still rendered, then set g.hidden so renderNodes/renderRooms drop it.
+                if (toHide.length > 0) {
+                    const roomIds = roomIdsForGroups(toHide);
+                    const nodeIds = nodeIdsForGroups(toHide);
+
+                    // Clear selection immediately
                     setSelected((sel) => {
                         if (!sel) return sel;
                         if (sel.type === 'room') {
                             const r = rooms.find((x) => x.id === sel.id);
-                            if (r && r.groupId && willHideIds.has(r.groupId)) return null;
+                            if (r && r.groupId && toHide.includes(r.groupId)) return null;
                         }
                         if (sel.type === 'node') {
                             const n = nodes.find((x) => x.id === sel.id);
-                            if (n && n.groupId && willHideIds.has(n.groupId)) return null;
+                            if (n && n.groupId && toHide.includes(n.groupId)) return null;
+                            // Also clear nodes living in rooms that are in the group
+                            if (n && n.roomId && roomIds.includes(n.roomId)) return null;
                         }
                         return sel;
                     });
-
                     setMultiSel((prev) =>
                         (prev || []).filter((it) => {
                             if (it.type === 'room') {
                                 const r = rooms.find((x) => x.id === it.id);
-                                return !(r && r.groupId && willHideIds.has(r.groupId));
+                                return !(r && r.groupId && toHide.includes(r.groupId));
                             }
                             if (it.type === 'node') {
                                 const n = nodes.find((x) => x.id === it.id);
-                                return !(n && n.groupId && willHideIds.has(n.groupId));
+                                if (n && n.groupId && toHide.includes(n.groupId)) return false;
+                                if (n && n.roomId && roomIds.includes(n.roomId)) return false;
                             }
                             return true;
                         })
                     );
+
+                    dispatchFade({
+                        action: 'out',
+                        force: true,
+                        includeNodesInRooms: true,
+                        groupIds: toHide,
+                        roomIds,
+                        nodeIds,
+                        durationOut: fadeDur,
+                    });
+
+                    setTimeout(() => {
+                        setGroups((prev) => prev.map((g) => (toHide.includes(g.id) ? { ...g, hidden: true } : g)));
+                    }, Math.round(fadeDur * 1000));
+                }
+
+                // Show: unhide first (mount), then snap alpha to 0 and fade in.
+                if (toShow.length > 0) {
+                    setGroups((prev) => prev.map((g) => (toShow.includes(g.id) ? { ...g, hidden: false } : g)));
+
+                    const roomIds = roomIdsForGroups(toShow);
+                    const nodeIds = nodeIdsForGroups(toShow);
+
+                    setTimeout(() => {
+                        dispatchFade({
+                            action: 'set',
+                            alpha: 0,
+                            force: true,
+                            includeNodesInRooms: true,
+                            groupIds: toShow,
+                            roomIds,
+                            nodeIds,
+                            duration: 0.0001,
+                        });
+                        dispatchFade({
+                            action: 'in',
+                            force: true,
+                            includeNodesInRooms: true,
+                            groupIds: toShow,
+                            roomIds,
+                            nodeIds,
+                            durationIn: fadeDur,
+                        });
+                    }, 0);
                 }
             };
 
@@ -12142,6 +13263,11 @@ This will UNGROUP its rooms/nodes (it won’t delete them).`
                 parentStart = delay;
                 schedulePacketStep(s, parentStart);
             }
+            // ---------- Scene fade steps (absolute timing) ----------
+            else if (s.type === 'fade') {
+                parentStart = delay;
+                scheduleFadeStep(s, parentStart);
+            }
             // ---------- Room visibility steps (absolute timing) ----------
             else if (s.type === 'setRoomVisible') {
                 parentStart = delay;
@@ -12171,6 +13297,8 @@ This will UNGROUP its rooms/nodes (it won’t delete them).`
                         scheduleWireStep(c, childStart);
                     } else if (c.type === "packetSend" || c.type === "packetStop") {
                         schedulePacketStep(c, childStart);
+                    } else if (c.type === 'fade') {
+                        scheduleFadeStep(c, childStart);
                     } else if (c.type === 'setRoomVisible') {
                         scheduleRoomStep(c, childStart);
                     } else if (c.type === 'setGroupVisible') {
@@ -12197,6 +13325,7 @@ This will UNGROUP its rooms/nodes (it won’t delete them).`
         nodes,
         links,
         groups,
+        decks,
         cameraPresets,
         runAction,
         keepLeftScroll,

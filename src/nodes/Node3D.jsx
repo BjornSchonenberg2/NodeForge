@@ -1,5 +1,5 @@
 // src/nodes/Node3D.jsx
-import React, { memo, forwardRef, useEffect, useMemo, useRef, useState } from "react";
+import React, {memo, forwardRef, useEffect, useMemo, useRef, useState, useCallback} from "react";
 import * as THREE from "three";
 import { useFrame } from "@react-three/fiber";
 import { Billboard, Text, Html } from "@react-three/drei";
@@ -94,7 +94,8 @@ function lerpColorString(a, b, t) {
         return a || "#ffffff";
     }
 }
-function Dim({ a, b, text }) {
+function Dim({ a, b, text, opacityMul = 1 }) {
+    const op = clamp01(opacityMul);
     const geo = useMemo(() => {
         const g = new THREE.BufferGeometry();
         g.setAttribute(
@@ -108,7 +109,7 @@ function Dim({ a, b, text }) {
     return (
         <group>
             <line geometry={geo}>
-                <lineBasicMaterial transparent opacity={0.9} />
+                <lineBasicMaterial transparent opacity={0.9 * op} />
             </line>
             <Billboard position={mid}>
                 <Text
@@ -117,6 +118,8 @@ function Dim({ a, b, text }) {
                     anchorY="middle"
                     outlineWidth={0.004}
                     outlineColor="#000"
+                    material-transparent
+                    material-opacity={op}
                 >
                     {text}
                 </Text>
@@ -156,12 +159,203 @@ const Node3D = memo(
         const position = node?.position || [0, 0, 0];
         const rotation = node?.rotation || [0, 0, 0];
         const baseColor = node?.color || clusterColor(node?.cluster);
-
-
-
-
-        const visible = node?.visible !== false;
+        const wantsVisible = node?.visible !== false;
         const shapeHidden = !!(node?.hiddenMesh);
+
+        /* ---------- cinematic fade (optional) ---------- */
+        const fadeCfg = node?.fade || {};
+        // Default ON so action buttons can fade nodes without needing per-node enable flags.
+        const fadeEnabled = fadeCfg.enabled !== false;
+        const fadeInDur = Math.max(
+            0,
+            Number(
+                fadeCfg.fadeInDuration ??
+                fadeCfg.inDuration ??
+                fadeCfg.fadeIn ??
+                fadeCfg.in ??
+                0.6,
+            ) || 0.6,
+        );
+        const fadeOutDur = Math.max(
+            0,
+            Number(
+                fadeCfg.fadeOutDuration ??
+                fadeCfg.outDuration ??
+                fadeCfg.fadeOut ??
+                fadeCfg.out ??
+                0.6,
+            ) || 0.6,
+        );
+        const [fadeAlpha, _setFadeAlpha] = useState(1);
+        const fadeAlphaRef = useRef(1);
+        const setFadeAlpha = useCallback((v) => {
+            const nv = clamp01(v);
+            fadeAlphaRef.current = nv;
+            _setFadeAlpha(nv);
+        }, []);
+
+        const fadeAnimRef = useRef(null); // { from,to,dur,elapsed }
+        /* ---------- visibility fade (node.visible) ---------- */
+        const [visAlpha, _setVisAlpha] = useState(wantsVisible ? 1 : 0);
+        const visAlphaRef = useRef(wantsVisible ? 1 : 0);
+        const setVisAlpha = useCallback((v) => {
+            const nv = clamp01(v);
+            visAlphaRef.current = nv;
+            _setVisAlpha(nv);
+        }, []);
+        const visAnimRef = useRef(null); // { from,to,dur,elapsed }
+
+        // Animate when node.visible toggles, using the same fade durations.
+        useEffect(() => {
+            const cur = Math.max(0, Math.min(1, Number(visAlphaRef.current) || 0));
+            const to = wantsVisible ? 1 : 0;
+            if (Math.abs(cur - to) < 0.0001) return;
+
+            const dur = wantsVisible ? fadeInDur : fadeOutDur;
+            if (dur <= 0.0001) {
+                visAnimRef.current = null;
+                setVisAlpha(to);
+                return;
+            }
+            visAnimRef.current = { from: cur, to, dur, elapsed: 0 };
+        }, [wantsVisible, fadeInDur, fadeOutDur]);
+
+        // NOTE: we do NOT early-return on wantsVisible; we fade visAlpha instead.
+
+        // If user disables the feature, snap back to fully visible.
+        useEffect(() => {
+            if (!fadeEnabled) {
+                fadeAnimRef.current = null;
+                setFadeAlpha(1);
+            }
+        }, [fadeEnabled]);
+
+        // Listen for global fade events (so action buttons / scripts can trigger fades).
+        useEffect(() => {
+            const handler = (ev) => {
+                const d = ev?.detail || {};
+                if (!d) return;
+                if (!(fadeEnabled || d.force === true)) return;
+
+                const nodeId = node?.id;
+                if (!nodeId) return;
+
+                const __eq = (a, b) => String(a) === String(b);
+                const __in = (arr, v) => Array.isArray(arr) && arr.some((x) => __eq(x, v));
+
+                const roomId = node?.roomId;
+                const deckId = node?.deckId;
+
+                const groupId = node?.groupId;
+
+                const includeNodesInRooms = d.includeNodesInRooms !== false;
+
+                const matches = (() => {
+                    if (d.all === true) return true;
+
+                    // Direct node targeting
+                    if (d.nodeId != null && __eq(d.nodeId, nodeId)) return true;
+                    if (__in(d.nodeIds, nodeId)) return true;
+
+                    // Target nodes in a room
+                    if (includeNodesInRooms && roomId) {
+                        if (d.roomId != null && __eq(d.roomId, roomId)) return true;
+                        if (__in(d.roomIds, roomId)) return true;
+                    }
+
+                    // Target nodes in a deck
+                    if (deckId) {
+                        if (d.deckId != null && __eq(d.deckId, deckId)) return true;
+                        if (__in(d.deckIds, deckId)) return true;
+                    }
+
+                    // Target nodes in a group
+                    if (groupId) {
+                        if (d.groupId != null && __eq(d.groupId, groupId)) return true;
+                        if (__in(d.groupIds, groupId)) return true;
+                    }
+
+                    return false;
+                })();
+
+                if (!matches) return;
+
+                const type = String(ev?.type || "");
+                let action = String(d.action || d.type || "").toLowerCase().trim();
+                if (!action) {
+                    if (type.includes("_IN")) action = "in";
+                    else if (type.includes("_OUT")) action = "out";
+                    else action = "toggle";
+                }
+
+                const cur = clamp01(fadeAlphaRef.current);
+                const to = (() => {
+                    if (action === "set") return clamp01(Number(d.alpha ?? d.opacity ?? 1));
+                    if (action === "in" || action === "fadein" || action === "show") return 1;
+                    if (action === "out" || action === "fadeout" || action === "hide") return 0;
+                    if (action === "toggle") return cur > 0.5 ? 0 : 1;
+                    return cur;
+                })();
+
+                // Duration resolution (per direction)
+                const dur = (() => {
+                    const wantsIn = to >= cur;
+                    const fromDetail = wantsIn
+                        ? (d.durationIn ?? d.fadeInDuration ?? d.fadeIn ?? d.inDuration ?? d.in)
+                        : (d.durationOut ?? d.fadeOutDuration ?? d.fadeOut ?? d.outDuration ?? d.out);
+                    const override = fromDetail != null ? Number(fromDetail) : null;
+                    const base = wantsIn ? fadeInDur : fadeOutDur;
+                    const d0 = override != null && Number.isFinite(override) ? Math.max(0, override) : base;
+                    return d.duration != null ? Math.max(0, Number(d.duration) || 0) : d0;
+                })();
+
+                if (Math.abs(to - cur) < 0.0001) return;
+                if (dur <= 0.0001) {
+                    fadeAnimRef.current = null;
+                    setFadeAlpha(to);
+                    return;
+                }
+
+                fadeAnimRef.current = { from: cur, to, dur, elapsed: 0 };
+            };
+
+            const events = ["EPIC3D_FADE_CTRL", "EPIC3D_FADE_IN", "EPIC3D_FADE_OUT", "EPIC3D_FADE_TOGGLE"];
+            for (const n of events) window.addEventListener(n, handler);
+            return () => {
+                for (const n of events) window.removeEventListener(n, handler);
+            };
+        }, [fadeEnabled, node?.id, node?.roomId, node?.deckId, node?.groupId, fadeInDur, fadeOutDur]);
+
+        // Animate fade
+        useFrame((_, dt) => {
+            const a = fadeAnimRef.current;
+            if (!a) return;
+            a.elapsed += dt;
+            const t = a.dur <= 0 ? 1 : clamp01(a.elapsed / a.dur);
+            const e = easeInOutCubic(t);
+            const v = a.from + (a.to - a.from) * e;
+            if (Math.abs(v - fadeAlphaRef.current) > 0.0005) setFadeAlpha(v);
+            if (t >= 1) {
+                fadeAnimRef.current = null;
+                setFadeAlpha(a.to);
+            }
+        });
+
+        useFrame((_, dt) => {
+            const a = visAnimRef.current;
+            if (!a) return;
+            a.elapsed += dt;
+            const t = a.dur <= 0 ? 1 : Math.max(0, Math.min(1, a.elapsed / a.dur));
+            const e = easeInOutCubic(t);
+            const v = a.from + (a.to - a.from) * e;
+            if (Math.abs(v - visAlphaRef.current) > 0.0005) setVisAlpha(v);
+            if (t >= 1) {
+                visAnimRef.current = null;
+                setVisAlpha(a.to);
+            }
+        });
+
+        const uiAlpha = clamp01(fadeAlpha) * clamp01(visAlpha);
 // representative (resolve what this node represents)
         const represent = node?.represent || null;
         const repUI = represent?.ui || {};
@@ -466,10 +660,38 @@ const Node3D = memo(
         const labelSizeLocal  = (node?.labelScale ?? 1) * (labelSize ?? 0.24);
         const labelColorLocal = node?.labelColor ?? "#ffffff";
 
+        // Per-node label layout & advanced style (driven by EditorRightPane)
+        const labelAlignLocal = String(node?.labelAlign ?? "center").toLowerCase();
+        const labelTextAlign = (labelAlignLocal === "left" || labelAlignLocal === "right" || labelAlignLocal === "center")
+            ? labelAlignLocal
+            : "center";
+
+        const labelAnchorX = labelTextAlign;
+        const labelTextAlignBack = (labelTextAlign === "left") ? "right" : (labelTextAlign === "right" ? "left" : "center");
+        const labelAnchorXBack = labelTextAlignBack;
+
+        const labelWrapLocal = (node?.labelWrap ?? true) !== false;
+        const labelOverflowWrap = labelWrapLocal ? "break-word" : "normal";
+        const labelMaxWidthLocal = Number(node?.labelMaxWidth ?? labelMaxWidth ?? 24);
+        const labelMaxWidthEff = (labelWrapLocal && Number.isFinite(labelMaxWidthLocal) && labelMaxWidthLocal > 0)
+            ? labelMaxWidthLocal
+            : undefined;
+
+        const labelFontLocal = node?.labelFont || undefined;
+        const labelFillOpacity = clamp01(Number(node?.labelFillOpacity ?? 1));
+        const labelOutlineBlur = Math.max(0, Number(node?.labelOutlineBlur ?? 0) || 0);
+        const labelLetterSpacing = Number(node?.labelLetterSpacing ?? 0) || 0;
+        const labelLineHeight = Number(node?.labelLineHeight ?? 1) || 1;
+        const labelStrokeWidth = Math.max(0, Number(node?.labelStrokeWidth ?? 0) || 0);
+        const labelStrokeColor = node?.labelStrokeColor ?? "#000000";
+
+        const label3DLayersLocal = Math.max(1, Math.min(64, Math.floor(Number(node?.label3DLayers ?? label3DLayers) || label3DLayers)));
+        const label3DStepLocal = Math.max(0, Number(node?.label3DStep ?? label3DStep) || label3DStep);
+
 
 // optional outline support from the inspector
         const labelOutlineOn    = !!node?.labelOutline;
-        const labelOutlineWidth = labelOutlineOn ? (node?.labelOutlineWidth ?? 0.005) : 0;
+        const labelOutlineWidth = labelOutlineOn ? (Number(node?.labelOutlineWidth ?? 0.02) || 0.02) : 0;
         const labelOutlineColor = labelOutlineOn ? (node?.labelOutlineColor ?? "#000000") : "#000000";
 
         /* ---------- switch (pressable) ---------- */
@@ -608,8 +830,8 @@ const Node3D = memo(
             return out;
         }, [isSwitch, swDims, swButtonsCount, swMargin, swGap]);
 
-        /* ---------- safe early return (after all hooks) ---------- */
-        if (!visible) return null;
+        /* ---------- NOTE ---------- */
+        // Do not early-return on node.visible; we fade visAlpha so nodes disappear smoothly.
 
         /* ---------- events ---------- */
         const handlePointerDown = (e) => {
@@ -625,6 +847,7 @@ const Node3D = memo(
                 ref={ref}
                 position={position}
                 rotation={rotation}
+                visible={uiAlpha > 0.001}
                 userData={{ ...(node?.userData || {}), __epicType: "node", __nodeId: node?.id }}
                 onPointerDown={(e) => {
                     // Node should *always* win when it’s hit
@@ -638,7 +861,13 @@ const Node3D = memo(
                 {!shapeHidden && (
                     <mesh castShadow={castShadow && shadowsOn} receiveShadow={receiveShadow && shadowsOn}>
                         <GeometryForShape shape={shapeToRender} />
-                        <meshStandardMaterial color={baseColor} roughness={0.35} metalness={0.05} />
+                        <meshStandardMaterial
+                            color={baseColor}
+                            roughness={0.35}
+                            metalness={0.05}
+                            transparent={uiAlpha < 0.999}
+                            opacity={uiAlpha}
+                        />
                     </mesh>
                 )}
 
@@ -724,7 +953,7 @@ const Node3D = memo(
                                                 depthWrite={false}
                                                 toneMapped={false}
                                                 blending={THREE.AdditiveBlending}
-                                                opacity={backAlpha}
+                                                opacity={backAlpha * uiAlpha}
                                                 color={backColorNow}
                                             />
                                         </mesh>
@@ -773,6 +1002,8 @@ const Node3D = memo(
                                             metalness={0.05}
                                             emissive={isHover ? hoverEmissive : "#000000"}
                                             emissiveIntensity={isHover ? 0.18 : 0}
+                                            transparent={uiAlpha < 0.999}
+                                            opacity={uiAlpha}
                                         />
                                     </mesh>
 
@@ -786,7 +1017,9 @@ const Node3D = memo(
                                             anchorX={anchorX}
                                             outlineWidth={outlineWidth}
                                             outlineColor={outlineColor}
-                                            outlineOpacity={outlineOpacity}
+                                            outlineOpacity={outlineOpacity * uiAlpha}
+                                            material-transparent
+                                            material-opacity={uiAlpha}
                                             anchorY="middle"
                                             maxWidth={Math.max(0.1, b.w * 0.92)}
                                         >
@@ -830,7 +1063,7 @@ const Node3D = memo(
                                 return s;
                             })(shapeToRender)}
                         />
-                        <meshBasicMaterial color="#ffffff" transparent opacity={0.18} depthWrite={false} />
+                        <meshBasicMaterial color="#ffffff" transparent opacity={0.18 * uiAlpha} depthWrite={false} />
                     </mesh>
                 )}
 
@@ -896,23 +1129,30 @@ const Node3D = memo(
                                     <Text
                                         fontSize={labelSizeLocal}
                                         color={labelColorLocal}
-                                        maxWidth={labelMaxWidth}
-                                        anchorX="center"
+                                        font={labelFontLocal}
+                                        maxWidth={labelMaxWidthEff}
+                                        textAlign={labelTextAlign}
+                                        overflowWrap={labelOverflowWrap}
+                                        letterSpacing={labelLetterSpacing}
+                                        lineHeight={labelLineHeight}
+                                        strokeWidth={labelStrokeWidth}
+                                        strokeColor={labelStrokeColor}
+                                        anchorX={labelAnchorX}
                                         anchorY="bottom"
                                         outlineWidth={labelOutlineWidth}
                                         outlineColor={labelOutlineColor}
+                                        outlineBlur={labelOutlineBlur}
                                         depthTest={false}
                                         depthWrite={false}
                                         renderOrder={9999}
+                                        material-transparent
+                                        material-opacity={uiAlpha * labelFillOpacity}
                                     >
                                         {labelFull}
                                     </Text>
+
                                     {showPhoto && (
-                                        <Html
-                                            transform
-                                            position={[0, labelSize * 0.75, 0]}
-                                            pointerEvents="none"
-                                        >
+                                        <Html transform position={[0, labelSize * 0.75, 0]} pointerEvents="none">
                                             <div
                                                 style={{
                                                     display: "inline-flex",
@@ -924,17 +1164,18 @@ const Node3D = memo(
                                                     borderRadius: 8,
                                                     boxShadow: "0 6px 14px rgba(0,0,0,0.45)",
                                                     backdropFilter: "blur(4px)",
+                                                    opacity: uiAlpha,
                                                 }}
                                             >
                                                 <img
                                                     src={coverUrl}
-                                                    alt={product.name || "product"}
+                                                    alt={product?.name || "product"}
                                                     style={{
-                                                        width: 120,   // larger for readability
+                                                        width: 120,
                                                         height: 80,
                                                         objectFit: "cover",
                                                         borderRadius: 8,
-                                                        imageRendering: "auto"
+                                                        imageRendering: "auto",
                                                     }}
                                                     draggable={false}
                                                 />
@@ -947,39 +1188,60 @@ const Node3D = memo(
 
                         {labelMode === "3d" && (
                             <group position={[0, yOffset, 0]}>
-                                {Array.from({ length: label3DLayers }).map((_, i) => (
+                                {Array.from({ length: label3DLayersLocal }).map((_, i) => (
                                     <Text
                                         key={`f${i}`}
-                                        position={[0, 0, -i * label3DStep]}
+                                        position={[0, 0, -i * label3DStepLocal]}
                                         fontSize={labelSizeLocal}
                                         color={labelColorLocal}
-                                        maxWidth={labelMaxWidth}
-                                        anchorX="center"
+                                        font={labelFontLocal}
+                                        maxWidth={labelMaxWidthEff}
+                                        textAlign={labelTextAlign}
+                                        overflowWrap={labelOverflowWrap}
+                                        letterSpacing={labelLetterSpacing}
+                                        lineHeight={labelLineHeight}
+                                        strokeWidth={labelStrokeWidth}
+                                        strokeColor={labelStrokeColor}
+                                        anchorX={labelAnchorX}
                                         anchorY="bottom"
                                         outlineWidth={i === 0 ? labelOutlineWidth : 0}
                                         outlineColor={labelOutlineColor}
+                                        outlineBlur={labelOutlineBlur}
                                         depthTest={false}
                                         depthWrite={false}
                                         renderOrder={9999}
+                                        material-transparent
+                                        material-opacity={uiAlpha * labelFillOpacity}
                                     >
                                         {labelFull}
                                     </Text>
                                 ))}
+
                                 <group rotation={[0, Math.PI, 0]}>
-                                    {Array.from({ length: label3DLayers }).map((_, i) => (
+                                    {Array.from({ length: label3DLayersLocal }).map((_, i) => (
                                         <Text
                                             key={`b${i}`}
-                                            position={[0, 0, -i * label3DStep]}
+                                            position={[0, 0, -i * label3DStepLocal]}
                                             fontSize={labelSizeLocal}
                                             color={labelColorLocal}
-                                            maxWidth={labelMaxWidth}
-                                            anchorX="center"
+                                            font={labelFontLocal}
+                                            maxWidth={labelMaxWidthEff}
+                                            textAlign={labelTextAlignBack}
+                                            overflowWrap={labelOverflowWrap}
+                                            letterSpacing={labelLetterSpacing}
+                                            lineHeight={labelLineHeight}
+                                            strokeWidth={labelStrokeWidth}
+                                            strokeColor={labelStrokeColor}
+                                            anchorX={labelAnchorXBack}
                                             anchorY="bottom"
-                                            outlineWidth={labelOutlineWidth}
+                                            outlineWidth={i === 0 ? labelOutlineWidth : 0}
                                             outlineColor={labelOutlineColor}
+                                            outlineBlur={labelOutlineBlur}
                                             depthTest={false}
                                             depthWrite={false}
                                             renderOrder={9999}
+                                            material-transparent
+                                            material-opacity={uiAlpha * labelFillOpacity}
                                         >
                                             {labelFull}
                                         </Text>
@@ -994,30 +1256,51 @@ const Node3D = memo(
                                     <Text
                                         fontSize={labelSizeLocal}
                                         color={labelColorLocal}
-                                        maxWidth={labelMaxWidth}
-                                        anchorX="center"
+                                        font={labelFontLocal}
+                                        maxWidth={labelMaxWidthEff}
+                                        textAlign={labelTextAlign}
+                                        overflowWrap={labelOverflowWrap}
+                                        letterSpacing={labelLetterSpacing}
+                                        lineHeight={labelLineHeight}
+                                        strokeWidth={labelStrokeWidth}
+                                        strokeColor={labelStrokeColor}
+                                        anchorX={labelAnchorX}
                                         anchorY="bottom"
-                                        outlineWidth={0.005}
-                                        outlineColor="#000"
+                                        outlineWidth={labelOutlineWidth}
+                                        outlineColor={labelOutlineColor}
+                                        outlineBlur={labelOutlineBlur}
                                         depthTest={false}
                                         depthWrite={false}
                                         renderOrder={9999}
+                                        material-transparent
+                                        material-opacity={uiAlpha * labelFillOpacity}
                                     >
                                         {labelFull}
                                     </Text>
                                 </group>
+
                                 <group position={[0, yOffset, 0]} rotation={[0, Math.PI, 0]}>
                                     <Text
                                         fontSize={labelSizeLocal}
                                         color={labelColorLocal}
-                                        maxWidth={labelMaxWidth}
-                                        anchorX="center"
+                                        font={labelFontLocal}
+                                        maxWidth={labelMaxWidthEff}
+                                        textAlign={labelTextAlignBack}
+                                        overflowWrap={labelOverflowWrap}
+                                        letterSpacing={labelLetterSpacing}
+                                        lineHeight={labelLineHeight}
+                                        strokeWidth={labelStrokeWidth}
+                                        strokeColor={labelStrokeColor}
+                                        anchorX={labelAnchorXBack}
                                         anchorY="bottom"
-                                        outlineWidth={0.005}
-                                        outlineColor="#000"
+                                        outlineWidth={labelOutlineWidth}
+                                        outlineColor={labelOutlineColor}
+                                        outlineBlur={labelOutlineBlur}
                                         depthTest={false}
                                         depthWrite={false}
                                         renderOrder={9999}
+                                        material-transparent
+                                        material-opacity={uiAlpha * labelFillOpacity}
                                     >
                                         {labelFull}
                                     </Text>
@@ -1026,7 +1309,7 @@ const Node3D = memo(
                         )}
                     </>
                 )}
-                {/* text box overlay */}
+
                 {node.textBox?.enabled && (
                     <NodeTextBox
                         enabled={node.textBox.enabled !== false}
@@ -1057,14 +1340,46 @@ const Node3D = memo(
                         )}
                         color={node.textBox.color ?? node.textBox.textColor ?? "#ffffff"}
                         width={(() => {
-                            const raw = Number(node.textBox.width ?? 0) || 0;
-                            if (raw > 0 && raw <= 5) return raw * 220; // 1.6 → ~350px
-                            return raw || 320;
+                            const tb = node.textBox || {};
+                            const has = Object.prototype.hasOwnProperty.call(tb, "width");
+                            if (!has) return 320;
+                            const raw = Number(tb.width);
+                            if (!Number.isFinite(raw) || raw <= 0) return 0; // 0 => auto
+                            if (raw <= 5) return raw * 220; // 1.6 → ~350px
+                            return raw;
                         })()}
                         height={(() => {
-                            const raw = Number(node.textBox.height ?? 0) || 0;
-                            if (raw > 0 && raw <= 3) return raw * 180; // 0.8 → ~140px
-                            return raw || 140;
+                            const tb = node.textBox || {};
+                            const has = Object.prototype.hasOwnProperty.call(tb, "height");
+                            if (!has) return 140;
+                            const raw = Number(tb.height);
+                            if (!Number.isFinite(raw) || raw <= 0) return 0; // 0 => auto
+                            if (raw <= 3) return raw * 180; // 0.8 → ~140px
+                            return raw;
+                        })()}
+                        minWidth={(() => {
+                            const raw = Number(node.textBox?.minWidth ?? 0) || 0;
+                            if (raw <= 0) return 0;
+                            if (raw <= 5) return raw * 220;
+                            return raw;
+                        })()}
+                        minHeight={(() => {
+                            const raw = Number(node.textBox?.minHeight ?? 0) || 0;
+                            if (raw <= 0) return 0;
+                            if (raw <= 3) return raw * 180;
+                            return raw;
+                        })()}
+                        maxWidth={(() => {
+                            const raw = Number(node.textBox?.maxWidth ?? 0) || 0;
+                            if (raw <= 0) return 0;
+                            if (raw <= 5) return raw * 220;
+                            return raw;
+                        })()}
+                        maxHeight={(() => {
+                            const raw = Number(node.textBox?.maxHeight ?? 0) || 0;
+                            if (raw <= 0) return 0;
+                            if (raw <= 3) return raw * 180;
+                            return raw;
                         })()}
                         fontSize={(() => {
                             const raw = Number(node.textBox.fontSize ?? 0) || 0;
@@ -1072,8 +1387,44 @@ const Node3D = memo(
                             return raw || 16;
                         })()}
 
+                        // rich text + sizing helpers
+                        richText={!!node.textBox?.richText}
+                        fitContent={!!node.textBox?.fitContent}
+                        autoScroll={node.textBox?.autoScroll !== false}
+                        autoScrollSpeed={Number(node.textBox?.autoScrollSpeed ?? 0.4)}
+
                         mode={node.textBox.mode || "billboard"}
                         position={[0, yOffset + 0.4, 0]}
+                        parentOpacity={uiAlpha}
+
+                        // advanced style passthrough (so editor controls actually work)
+                        align={node.textBox?.align ?? "left"}
+                        wrap={node.textBox?.wrap ?? "pre-wrap"}
+                        fontFamily={node.textBox?.fontFamily ?? ""}
+                        fontWeight={node.textBox?.fontWeight ?? "normal"}
+                        fontStyle={node.textBox?.fontStyle ?? "normal"}
+                        letterSpacing={Number(node.textBox?.letterSpacing ?? 0) || 0}
+                        lineHeight={Number(node.textBox?.lineHeight ?? 1.4) || 1.4}
+                        padding={Number(node.textBox?.padding ?? 10) || 10}
+                        borderRadius={Number(node.textBox?.borderRadius ?? 10) || 10}
+                        borderWidth={Number(node.textBox?.borderWidth ?? 0) || 0}
+                        borderColor={node.textBox?.borderColor ?? "#ffffff"}
+                        borderOpacity={Number(node.textBox?.borderOpacity ?? 1)}
+                        shadow={node.textBox?.shadow !== false}
+                        allowPointerEvents={node.textBox?.allowPointerEvents !== false}
+                        // Clicking the textbox should select the node (so the inspector updates)
+                        onSelect={(e) => {
+                            try { onPointerDown?.(node?.id, e); } catch {}
+                        }}
+                        // Keep OrbitControls zoom / scroll working while hovering the textbox
+                        forwardWheelToCanvas={node.textBox?.forwardWheelToCanvas !== false}
+                        backdropBlur={Number(node.textBox?.backdropBlur ?? 0) || 0}
+                        backdropSaturate={Number(node.textBox?.backdropSaturate ?? 100) || 100}
+                        distanceFactor={
+                            node.textBox?.distanceFactor != null
+                                ? Number(node.textBox.distanceFactor)
+                                : undefined
+                        }
                     />
                 )}
 
@@ -1087,18 +1438,21 @@ const Node3D = memo(
                             a={[-half[0], half[1] + 0.04, -half[2]]}
                             b={[-half[0], half[1] + 0.04, half[2]]}
                             text={`L ${dimText.l}`}
+                            opacityMul={uiAlpha}
                         />
                         {/* width (X) */}
                         <Dim
                             a={[half[0], half[1] + 0.04, -half[2]]}
                             b={[-half[0], half[1] + 0.04, -half[2]]}
                             text={`W ${dimText.w}`}
+                            opacityMul={uiAlpha}
                         />
                         {/* height (Y) */}
                         <Dim
                             a={[-half[0], -half[1], half[2]]}
                             b={[-half[0], half[1], half[2]]}
                             text={`H ${dimText.h}`}
+                            opacityMul={uiAlpha}
                         />
                     </group>
                 )}
@@ -1110,6 +1464,7 @@ const Node3D = memo(
                         pointerEvents="none"
                     >                        <div
                         style={{
+                            opacity: uiAlpha,
                             minWidth: 260,
                             maxWidth: 380,
                             background: "linear-gradient(180deg, rgba(0,0,0,0.75), rgba(0,0,0,0.55))",
