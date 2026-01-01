@@ -10,8 +10,8 @@ import autoZipUrl from "./data/simulations/golander.zip";
  *  - string: import that URL (or relative path)
  */
 export const simulationConfig = {
-    showUI: false,
-    autoSimulation: true,
+    showUI: true,
+    autoSimulation: false,
     autoSimulationZipUrl: autoZipUrl,
 };
 
