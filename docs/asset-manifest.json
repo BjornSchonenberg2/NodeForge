@@ -1,7 +1,7 @@
 {
   "files": {
     "main.css": "/NodeForge/static/css/main.8c660a96.css",
-    "main.js": "/NodeForge/static/js/main.31546804.js",
+    "main.js": "/NodeForge/static/js/main.c4243cde.js",
     "static/js/453.d6c4c014.chunk.js": "/NodeForge/static/js/453.d6c4c014.chunk.js",
     "static/media/Model-MY-GO-Textured.glb": "/NodeForge/static/media/Model-MY-GO-Textured.131bae85b9611e3be2cd.glb",
     "static/media/MainDeckPSD.png": "/NodeForge/static/media/MainDeckPSD.c0162055848cb12f4102.png",
@@ -37,11 +37,11 @@
     "static/media/UniFi Access Point.jpg": "/NodeForge/static/media/UniFi Access Point.be5801f18b3ca7ebf4d2.jpg",
     "index.html": "/NodeForge/index.html",
     "main.8c660a96.css.map": "/NodeForge/static/css/main.8c660a96.css.map",
-    "main.31546804.js.map": "/NodeForge/static/js/main.31546804.js.map",
+    "main.c4243cde.js.map": "/NodeForge/static/js/main.c4243cde.js.map",
     "453.d6c4c014.chunk.js.map": "/NodeForge/static/js/453.d6c4c014.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.8c660a96.css",
-    "static/js/main.31546804.js"
+    "static/js/main.c4243cde.js"
   ]
 }
