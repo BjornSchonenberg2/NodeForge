@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Gesture Training GUI - 3D Playground</title>
+
+  <!-- MediaPipe Hands -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <!-- Three.js -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+
+  <style>
+    :root{
+      --bg0:#070A12;
+      --bg1:#0C1730;
+      --glass: rgba(255,255,255,.08);
+      --glass2: rgba(255,255,255,.12);
+      --stroke: rgba(255,255,255,.18);
+      --text: rgba(255,255,255,.92);
+      --muted: rgba(255,255,255,.65);
+      --good: #49ffa7;
+      --warn: #ffce5a;
+      --bad:  #ff5b7d;
+      --accent:#7aa7ff;
+      --accent2:#b57aff;
+      --shadow: 0 18px 50px rgba(0,0,0,.55);
+      --radius: 18px;
+      --radius2: 22px;
+    }
+
+    *{box-sizing:border-box}
+    html,body{
+      margin:0;
+      height:100%;
+      overflow:hidden;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      background: radial-gradient(1000px 600px at 65% 0%, #1a2a55 0%, var(--bg0) 50%, #04050a 100%);
+      color:var(--text);
+    }
+
+    /* 3D canvas is full screen */
+    #sceneCanvas{
+      position:fixed;
+      inset:0;
+      width:100%;
+      height:100%;
+      display:block;
+      outline:none;
+      cursor: crosshair;
+    }
+
+    /* HUD layout */
+    #hud{
+      position:fixed;
+      inset:0;
+      pointer-events:none;
+    }
+
+    .topbar{
+      position:absolute;
+      left:18px;
+      right:18px;
+      top:14px;
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      justify-content:space-between;
+    }
+
+    .brand{
+      pointer-events:none;
+      display:flex;
+      align-items:center;
+      gap:12px;
+      padding:12px 14px;
+      border-radius: var(--radius2);
+      background: linear-gradient(135deg, rgba(122,167,255,.18), rgba(181,122,255,.12));
+      border:1px solid rgba(255,255,255,.16);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      min-width: 320px;
+    }
+    .dot{
+      width:12px;height:12px;border-radius:99px;
+      background: radial-gradient(circle at 30% 30%, #fff 0%, var(--accent) 30%, rgba(122,167,255,.2) 80%);
+      box-shadow: 0 0 18px rgba(122,167,255,.6);
+    }
+    .brand h1{
+      font-size:14px;margin:0;font-weight:700;letter-spacing:.6px;
+      text-transform:uppercase;
+    }
+    .brand p{margin:2px 0 0;font-size:12px;color:var(--muted)}
+    .pillRow{
+      display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;
+    }
+    .pill{
+      font-size:11px;
+      padding:6px 9px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.18);
+      color: rgba(255,255,255,.78);
+    }
+    .pill strong{color:rgba(255,255,255,.95);font-weight:700}
+
+    /* Right-side stacked panels */
+    .stack{
+      position:absolute;
+      top:14px;
+      right:14px;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+      width: 420px;
+      pointer-events:none;
+    }
+
+    .panel{
+      pointer-events:none;
+      border-radius: var(--radius2);
+      background: linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.06));
+      border:1px solid rgba(255,255,255,.16);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      overflow:hidden;
+    }
+
+    .panelHeader{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      padding:12px 14px;
+      border-bottom:1px solid rgba(255,255,255,.10);
+      background: rgba(0,0,0,.14);
+    }
+    .panelHeader h2{
+      margin:0;
+      font-size:12px;
+      letter-spacing:.6px;
+      text-transform:uppercase;
+    }
+    .badge{
+      font-size:11px;
+      padding:5px 9px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.16);
+      background: rgba(0,0,0,.18);
+      color: rgba(255,255,255,.78);
+    }
+
+    .panelBody{
+      padding:12px 14px 14px;
+    }
+
+    .kv{
+      display:grid;
+      grid-template-columns: 1fr auto;
+      gap:8px 12px;
+      font-size:12px;
+      color: rgba(255,255,255,.80);
+      align-items:center;
+    }
+    .kv .k{color:rgba(255,255,255,.62)}
+    .kv .v{font-variant-numeric: tabular-nums; color:rgba(255,255,255,.92)}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace}
+
+    .legend{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      margin-top:10px;
+    }
+    .chip{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:7px 10px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(0,0,0,.16);
+      font-size:11px;
+      color: rgba(255,255,255,.82);
+    }
+    .chip i{
+      width:10px;height:10px;border-radius:99px;display:inline-block;
+      box-shadow: 0 0 16px rgba(255,255,255,.18);
+    }
+    .iGood{background: var(--good); box-shadow: 0 0 18px rgba(73,255,167,.45)}
+    .iWarn{background: var(--warn); box-shadow: 0 0 18px rgba(255,206,90,.35)}
+    .iBad{ background: var(--bad);  box-shadow: 0 0 18px rgba(255,91,125,.35)}
+
+
+    /* Crosshair */
+    .crosshair{
+      position:absolute;
+      left:50%;
+      top:50%;
+      transform:translate(-50%,-50%);
+      width:18px;
+      height:18px;
+      border-radius: 99px;
+      border:1px solid rgba(255,255,255,.22);
+      background: rgba(0,0,0,.08);
+      box-shadow: 0 0 26px rgba(122,167,255,.14);
+    }
+    .crosshair:before, .crosshair:after{
+      content:"";
+      position:absolute;
+      left:50%;top:50%;
+      transform:translate(-50%,-50%);
+      background: rgba(255,255,255,.35);
+      border-radius: 99px;
+    }
+    .crosshair:before{ width:10px; height:2px;}
+    .crosshair:after{ width:2px; height:10px;}
+
+    /* Camera box */
+    #camera-container{
+      position:fixed;
+      bottom:14px;
+      right:14px;
+      width:420px;
+      height:320px;
+      border-radius: var(--radius2);
+      overflow:hidden;
+      border:1px solid rgba(255,255,255,.18);
+      background: rgba(0,0,0,.55);
+      box-shadow: var(--shadow);
+      z-index: 20;
+      pointer-events:none;
+    }
+    #video, #output{
+      position:absolute;
+      inset:0;
+      width:100%;
+      height:100%;
+      object-fit: cover;
+    }
+    #camOverlay{
+      position:absolute;
+      left:0; right:0; bottom:0;
+      padding:10px 12px;
+      background: linear-gradient(180deg, rgba(0,0,0,0), rgba(0,0,0,.65));
+      font-size:12px;
+      color: rgba(255,255,255,.85);
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+    }
+    #camOverlay .mini{
+      display:flex;gap:8px;flex-wrap:wrap;
+    }
+
+    /* Tiny toast */
+    #toast{
+      position:absolute;
+      left:18px;
+      bottom:16px;
+      max-width: 560px;
+      padding:12px 14px;
+      border-radius: var(--radius2);
+      background: rgba(0,0,0,.35);
+      border:1px solid rgba(255,255,255,.14);
+      color: rgba(255,255,255,.86);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      pointer-events:none;
+      display:none;
+    }
+    #toast strong{color:rgba(255,255,255,.95)}
+
+    /* Small helper footer keys */
+    .footkeys{
+      margin-top:10px;
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      color: rgba(255,255,255,.70);
+      font-size:11px;
+    }
+    .kbd{
+      padding:4px 7px;
+      border-radius:8px;
+      border:1px solid rgba(255,255,255,.16);
+      background: rgba(0,0,0,.18);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: rgba(255,255,255,.86);
+    }
+  </style>
+</head>
+
+<body>
+<!-- 3D -->
+<canvas id="sceneCanvas" tabindex="0" aria-label="3D training playground"></canvas>
+
+<!-- HUD -->
+<div id="hud">
+  <div class="topbar">
+    <div class="brand">
+      <div class="dot"></div>
+      <div>
+        <h1>Gesture Training GUI</h1>
+        <p>Keyboard + Mouse + Webcam Gestures - Real-time input monitor</p>
+        <div class="pillRow">
+          <span class="pill"><strong>WASD</strong> fly</span>
+          <span class="pill"><strong>Q / E</strong> down / up</span>
+          <span class="pill"><strong>LMB drag</strong> look</span>
+          <span class="pill"><strong>Shift + LMB</strong> pan</span>
+          <span class="pill"><strong>Wheel / Pinch</strong> zoom</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="panel" id="inputPanel">
+      <div class="panelHeader">
+        <h2>Input Monitor</h2>
+        <div class="badge mono" id="fpsBadge">FPS: --</div>
+      </div>
+      <div class="panelBody">
+        <div class="kv">
+          <div class="k">Mode</div><div class="v mono" id="modeValue">FREELOOK</div>
+          <div class="k">Gesture</div><div class="v mono" id="gestureValue">NONE</div>
+          <div class="k">Keys</div><div class="v mono" id="keysValue">--</div>
+          <div class="k">Mouse</div><div class="v mono" id="mouseValue">--</div>
+          <div class="k">Position</div><div class="v mono" id="posValue">--</div>
+          <div class="k">Rotation</div><div class="v mono" id="rotValue">--</div>
+          <div class="k">Zoom (FOV)</div><div class="v mono" id="fovValue">--</div>
+          <div class="k">Hand</div><div class="v mono" id="handValue">--</div>
+        </div>
+
+        <div class="legend" style="margin-top:12px">
+          <span class="chip"><i class="iGood"></i><span><strong>Point</strong> = Look / Rotate</span></span>
+          <span class="chip"><i class="iWarn"></i><span><strong>Two Fingers / Palm</strong> = Pan</span></span>
+          <span class="chip"><i class="iBad"></i><span><strong>Pinch + Open</strong> = Zoom</span></span>
+          <span class="chip"><i class="iBad"></i><span><strong>Pinch + Fist</strong> = Fly Forward</span></span>
+          <span class="chip"><i class="iGood"></i><span><strong>Point + Twirl</strong> = Event</span></span>
+        </div>
+
+        <div class="footkeys">
+          <span class="kbd">R</span> reset pose
+          <span class="kbd">G</span> toggle grid
+          <span class="kbd">H</span> toggle HUD
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="crosshair" aria-hidden="true"></div>
+
+  <div id="toast"></div>
+</div>
+
+<!-- Webcam / Gesture -->
+<div id="camera-container" aria-label="Gesture camera view">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="output"></canvas>
+  <div id="camOverlay">
+    <div class="mini">
+      <span class="pill" id="camStatus">Camera: ...</span>
+      <span class="pill" id="mpStatus">Hands: ...</span>
+    </div>
+    <span class="pill mono" id="gesturePill">Gesture: NONE</span>
+  </div>
+</div>
+
+<script>
+  (() => {
+    /* ---------------------------
+     * Utilities
+     * --------------------------- */
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const fmt = (n, d=2) => (Number.isFinite(n) ? n.toFixed(d) : "--");
+
+    /* ---------------------------
+     * DOM refs
+     * --------------------------- */
+    const canvas3D = document.getElementById('sceneCanvas');
+    const fpsBadge = document.getElementById('fpsBadge');
+    const modeValue = document.getElementById('modeValue');
+    const gestureValue = document.getElementById('gestureValue');
+    const keysValue = document.getElementById('keysValue');
+    const mouseValue = document.getElementById('mouseValue');
+    const posValue = document.getElementById('posValue');
+    const rotValue = document.getElementById('rotValue');
+    const fovValue = document.getElementById('fovValue');
+    const handValue = document.getElementById('handValue');
+    const toast = document.getElementById('toast');
+
+    const camStatus = document.getElementById('camStatus');
+    const mpStatus = document.getElementById('mpStatus');
+    const gesturePill = document.getElementById('gesturePill');
+
+    const videoElement = document.getElementById('video');
+    const canvasElement = document.getElementById('output');
+    const canvasCtx = canvasElement.getContext('2d', { alpha: true });
+
+    function setToast(html, ms=2400){
+      toast.innerHTML = html;
+      toast.style.display = "block";
+      clearTimeout(setToast._t);
+      setToast._t = setTimeout(()=> toast.style.display = "none", ms);
+    }
+
+    setToast(`<strong>Tip:</strong> Allow camera access for gesture training. Use <span class="mono">WASD</span> + mouse even without gestures.`);
+
+    /* ---------------------------
+     * Three.js setup
+     * --------------------------- */
+    const renderer = new THREE.WebGLRenderer({
+      canvas: canvas3D,
+      antialias: true,
+      alpha: true
+    });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight, false);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x070A12, 12, 140);
+    scene.background = new THREE.Color(0x070A12);
+
+    const camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 0.05, 500);
+    camera.position.set(0, 1.8, 6);
+
+    const config = {
+      move: { speed: 4.6, boost: 8.8, accel: 16.0, damping: 10.0 },
+      look: { mouse: 0.0018, gesture: 1.7 },
+      pan: { mouse: 0.0026, gesture: 2.6, damping: 8.5 },
+      zoom: { wheel: 0.018, pinch: 650 },
+      gesture: { smoothing: 0.25, deadzone: 0.0026, pinchDeadzone: 0.0022, forwardSpeed: 2.8 },
+      bounds: { xz: 180, yMin: 0.2, yMax: 80 }
+    };
+
+    // Camera controller state
+    const cam = {
+      pos: camera.position.clone(),
+      vel: new THREE.Vector3(0,0,0),
+      yaw: 0,
+      pitch: 0,
+      targetFov: camera.fov,
+      fov: camera.fov,
+      panOffset: new THREE.Vector3(0,0,0)
+    };
+
+    const tmpVec3 = new THREE.Vector3();
+    const tmpVec3B = new THREE.Vector3();
+    const tmpUp = new THREE.Vector3(0,1,0);
+    const tmpEuler = new THREE.Euler(0,0,0,"YXZ");
+
+    function applyCamera(){
+      cam.pitch = clamp(cam.pitch, -1.35, 1.35);
+      camera.position.copy(cam.pos).add(cam.panOffset);
+
+      camera.rotation.order = "YXZ";
+      camera.rotation.y = cam.yaw;
+      camera.rotation.x = cam.pitch;
+
+      cam.fov = lerp(cam.fov, cam.targetFov, 0.12);
+      camera.fov = cam.fov;
+      camera.updateProjectionMatrix();
+    }
+
+    // Lights
+    const hemi = new THREE.HemisphereLight(0x9cbcff, 0x1a1f2e, 0.65);
+    scene.add(hemi);
+
+    const dir = new THREE.DirectionalLight(0xffffff, 0.85);
+    dir.position.set(8, 12, 6);
+    scene.add(dir);
+
+    // Ground
+    const ground = new THREE.Mesh(
+            new THREE.PlaneGeometry(400, 400),
+            new THREE.MeshStandardMaterial({ color: 0x0c1020, roughness: 0.95, metalness: 0.0 })
+    );
+    ground.rotation.x = -Math.PI/2;
+    ground.position.y = 0;
+    scene.add(ground);
+
+    // Grid helper (toggleable)
+    const grid = new THREE.GridHelper(220, 220, 0x2c3c6a, 0x1a2748);
+    grid.material.opacity = 0.45;
+    grid.material.transparent = true;
+    grid.position.y = 0.01;
+    scene.add(grid);
+    let gridOn = true;
+
+    // World props
+    const world = new THREE.Group();
+    scene.add(world);
+
+    function addPillar(x,z,h=2){
+      const geo = new THREE.BoxGeometry(1.2, h, 1.2);
+      const mat = new THREE.MeshStandardMaterial({
+        color: new THREE.Color().setHSL(0.60 + (Math.random()*0.12), 0.55, 0.35),
+        roughness: 0.55,
+        metalness: 0.15
+      });
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, h/2, z);
+      m.castShadow = false;
+      m.receiveShadow = true;
+      world.add(m);
+
+      // top "beacon"
+      const b = new THREE.Mesh(
+              new THREE.SphereGeometry(0.16, 16, 16),
+              new THREE.MeshStandardMaterial({ color: 0x7aa7ff, emissive: 0x223366, emissiveIntensity: 0.65 })
+      );
+      b.position.set(x, h + 0.18, z);
+      world.add(b);
+    }
+
+    // Scatter some geometry
+    for(let i=0;i<70;i++){
+      const x = (Math.random()-0.5)*120;
+      const z = (Math.random()-0.5)*120;
+      const h = 1.4 + Math.random()*5.0;
+      if(Math.hypot(x,z) < 10) continue;
+      addPillar(x, z, h);
+    }
+
+    // A simple "route" of rings to move through
+    const ringMat = new THREE.MeshStandardMaterial({ color: 0xb57aff, roughness: 0.45, metalness: 0.25, emissive: 0x1b0f24, emissiveIntensity: 0.6 });
+    const ringGeo = new THREE.TorusGeometry(1.3, 0.12, 14, 40);
+    const rings = [];
+    for(let i=0;i<9;i++){
+      const r = new THREE.Mesh(ringGeo, ringMat);
+      r.position.set(-10 + i*5.5, 1.6, -12 - i*6.0);
+      r.rotation.y = Math.random()*Math.PI;
+      world.add(r);
+      rings.push(r);
+    }
+
+    /* ---------------------------
+     * Input (keyboard + mouse)
+     * --------------------------- */
+    const keys = new Set();
+    const mouse = {
+      left:false,
+      lastX:0,
+      lastY:0,
+      dragging:false,
+      mode:"--", // LOOK / PAN
+      smoothDX: 0,
+      smoothDY: 0
+    };
+
+    window.addEventListener('keydown', (e) => {
+      keys.add(e.code);
+      if(e.code === "KeyR") resetPose();
+      if(e.code === "KeyG"){ gridOn = !gridOn; grid.visible = gridOn; }
+      if(e.code === "KeyH"){ toggleHUD(); }
+    });
+    window.addEventListener('keyup', (e) => keys.delete(e.code));
+
+    function toggleHUD(){
+      const hud = document.getElementById('hud');
+      const stack = document.querySelector('.stack');
+      const cam = document.getElementById('camera-container');
+      const hidden = hud.dataset.hidden === "1";
+      hud.dataset.hidden = hidden ? "0" : "1";
+      const display = hidden ? "" : "none";
+      // Keep crosshair optional; hide everything else
+      stack.style.display = display;
+      cam.style.display = display;
+      document.querySelector('.topbar').style.display = display;
+      toast.style.display = "none";
+    }
+
+    canvas3D.addEventListener('contextmenu', e => e.preventDefault());
+
+    canvas3D.addEventListener('pointerdown', (e) => {
+      if(e.button !== 0) return; // left only
+      canvas3D.setPointerCapture(e.pointerId);
+      mouse.left = true;
+      mouse.dragging = true;
+      mouse.lastX = e.clientX;
+      mouse.lastY = e.clientY;
+    });
+
+    window.addEventListener('pointerup', (e) => {
+      if(e.button !== 0) return;
+      mouse.left = false;
+      mouse.dragging = false;
+      mouse.mode = "--";
+    });
+
+    window.addEventListener('pointermove', (e) => {
+      if(!mouse.dragging) return;
+      const dx = e.clientX - mouse.lastX;
+      const dy = e.clientY - mouse.lastY;
+      mouse.lastX = e.clientX;
+      mouse.lastY = e.clientY;
+
+      const isPan = e.shiftKey; // SHIFT+LMB = pan
+      mouse.mode = isPan ? "PAN" : "LOOK";
+
+      // Low-pass the delta for less "twitchy" response
+      mouse.smoothDX = lerp(mouse.smoothDX, dx, 0.35);
+      mouse.smoothDY = lerp(mouse.smoothDY, dy, 0.35);
+
+      if(isPan){
+        panByMouse(mouse.smoothDX, mouse.smoothDY);
+      }else{
+        lookByMouse(mouse.smoothDX, mouse.smoothDY);
+      }
+    });
+
+    window.addEventListener('wheel', (e) => {
+      // wheel zoom
+      cam.targetFov = clamp(cam.targetFov + (e.deltaY * config.zoom.wheel), 30, 92);
+    }, { passive: true });
+
+    function lookByMouse(dx, dy){
+      cam.yaw   -= dx * config.look.mouse;
+      cam.pitch -= dy * config.look.mouse;
+    }
+
+    function panByMouse(dx, dy){
+      const right = tmpVec3.set(1,0,0).applyEuler(camera.rotation);
+      cam.panOffset.addScaledVector(right, -dx * config.pan.mouse);
+      cam.panOffset.addScaledVector(tmpUp,  dy * config.pan.mouse);
+      cam.panOffset.y = clamp(cam.panOffset.y, -3.5, 6.5);
+    }
+
+    function resetPose(){
+      cam.pos.set(0, 1.8, 6);
+      cam.vel.set(0,0,0);
+      cam.yaw = 0;
+      cam.pitch = 0;
+      cam.panOffset.set(0,0,0);
+      cam.targetFov = 65;
+      setToast(`<strong>Reset:</strong> camera pose restored.`, 1600);
+    }
+
+
+    /* ---------------------------
+     * Gesture detection (MediaPipe)
+     * --------------------------- */
+    canvasElement.width = 420;
+    canvasElement.height = 320;
+
+    function dist(a, b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+
+    // Finger extended/curl detection (basic, but stable enough for training)
+    function fingerExtended(lm, tip, pip){
+      // If tip is above pip (smaller y), assume extended (hand facing camera upright)
+      return lm[tip].y < lm[pip].y;
+    }
+
+    function classifyGesture(lm){
+      // indices
+      const TH_TIP=4, IN_TIP=8, MI_TIP=12, RI_TIP=16, PI_TIP=20;
+      const IN_PIP=6, MI_PIP=10, RI_PIP=14, PI_PIP=18;
+
+      const pinchD = dist(lm[TH_TIP], lm[IN_TIP]); // normalized
+      const pinching = pinchD < 0.055;
+
+      const idxEx = fingerExtended(lm, IN_TIP, IN_PIP);
+      const midEx = fingerExtended(lm, MI_TIP, MI_PIP);
+      const rngEx = fingerExtended(lm, RI_TIP, RI_PIP);
+      const pnkEx = fingerExtended(lm, PI_TIP, PI_PIP);
+
+      const extendedCount = [idxEx, midEx, rngEx, pnkEx].filter(Boolean).length;
+      const indexOnly = idxEx && !midEx && !rngEx && !pnkEx;
+      const twoFingers = idxEx && midEx && !rngEx && !pnkEx;
+      const fist = extendedCount === 0;
+      const palm = extendedCount >= 3 && !pinching;
+
+      let name = "NONE";
+      let mode = "FREELOOK";
+      // Priority: pinch variants > point > pan
+      if(pinching){
+        if(extendedCount <= 1){
+          name = "PINCH_FWD";
+          mode = "MOVE_FWD";
+        } else {
+          name = "PINCH_ZOOM";
+          mode = "ZOOM";
+        }
+      } else if(indexOnly){
+        name = "POINT";
+        mode = "ROTATE";
+      } else if(twoFingers || palm){
+        name = twoFingers ? "TWO_FINGERS" : "PALM";
+        mode = "PAN";
+      } else if(fist){
+        name = "FIST";
+        mode = "HOLD";
+      }
+
+      // Use index tip as a stable pointer for motion
+      const pointer = lm[IN_TIP];
+      const handCenter = lm[9]; // middle MCP-ish
+      return { name, mode, pinchD, pointer, handCenter, extendedCount };
+    }
+
+    let gesture = {
+      name: "NONE",
+      mode: "FREELOOK",
+      pinchD: null,
+      pointer: null,
+      handCenter: null,
+      hasHand: false
+    };
+
+    // Gesture control history
+    let lastHandPoint = null;     // {x,y}
+    let lastPinchD = null;
+    let handFiltered = null;
+    let pinchFiltered = null;
+    let gestureMoveForward = 0;
+    let gestureEvent = { name: "NONE", until: 0 };
+    const twirl = { points: [], lastTrigger: 0 };
+
+    // MediaPipe
+    const hands = new Hands({
+      locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.7
+    });
+
+    hands.onResults((results) => {
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+      if(results.multiHandLandmarks && results.multiHandLandmarks.length){
+        mpStatus.textContent = "Hands: Tracking";
+        gesture.hasHand = true;
+
+        const lm = results.multiHandLandmarks[0];
+        drawConnectors(canvasCtx, lm, HAND_CONNECTIONS, { color: '#49ffa7', lineWidth: 3 });
+        drawLandmarks(canvasCtx, lm, { color: '#ff5b7d', lineWidth: 1 });
+
+        const g = classifyGesture(lm);
+        gesture.name = g.name;
+        gesture.mode = g.mode;
+        gesture.pinchD = g.pinchD;
+        gesture.pointer = g.pointer;
+        gesture.handCenter = g.handCenter;
+
+        // Apply gesture controls to camera
+        applyGestureControls(g);
+
+      } else {
+        mpStatus.textContent = "Hands: Not found";
+        gesture.hasHand = false;
+        gesture.name = "NONE";
+        gesture.mode = "FREELOOK";
+        gesture.pinchD = null;
+        gesture.pointer = null;
+        gesture.handCenter = null;
+        lastHandPoint = null;
+        lastPinchD = null;
+        handFiltered = null;
+        pinchFiltered = null;
+        gestureMoveForward = 0;
+        twirl.points.length = 0;
+      }
+
+      const now = performance.now();
+      const eventActive = now < gestureEvent.until;
+      const eventLabel = eventActive ? ` | ${gestureEvent.name}` : "";
+      gesturePill.textContent = `Gesture: ${gesture.name} | ${gesture.mode}${eventLabel}`;
+    });
+
+    function recordTwirlPoint(x, y){
+      const now = performance.now();
+      twirl.points.push({ x, y, t: now });
+      while(twirl.points.length && (now - twirl.points[0].t) > 900){
+        twirl.points.shift();
+      }
+      const n = twirl.points.length;
+      if(n < 10) return false;
+
+      let cx = 0, cy = 0;
+      for(const p of twirl.points){ cx += p.x; cy += p.y; }
+      cx /= n; cy /= n;
+
+      let r = 0;
+      for(const p of twirl.points){ r += Math.hypot(p.x - cx, p.y - cy); }
+      r /= n;
+      if(r < 0.025) return false;
+
+      let total = 0;
+      let prev = Math.atan2(twirl.points[0].y - cy, twirl.points[0].x - cx);
+      for(let i=1;i<n;i++){
+        const ang = Math.atan2(twirl.points[i].y - cy, twirl.points[i].x - cx);
+        let d = ang - prev;
+        if(d > Math.PI) d -= Math.PI * 2;
+        if(d < -Math.PI) d += Math.PI * 2;
+        total += d;
+        prev = ang;
+      }
+
+      const first = twirl.points[0];
+      const last = twirl.points[n-1];
+      const closed = Math.hypot(last.x - first.x, last.y - first.y) < r * 0.9;
+      if(Math.abs(total) > 4.6 && closed && (now - twirl.lastTrigger) > 1200){
+        twirl.lastTrigger = now;
+        return true;
+      }
+      return false;
+    }
+
+    function applyGestureControls(g){
+      const px = g.pointer.x;
+      const py = g.pointer.y;
+
+      if(!handFiltered){
+        handFiltered = { x: px, y: py };
+      }else{
+        handFiltered.x = lerp(handFiltered.x, px, config.gesture.smoothing);
+        handFiltered.y = lerp(handFiltered.y, py, config.gesture.smoothing);
+      }
+
+      const fx = handFiltered.x;
+      const fy = handFiltered.y;
+
+      if(g.mode === "ROTATE" || g.mode === "PAN"){
+        if(lastHandPoint){
+          const dx = fx - lastHandPoint.x;
+          const dy = fy - lastHandPoint.y;
+          const dist = Math.hypot(dx, dy);
+
+          if(dist > config.gesture.deadzone){
+            if(g.mode === "ROTATE"){
+              // Rotate camera from hand motion
+              cam.yaw   -= dx * config.look.gesture;
+              cam.pitch -= dy * config.look.gesture;
+              if(g.name === "POINT" && recordTwirlPoint(fx, fy)){
+                gestureEvent = { name: "TWIRL", until: performance.now() + 1200 };
+                setToast(`<strong>Gesture:</strong> twirl detected.`, 1600);
+              }
+            } else if(g.mode === "PAN"){
+              // Pan camera from hand motion
+              const right = tmpVec3.set(1,0,0).applyEuler(camera.rotation);
+              cam.panOffset.addScaledVector(right, -dx * config.pan.gesture);
+              cam.panOffset.addScaledVector(tmpUp,  dy * config.pan.gesture);
+              cam.panOffset.y = clamp(cam.panOffset.y, -3.5, 6.5);
+            }
+          }
+        }
+        lastHandPoint = { x: fx, y: fy };
+        lastPinchD = null;
+        pinchFiltered = null;
+        gestureMoveForward = 0;
+        if(g.name !== "POINT"){
+          twirl.points.length = 0;
+        }
+        return;
+      }
+
+      if(g.mode === "ZOOM"){
+        // Zoom from pinch distance change (smoothed)
+        twirl.points.length = 0;
+        pinchFiltered = (pinchFiltered === null) ? g.pinchD : lerp(pinchFiltered, g.pinchD, config.gesture.smoothing);
+        if(lastPinchD !== null){
+          const dd = (pinchFiltered - lastPinchD); // positive if fingers separate
+          if(Math.abs(dd) > config.gesture.pinchDeadzone){
+            cam.targetFov = clamp(cam.targetFov - dd * config.zoom.pinch, 30, 92); // invert for natural zoom
+          }
+        }
+        lastPinchD = pinchFiltered;
+        lastHandPoint = null;
+        gestureMoveForward = 0;
+        return;
+      }
+
+      if(g.mode === "MOVE_FWD"){
+        twirl.points.length = 0;
+        gestureMoveForward = 1;
+        lastHandPoint = null;
+        lastPinchD = null;
+        return;
+      }
+
+      // NONE
+      twirl.points.length = 0;
+      lastHandPoint = null;
+      lastPinchD = null;
+      handFiltered = null;
+      pinchFiltered = null;
+      gestureMoveForward = 0;
+    }
+
+    // Start camera
+    camStatus.textContent = "Camera: Requesting...";
+    const cameraMP = new Camera(videoElement, {
+      onFrame: async () => { await hands.send({ image: videoElement }); },
+      width: 420,
+      height: 320
+    });
+
+    cameraMP.start()
+            .then(() => camStatus.textContent = "Camera: Live")
+            .catch(() => {
+              camStatus.textContent = "Camera: Blocked";
+              mpStatus.textContent = "Hands: Unavailable";
+              setToast(`<strong>Camera blocked.</strong> You can still train with keyboard + mouse.`, 4200);
+            });
+
+    /* ---------------------------
+     * Main loop (movement + render)
+     * --------------------------- */
+    const clock = new THREE.Clock();
+    let fpsS = 0, fpsN = 0, fpsT = 0;
+
+    function updateMovement(dt){
+      // Flying camera: WASD + Q/E for vertical movement
+      const input = tmpVec3.set(0,0,0);
+      if(keys.has("KeyW")){ input.z -= 1; }
+      if(keys.has("KeyS")){ input.z += 1; }
+      if(keys.has("KeyA")){ input.x -= 1; }
+      if(keys.has("KeyD")){ input.x += 1; }
+      if(keys.has("KeyQ")){ input.y -= 1; }
+      if(keys.has("KeyE")){ input.y += 1; }
+
+      let moved = input.lengthSq() > 0 || gestureMoveForward > 0;
+      if(moved) input.normalize();
+
+      const speed = (keys.has("ShiftLeft") || keys.has("ShiftRight")) ? config.move.boost : config.move.speed;
+      tmpEuler.set(cam.pitch, cam.yaw, 0, "YXZ");
+      const desired = input.applyEuler(tmpEuler).multiplyScalar(speed);
+      if(gestureMoveForward > 0){
+        tmpVec3B.set(0,0,-config.gesture.forwardSpeed).applyEuler(tmpEuler);
+        desired.add(tmpVec3B);
+      }
+
+      const accelT = 1 - Math.exp(-config.move.accel * dt);
+      cam.vel.lerp(desired, accelT);
+
+      const dampT = 1 - Math.exp(-config.move.damping * dt);
+      if(!moved){
+        cam.vel.lerp(tmpVec3B.set(0,0,0), dampT);
+      }
+
+      cam.pos.addScaledVector(cam.vel, dt);
+
+      // Soft bounds to prevent getting lost
+      cam.pos.x = clamp(cam.pos.x, -config.bounds.xz, config.bounds.xz);
+      cam.pos.z = clamp(cam.pos.z, -config.bounds.xz, config.bounds.xz);
+      cam.pos.y = clamp(cam.pos.y, config.bounds.yMin, config.bounds.yMax);
+
+      // Damping on pan offset for comfort
+      const panDamp = 1 - Math.exp(-config.pan.damping * dt);
+      cam.panOffset.lerp(tmpVec3B.set(0,0,0), panDamp);
+
+      return moved;
+    }
+
+    function updateHUD(){
+      // Mode: gesture overrides mouse label for clarity
+      const m = gesture.hasHand ? gesture.mode : (mouse.dragging ? mouse.mode : "FREELOOK");
+      modeValue.textContent = m;
+
+      const now = performance.now();
+      const eventActive = now < gestureEvent.until;
+      gestureValue.textContent = eventActive ? gestureEvent.name : (gesture.hasHand ? gesture.name : "NONE");
+      const keyList = [];
+      if(keys.has("KeyW")) keyList.push("W");
+      if(keys.has("KeyA")) keyList.push("A");
+      if(keys.has("KeyS")) keyList.push("S");
+      if(keys.has("KeyD")) keyList.push("D");
+      if(keys.has("KeyQ")) keyList.push("Q");
+      if(keys.has("KeyE")) keyList.push("E");
+      if(keys.has("ShiftLeft") || keys.has("ShiftRight")) keyList.push("SHIFT");
+      keysValue.textContent = keyList.length ? keyList.join("+") : "--";
+
+      mouseValue.textContent = mouse.dragging ? `LMB ${mouse.mode}` : "--";
+
+      posValue.textContent = `${fmt(cam.pos.x,2)}, ${fmt(cam.pos.y,2)}, ${fmt(cam.pos.z,2)}`;
+      rotValue.textContent = `yaw ${fmt(cam.yaw,2)} - pitch ${fmt(cam.pitch,2)}`;
+      fovValue.textContent = `${fmt(cam.fov,1)}deg`;
+
+      if(gesture.hasHand && gesture.pointer){
+        handValue.textContent = `x ${fmt(gesture.pointer.x,3)} - y ${fmt(gesture.pointer.y,3)} - pinch ${fmt(gesture.pinchD,3)}`;
+      } else {
+        handValue.textContent = "--";
+      }
+
+    }
+
+    function animate(){
+      const dt = Math.min(clock.getDelta(), 0.05);
+
+      // rings animate
+      for(let i=0;i<rings.length;i++){
+        rings[i].rotation.x += dt * 0.55;
+        rings[i].rotation.y += dt * 0.28;
+      }
+
+      updateMovement(dt);
+      applyCamera();
+
+      renderer.render(scene, camera);
+      updateHUD();
+      updateFPS(dt);
+
+      requestAnimationFrame(animate);
+    }
+
+    function updateFPS(dt){
+      fpsT += dt; fpsN++;
+      if(fpsT >= 0.5){
+        const fps = fpsN / fpsT;
+        fpsBadge.textContent = `FPS: ${Math.round(fps)}`;
+        fpsT = 0; fpsN = 0;
+      }
+    }
+
+    /* ---------------------------
+     * Resize
+     * --------------------------- */
+    function onResize(){
+      renderer.setSize(innerWidth, innerHeight, false);
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', onResize);
+
+    // Focus canvas for key input
+    canvas3D.focus({ preventScroll: true });
+
+    // Start
+    animate();
+  })();
+</script>
+</body>
+</html>

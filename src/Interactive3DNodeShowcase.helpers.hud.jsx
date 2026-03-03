@@ -1,0 +1,4828 @@
+import { getRackById, getProductById } from "./data/products/store";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { v4 as uuid } from "uuid";
+
+const LINK_SET_DEFAULT_ID = "ls-a";
+const LINK_SET_DEFAULT_NAME = "Set A";
+
+// ---------------------------------------------------------------------------
+// Flow clipboard (shared across inspectors / nodes)
+// - position clipboard: per-axis (X/Y/Z)
+// - style clipboard: copies visual/style fields (not id/from/to/breakpoints)
+// ---------------------------------------------------------------------------
+function getFlowClipboard() {
+    if (typeof window === "undefined") {
+        // SSR / tests
+        return {
+            pos: { x: null, y: null, z: null },
+            style: null,
+        };
+    }
+    const w = window;
+    if (!w.__NODEFORGE_FLOW_CLIPBOARD__) {
+        w.__NODEFORGE_FLOW_CLIPBOARD__ = {
+            pos: { x: null, y: null, z: null },
+            style: null,
+        };
+    }
+    return w.__NODEFORGE_FLOW_CLIPBOARD__;
+}
+
+function deepCloneJson(x) {
+    try {
+        return JSON.parse(JSON.stringify(x));
+    } catch {
+        return x;
+    }
+}
+
+function computeDefaultFlowPos(fromPos, toPos, curve) {
+    const a = Array.isArray(fromPos) ? fromPos : [0, 0, 0];
+    const b = Array.isArray(toPos) ? toPos : a;
+    const mode = curve?.mode || "up";
+    const bend = Number(curve?.bend ?? 0.3) || 0;
+
+    const m = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+    if (!bend || mode === "straight") return m;
+
+    const dx = (b[0] - a[0]) || 0;
+    const dy = (b[1] - a[1]) || 0;
+    const dz = (b[2] - a[2]) || 0;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 0;
+    if (!dist) return m;
+
+    // UP = (0,1,0); side = dir x UP
+    const dirx = dx / dist;
+    const diry = dy / dist;
+    const dirz = dz / dist;
+    let sidex = diry * 0 - dirz * 1;
+    let sidey = dirz * 0 - dirx * 0;
+    let sidez = dirx * 1 - diry * 0;
+    const sl = Math.sqrt(sidex * sidex + sidey * sidey + sidez * sidez) || 1;
+    sidex /= sl;
+    sidey /= sl;
+    sidez /= sl;
+
+    const k = dist * bend * 0.6;
+    if (mode === "up") {
+        m[1] += k;
+    } else if (mode === "side") {
+        m[0] += sidex * k;
+        m[1] += sidey * k;
+        m[2] += sidez * k;
+    } else if (mode === "arc") {
+        const k2 = dist * bend * 0.45;
+        m[1] += k2;
+        m[0] += sidex * k2;
+        m[1] += sidey * k2;
+        m[2] += sidez * k2;
+    }
+    return m;
+}
+
+function linkAlphaLabel(index) {
+    let n = Math.max(0, Number(index) || 0);
+    if (!n) return "A";
+    let label = "";
+    while (n > 0) {
+        n -= 1;
+        label = String.fromCharCode(65 + (n % 26)) + label;
+        n = Math.floor(n / 26);
+    }
+    return label || "A";
+}
+
+function getNodeLinkSets(node) {
+    const sets = Array.isArray(node?.linkSets) ? node.linkSets : [];
+    if (sets.length) return sets;
+    return [{ id: LINK_SET_DEFAULT_ID, name: LINK_SET_DEFAULT_NAME }];
+}
+
+function extractFlowStyle(link) {
+    if (!link) return null;
+    // Copy everything EXCEPT identity / endpoints / path control
+    const {
+        id,
+        from,
+        to,
+        breakpoints,
+        flowPos,
+        targetName,
+        ...rest
+    } = link;
+    return deepCloneJson(rest);
+}
+
+export function OutgoingLinksEditor({
+                                        node,
+                                        nodes,
+                                        links,
+                                        setLinks,
+                                        setNodeById,
+                                        selectedBreakpoint,
+                                        setSelectedBreakpoint,
+                                        reassignFlowLinkId,
+                                        onStartReassignFlow,
+                                        onCancelReassignFlow,
+                                        reverseTargetNodeId,
+                                    }) {
+    const clip = getFlowClipboard();
+    const [bulkStyleKindFilter, setBulkStyleKindFilter] = useState("all");
+    const [openLinkByTargetId, setOpenLinkByTargetId] = useState({});
+
+    const linkSets = useMemo(() => getNodeLinkSets(node), [node]);
+    const activeLinkSetId = node?.activeLinkSetId || linkSets[0]?.id || LINK_SET_DEFAULT_ID;
+
+    const setActiveLinkSetId = (id) => {
+        if (!setNodeById || !node?.id) return;
+        setNodeById(node.id, {
+            linkSets,
+            activeLinkSetId: id || linkSets[0]?.id || LINK_SET_DEFAULT_ID,
+        });
+    };
+
+    const addLinkSet = () => {
+        if (!setNodeById || !node?.id) return;
+        const nextIdx = linkSets.length + 1;
+        const nextName = `Set ${linkAlphaLabel(nextIdx)}`;
+        const nextId = `ls-${uuid()}`;
+        const nextSets = [...linkSets, { id: nextId, name: nextName }];
+        setNodeById(node.id, {
+            linkSets: nextSets,
+            activeLinkSetId: nextId,
+        });
+    };
+
+    const outgoing = links
+        .filter((l) => l.from === node.id)
+        .filter((l) => {
+            const linkSetId = l.linkSetId || activeLinkSetId || LINK_SET_DEFAULT_ID;
+            return linkSetId === activeLinkSetId;
+        })
+        .map((l) => ({
+            ...l,
+            targetName: nodes.find((n) => n.id === l.to)?.label || l.to,
+        }));
+
+    const outgoingGroups = useMemo(() => {
+        const map = new Map();
+        for (const l of outgoing) {
+            const key = l.to || l.targetName || "unknown";
+            if (!map.has(key)) {
+                map.set(key, { toId: l.to, targetName: l.targetName || l.to, links: [] });
+            }
+            map.get(key).links.push(l);
+        }
+        return Array.from(map.values());
+    }, [outgoing]);
+
+    const outgoingWithBps = outgoing.filter(
+        (l) => Array.isArray(l.breakpoints) && l.breakpoints.length > 0,
+    );
+
+    const getAnchorSetsForNode = (node) => {
+        if (!node) return [];
+        const sets = Array.isArray(node.flowAnchorSets) ? node.flowAnchorSets : [];
+        if (sets.length) return sets;
+        const legacy = Array.isArray(node.flowAnchors) ? node.flowAnchors : [];
+        if (legacy.length) {
+            return [{
+                id: node.flowAnchorActiveSetId || "fas-default",
+                name: "Default",
+            }];
+        }
+        return [];
+    };
+
+// Bulk align helpers: apply X/Y/Z to ALL breakpoints across ALL outgoing flows from this node.
+    const setAllFlowsBreakpointsAxis = (axis, value) => {
+        const ai = axisToIndex(axis);
+        const v = Number(value);
+        if (!Number.isFinite(v)) return;
+
+        setLinks((prev) =>
+            prev.map((x) => {
+                if (x.from !== node.id) return x;
+                const bps = Array.isArray(x.breakpoints) ? x.breakpoints : [];
+                if (!bps.length) return x;
+
+                const next = bps.map((b) => {
+                    const bb = Array.isArray(b) ? b : [0, 0, 0];
+                    const out = [
+                        Number(bb[0]) || 0,
+                        Number(bb[1]) || 0,
+                        Number(bb[2]) || 0,
+                    ];
+                    out[ai] = v;
+                    return out;
+                });
+
+                return { ...x, breakpoints: next };
+            }),
+        );
+    };
+
+    const copyAllFlowsBreakpointsAxis = (axis) => {
+        if (!outgoingWithBps.length) return;
+
+        // Prefer the currently selected BP (if it belongs to an outgoing flow), else use the first flow with BPs.
+        let link = null;
+        let idx = 0;
+
+        if (
+            selectedBreakpoint &&
+            selectedBreakpoint.linkId &&
+            Number.isInteger(selectedBreakpoint.index)
+        ) {
+            const hit = outgoingWithBps.find((o) => o.id === selectedBreakpoint.linkId);
+            if (hit) {
+                link = hit;
+                idx = selectedBreakpoint.index;
+            }
+        }
+
+        if (!link) link = outgoingWithBps[0];
+
+        const bps = Array.isArray(link.breakpoints) ? link.breakpoints : [];
+        if (!bps.length) return;
+        if (idx < 0 || idx >= bps.length) idx = 0;
+
+        const bp = bps[idx];
+        if (!Array.isArray(bp) || bp.length < 3) return;
+
+        const v = Number(bp[axisToIndex(axis)]);
+        if (!Number.isFinite(v)) return;
+
+        clip.pos[axis] = v;
+    };
+
+    const pasteAllFlowsBreakpointsAxis = (axis) => {
+        const v = clip.pos?.[axis];
+        if (!Number.isFinite(Number(v))) return;
+        setAllFlowsBreakpointsAxis(axis, v);
+    };
+
+
+// Bulk style helpers: copy/paste flow style across ALL outgoing links from this node.
+    const copyAllFlowsStyle = () => {
+        if (!outgoing.length) return;
+
+        let src = null;
+
+        // Prefer selected breakpoint's flow as source (if any), else first outgoing.
+        if (selectedBreakpoint?.linkId) {
+            const hit = outgoing.find((o) => o.id === selectedBreakpoint.linkId);
+            if (hit) src = hit;
+        }
+        if (!src) src = outgoing[0];
+
+        clip.style = extractFlowStyle(src);
+    };
+
+    const pasteAllFlowsStyle = () => {
+        if (!clip.style) return;
+        const kindFilter = String(bulkStyleKindFilter || "all").toLowerCase();
+
+        // Apply style fields to all outgoing flows; never touch endpoints/path.
+        setLinks((prev) =>
+            prev.map((x) =>
+                x.from === node.id && (kindFilter === "all" || String(x.kind || "").toLowerCase() === kindFilter)
+                    ? { ...x, ...deepCloneJson(clip.style) }
+                    : x,
+            ),
+        );
+    };
+
+    const [confirmDlg, setConfirmDlg] = useState(null);
+    const confirmYesRef = useRef(null);
+
+    useEffect(() => {
+        if (!confirmDlg) return;
+        const t = setTimeout(() => {
+            try {
+                confirmYesRef.current?.focus?.();
+            } catch {
+                // ignore
+            }
+        }, 0);
+
+        const onKey = (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                e.stopPropagation();
+                confirmDlg?.onConfirm?.();
+            } else if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                confirmDlg?.onCancel?.();
+            }
+        };
+
+        window.addEventListener("keydown", onKey, true);
+        return () => {
+            clearTimeout(t);
+            window.removeEventListener("keydown", onKey, true);
+        };
+    }, [confirmDlg]);
+
+    const unlinkNow = (linkId) => {
+        if (!linkId) return;
+        setLinks((prev) => prev.filter((x) => x.id !== linkId));
+        if (selectedBreakpoint?.linkId === linkId && setSelectedBreakpoint) {
+            setSelectedBreakpoint(null);
+        }
+    };
+
+    const requestUnlink = (link) => {
+        const linkId = link?.id;
+        if (!linkId) return;
+
+        const fromName =
+            nodes?.find?.((n) => n.id === link?.from)?.name ||
+            nodes?.find?.((n) => n.id === link?.from)?.label ||
+            link?.from ||
+            "Source";
+
+        const toName =
+            nodes?.find?.((n) => n.id === link?.to)?.name ||
+            nodes?.find?.((n) => n.id === link?.to)?.label ||
+            link?.to ||
+            "Target";
+
+        setConfirmDlg({
+            title: "Unlink flow?",
+            message: `${fromName} → ${toName}`,
+            onConfirm: () => {
+                setConfirmDlg(null);
+                unlinkNow(linkId);
+            },
+            onCancel: () => setConfirmDlg(null),
+        });
+    };
+
+    const reverseLinkNow = (link) => {
+        const linkId = link?.id;
+        if (!linkId || !reverseTargetNodeId) return;
+        setLinks((prev) =>
+            prev.map((x) => {
+                if (!x || x.id !== linkId) return x;
+                const oldFrom = x.from;
+                const oldTo = x.to;
+                if (oldFrom !== reverseTargetNodeId && oldTo !== reverseTargetNodeId) return x;
+                let nextOwner = x.flowAnchorSetOwnerId;
+                if (nextOwner === oldFrom) nextOwner = oldTo;
+                else if (nextOwner === oldTo) nextOwner = oldFrom;
+                return {
+                    ...x,
+                    from: oldTo,
+                    to: oldFrom,
+                    flowAnchorSetOwnerId: nextOwner,
+                };
+            }),
+        );
+        if (reassignFlowLinkId === linkId) onCancelReassignFlow?.();
+    };
+
+
+    const patch = (id, p) =>
+        setLinks((prev) =>
+            prev.map((x) => (x.id === id ? { ...x, ...p } : x)),
+        );
+
+    const patchNested = (id, path, value) =>
+        setLinks((prev) =>
+            prev.map((x) => {
+                if (x.id !== id) return x;
+                const copy = { ...x };
+                let cur = copy;
+                for (let i = 0; i < path.length - 1; i++) {
+                    const k = path[i];
+                    cur[k] = cur[k] ? { ...cur[k] } : {};
+                    cur = cur[k];
+                }
+                cur[path[path.length - 1]] = value;
+                return copy;
+            }),
+        );
+
+    const getNodePos = (nodeId) => nodes.find((n) => n.id === nodeId)?.position || [0, 0, 0];
+
+    const getFlowPos = (l) => {
+        const fp = l?.flowPos;
+        if (Array.isArray(fp) && fp.length >= 3 && fp.every((v) => Number.isFinite(Number(v)))) {
+            return [Number(fp[0]), Number(fp[1]), Number(fp[2])];
+        }
+        // Fallback: match Link3D's default curve midpoint so enabling flowPos does not visually jump.
+        return computeDefaultFlowPos(getNodePos(l.from), getNodePos(l.to), l.curve);
+    };
+
+    const setFlowPosAxis = (id, l, axis, value) => {
+        const cur = getFlowPos(l);
+        const next = [...cur];
+        const v = Number(value);
+        if (axis === "x") next[0] = Number.isFinite(v) ? v : next[0];
+        if (axis === "y") next[1] = Number.isFinite(v) ? v : next[1];
+        if (axis === "z") next[2] = Number.isFinite(v) ? v : next[2];
+        patch(id, { flowPos: next });
+    };
+
+    const copyFlowAxis = (l, axis) => {
+        const fp = getFlowPos(l);
+        if (axis === "x") clip.pos.x = fp[0];
+        if (axis === "y") clip.pos.y = fp[1];
+        if (axis === "z") clip.pos.z = fp[2];
+    };
+
+    const pasteFlowAxis = (l, axis) => {
+        const v = axis === "x" ? clip.pos.x : axis === "y" ? clip.pos.y : clip.pos.z;
+        if (!Number.isFinite(Number(v))) return;
+        setFlowPosAxis(l.id, l, axis, v);
+    };
+
+    // Breakpoint clipboard helpers (reuse the same X/Y/Z clipboard as Flow Position)
+    const axisToIndex = (axis) => (axis === "x" ? 0 : axis === "y" ? 1 : 2);
+
+    const setBreakpointAxis = (linkId, idx, axis, value) => {
+        const ai = axisToIndex(axis);
+        const v = Number(value);
+
+        setLinks((prev) =>
+            prev.map((x) => {
+                if (x.id !== linkId) return x;
+                const bps = Array.isArray(x.breakpoints) ? x.breakpoints : [];
+                if (idx < 0 || idx >= bps.length) return x;
+
+                const next = bps.map((b, i) => {
+                    if (i !== idx) return b;
+                    const bb = Array.isArray(b) ? b : [0, 0, 0];
+                    const out = [
+                        Number(bb[0]) || 0,
+                        Number(bb[1]) || 0,
+                        Number(bb[2]) || 0,
+                    ];
+                    out[ai] = Number.isFinite(v) ? v : out[ai];
+                    return out;
+                });
+
+                return { ...x, breakpoints: next };
+            }),
+        );
+    };
+
+    const copyBreakpointAxis = (l, idx, axis) => {
+        const bps = Array.isArray(l.breakpoints) ? l.breakpoints : [];
+        const bp = bps[idx];
+        if (!Array.isArray(bp) || bp.length < 3) return;
+        const ai = axisToIndex(axis);
+        const v = Number(bp[ai]);
+        if (!Number.isFinite(v)) return;
+        clip.pos[axis] = v;
+    };
+
+    const pasteBreakpointAxis = (l, idx, axis) => {
+        const v = clip.pos?.[axis];
+        if (!Number.isFinite(Number(v))) return;
+        setBreakpointAxis(l.id, idx, axis, v);
+    };
+
+    const setAllBreakpointsAxis = (linkId, axis, value) => {
+        const ai = axisToIndex(axis);
+        const v = Number(value);
+        if (!Number.isFinite(v)) return;
+
+        setLinks((prev) =>
+            prev.map((x) => {
+                if (x.id !== linkId) return x;
+                const bps = Array.isArray(x.breakpoints) ? x.breakpoints : [];
+                if (!bps.length) return x;
+
+                const next = bps.map((b) => {
+                    const bb = Array.isArray(b) ? b : [0, 0, 0];
+                    const out = [
+                        Number(bb[0]) || 0,
+                        Number(bb[1]) || 0,
+                        Number(bb[2]) || 0,
+                    ];
+                    out[ai] = v;
+                    return out;
+                });
+
+                return { ...x, breakpoints: next };
+            }),
+        );
+    };
+
+    const copyAllBreakpointsAxis = (l, axis) => {
+        const bps = Array.isArray(l.breakpoints) ? l.breakpoints : [];
+        if (!bps.length) return;
+
+        // Prefer selected breakpoint as the copy source; fallback to BP1.
+        let idx = 0;
+        if (
+            selectedBreakpoint &&
+            selectedBreakpoint.linkId === l.id &&
+            Number.isInteger(selectedBreakpoint.index)
+        ) {
+            const si = selectedBreakpoint.index;
+            if (si >= 0 && si < bps.length) idx = si;
+        }
+
+        const bp = bps[idx];
+        if (!Array.isArray(bp) || bp.length < 3) return;
+        const ai = axisToIndex(axis);
+        const v = Number(bp[ai]);
+        if (!Number.isFinite(v)) return;
+
+        clip.pos[axis] = v;
+    };
+
+    const pasteAllBreakpointsAxis = (l, axis) => {
+        const v = clip.pos?.[axis];
+        if (!Number.isFinite(Number(v))) return;
+        setAllBreakpointsAxis(l.id, axis, v);
+    };
+
+
+    const copyFlowStyle = (l) => {
+        clip.style = extractFlowStyle(l);
+    };
+
+    const pasteFlowStyle = (l) => {
+        if (!clip.style) return;
+        // merge style fields; never touch endpoints/path
+        patch(l.id, deepCloneJson(clip.style));
+    };
+
+
+    return (
+        <div
+            style={{
+                borderTop: "1px dashed rgba(255,255,255,0.15)",
+                paddingTop: 8,
+                marginTop: 8,
+            }}
+        >
+            <div style={{ fontWeight: 900, marginBottom: 6 }}>
+                Outgoing Links (flow per link)
+            </div>
+
+            <div
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    marginBottom: 8,
+                }}
+            >
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    {linkSets.map((set) => {
+                        const isActive = set.id === activeLinkSetId;
+                        return (
+                            <button
+                                key={set.id}
+                                type="button"
+                                onClick={() => setActiveLinkSetId(set.id)}
+                                style={{
+                                    fontSize: 11,
+                                    padding: "4px 8px",
+                                    borderRadius: 999,
+                                    border: isActive
+                                        ? "1px solid rgba(56,189,248,0.9)"
+                                        : "1px solid rgba(148,163,184,0.4)",
+                                    background: isActive
+                                        ? "rgba(2,132,199,0.35)"
+                                        : "rgba(15,23,42,0.75)",
+                                    color: isActive ? "#e0f2fe" : "rgba(229,231,235,0.85)",
+                                    cursor: "pointer",
+                                }}
+                                title={isActive ? "Active set" : "Activate set"}
+                            >
+                                {set.name || "Set"}
+                            </button>
+                        );
+                    })}
+                </div>
+
+                <button
+                    type="button"
+                    onClick={addLinkSet}
+                    disabled={!setNodeById}
+                    style={{
+                        fontSize: 12,
+                        padding: "2px 8px",
+                        borderRadius: 8,
+                        border: "1px solid rgba(148,163,184,0.5)",
+                        background: "rgba(15,23,42,0.8)",
+                        color: "#e5e7eb",
+                        cursor: setNodeById ? "pointer" : "not-allowed",
+                    }}
+                    title="Add a new link set (activates it)"
+                >
+                    + Set
+                </button>
+            </div>
+
+            {outgoing.length > 0 && (
+                <div
+                    style={{
+                        padding: 8,
+                        borderRadius: 8,
+                        border: "1px solid rgba(148,163,184,0.22)",
+                        background: "rgba(2,6,23,0.55)",
+                        marginBottom: 10,
+                    }}
+                    title="Bulk copy/paste for styles across ALL outgoing flows from this node. Copy uses the selected flow (via selected breakpoint if any), otherwise the first outgoing flow. Paste applies the copied style to every outgoing flow."
+                >
+                    <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6, opacity: 0.92 }}>
+                        All flows — Style
+                    </div>
+
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                        <button
+                            type="button"
+                            onClick={copyAllFlowsStyle}
+                            style={{
+                                fontSize: 11,
+                                padding: "4px 10px",
+                                borderRadius: 999,
+                                border: "1px solid rgba(148,163,184,0.6)",
+                                background: "rgba(15,23,42,0.9)",
+                                color: "#e5e7eb",
+                                cursor: "pointer",
+                            }}
+                            title="Copy style from selected flow (or first outgoing flow)"
+                        >
+                            Copy Style
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={pasteAllFlowsStyle}
+                            disabled={!clip.style}
+                            style={{
+                                fontSize: 11,
+                                padding: "4px 10px",
+                                borderRadius: 999,
+                                border: "1px solid rgba(148,163,184,0.6)",
+                                background: clip.style ? "rgba(15,23,42,0.9)" : "rgba(15,23,42,0.55)",
+                                color: clip.style ? "#e5e7eb" : "rgba(229,231,235,0.55)",
+                                cursor: clip.style ? "pointer" : "not-allowed",
+                            }}
+                            title="Paste copied style onto ALL outgoing flows"
+                        >
+                            Paste Style to All
+                        </button>
+
+                        <div style={{ fontSize: 11, opacity: 0.65 }}>
+                            Clipboard: {clip.style ? "style loaded" : "empty"}
+                        </div>
+                        <label style={{ fontSize: 11, display: "flex", gap: 6, alignItems: "center" }}>
+                            Paste to kind
+                            <select
+                                value={bulkStyleKindFilter}
+                                onChange={(e) => setBulkStyleKindFilter(e.target.value)}
+                            >
+                                <option value="all">All kinds</option>
+                                <option value="wifi">Wi-Fi</option>
+                                <option value="wired">Wired</option>
+                                <option value="poe">PoE</option>
+                                <option value="cat5e">Cat5e</option>
+                                <option value="cat6">Cat6</option>
+                                <option value="cat6a">Cat6a</option>
+                                <option value="cat7">Cat7</option>
+                                <option value="speaker">Speaker</option>
+                                <option value="fiber">Fiber</option>
+                            </select>
+                        </label>
+                    </div>
+                </div>
+            )}
+
+            {outgoingWithBps.length > 0 && (
+                <div
+                    style={{
+                        padding: 8,
+                        borderRadius: 8,
+                        border: "1px solid rgba(148,163,184,0.22)",
+                        background: "rgba(2,6,23,0.55)",
+                        marginBottom: 10,
+                    }}
+                    title="Bulk copy/paste for ALL breakpoints across ALL outgoing flows from this node. Copy uses the selected breakpoint (if any), otherwise the first flow's BP 1. Paste applies to every breakpoint in every outgoing flow that has breakpoints."
+                >
+                    <div style={{ fontSize: 12, fontWeight: 900, marginBottom: 6, opacity: 0.92 }}>
+                        All flows — Breakpoints
+                    </div>
+
+                    <div
+                        style={{
+                            display: "grid",
+                            gridTemplateColumns: "auto 1fr 1fr 1fr",
+                            gap: 8,
+                            alignItems: "center",
+                        }}
+                    >
+                        <div style={{ fontSize: 11, opacity: 0.75, paddingRight: 4 }}>Bulk</div>
+
+                        {["X", "Y", "Z"].map((axis) => {
+                            const axisKey = String(axis).toLowerCase();
+                            const hasClip = Number.isFinite(Number(clip.pos?.[axisKey]));
+                            return (
+                                <div
+                                    key={axis}
+                                    style={{
+                                        display: "grid",
+                                        gridTemplateColumns: "16px auto auto",
+                                        gap: 6,
+                                        alignItems: "center",
+                                        justifyContent: "start",
+                                    }}
+                                >
+                                    <div style={{ fontSize: 11, opacity: 0.85 }}>{axis}</div>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => copyAllFlowsBreakpointsAxis(axisKey)}
+                                        style={{
+                                            fontSize: 10,
+                                            padding: "3px 8px",
+                                            borderRadius: 999,
+                                            border: "1px solid rgba(148,163,184,0.6)",
+                                            background: "rgba(15,23,42,0.9)",
+                                            color: "#e5e7eb",
+                                            cursor: "pointer",
+                                        }}
+                                        title={`Copy ${axis} from selected BP (or first flow BP 1)`}
+                                    >
+                                        C
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        onClick={() => pasteAllFlowsBreakpointsAxis(axisKey)}
+                                        disabled={!hasClip}
+                                        style={{
+                                            fontSize: 10,
+                                            padding: "3px 8px",
+                                            borderRadius: 999,
+                                            border: "1px solid rgba(148,163,184,0.6)",
+                                            background: hasClip ? "rgba(15,23,42,0.9)" : "rgba(15,23,42,0.55)",
+                                            color: hasClip ? "#e5e7eb" : "rgba(229,231,235,0.55)",
+                                            cursor: hasClip ? "pointer" : "not-allowed",
+                                        }}
+                                        title={`Paste ${axis} to ALL breakpoints in ALL outgoing flows`}
+                                    >
+                                        P
+                                    </button>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            {outgoing.length === 0 && (
+                <div style={{ opacity: 0.75, fontSize: 12 }}>
+                    No links originate from this node.
+                </div>
+            )}
+
+            {outgoingGroups.map((group) => {
+                const linksInGroup = Array.isArray(group.links) ? group.links : [];
+                if (linksInGroup.length === 0) return null;
+                const groupKey = group.toId || group.targetName || linksInGroup[0].id;
+                const activeId = openLinkByTargetId[groupKey] || linksInGroup[0].id;
+                const activeIndex = linksInGroup.findIndex((x) => x.id === activeId);
+                const idx = activeIndex >= 0 ? activeIndex : 0;
+                const l = linksInGroup[idx];
+                const fallbackLabel = linkAlphaLabel(idx + 1);
+                const labelValue = (l.label ?? fallbackLabel ?? "").trim();
+                const descValue = l.description ?? "";
+                const displayLabel = labelValue ? `Link ${labelValue}` : "Link";
+                const displayMeta = descValue ? `${displayLabel} - ${descValue}` : displayLabel;
+                const isReassigning = reassignFlowLinkId === l.id;
+                const canReverse = !!reverseTargetNodeId && (l.to === reverseTargetNodeId || l.from === reverseTargetNodeId);
+                const showTabs = linksInGroup.length > 1;
+                return (
+                    <div
+                        key={groupKey}
+                        style={{
+                            padding: 8,
+                            border: "1px solid rgba(255,255,255,0.08)",
+                            borderRadius: 6,
+                            marginBottom: 8,
+                            background: "linear-gradient(180deg,#020617,rgba(15,23,42,0.92))",
+                        }}
+                    >
+                    <div
+                        style={{
+                            fontSize: 12,
+                            opacity: 0.85,
+                            marginBottom: 6,
+                        }}
+                    >
+                        to <strong>{l.targetName}</strong>{" "}
+                        <span style={{ opacity: 0.7 }}>({displayMeta})</span>
+                    </div>
+
+                    {showTabs && (
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                            {linksInGroup.map((lnk, lidx) => {
+                                const tabLabel = (lnk.label || linkAlphaLabel(lidx + 1)).trim();
+                                const tabDesc = (lnk.description || "").trim();
+                                const isActive = lnk.id === l.id;
+                                return (
+                                    <button
+                                        key={lnk.id}
+                                        type="button"
+                                        onClick={() =>
+                                            setOpenLinkByTargetId((prev) => ({
+                                                ...(prev || {}),
+                                                [groupKey]: lnk.id,
+                                            }))
+                                        }
+                                        style={{
+                                            fontSize: 11,
+                                            padding: "4px 8px",
+                                            borderRadius: 999,
+                                            border: isActive
+                                                ? "1px solid rgba(56,189,248,0.9)"
+                                                : "1px solid rgba(148,163,184,0.4)",
+                                            background: isActive
+                                                ? "rgba(2,132,199,0.35)"
+                                                : "rgba(15,23,42,0.75)",
+                                            color: isActive ? "#e0f2fe" : "rgba(229,231,235,0.85)",
+                                            cursor: "pointer",
+                                        }}
+                                        title={tabDesc ? `${tabLabel}: ${tabDesc}` : tabLabel}
+                                    >
+                                        {tabLabel || `Link ${lidx + 1}`}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                        <label style={{ display: "block" }}>
+                            Label
+                            <input
+                                value={labelValue}
+                                onChange={(e) => patch(l.id, { label: e.target.value })}
+                                placeholder="A"
+                            />
+                        </label>
+                        <label style={{ display: "block" }}>
+                            Description
+                            <input
+                                value={descValue}
+                                onChange={(e) => patch(l.id, { description: e.target.value })}
+                                placeholder="Optional"
+                            />
+                        </label>
+                    </div>
+
+                    {/* Flow actions */}
+                    <div
+                        style={{
+                            display: "flex",
+                            gap: 6,
+                            flexWrap: "wrap",
+                            marginBottom: 8,
+                        }}
+                    >
+                        <button
+                            type="button"
+                            onClick={() => requestUnlink(l)}
+                            style={{
+                                fontSize: 11,
+                                padding: "4px 8px",
+                                borderRadius: 999,
+                                border: "1px solid rgba(239,68,68,0.9)",
+                                background: "rgba(127,29,29,0.95)",
+                                color: "#fee2e2",
+                                cursor: "pointer",
+                            }}
+                            title="Unlink / delete this flow"
+                        >
+                            Unlink
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => {
+                                if (isReassigning) onCancelReassignFlow?.();
+                                else onStartReassignFlow?.(l);
+                            }}
+                            disabled={!onStartReassignFlow && !onCancelReassignFlow}
+                            style={{
+                                fontSize: 11,
+                                padding: "4px 8px",
+                                borderRadius: 999,
+                                border: isReassigning
+                                    ? "1px solid rgba(56,189,248,0.9)"
+                                    : "1px solid rgba(148,163,184,0.6)",
+                                background: isReassigning
+                                    ? "rgba(2,132,199,0.35)"
+                                    : "rgba(15,23,42,0.9)",
+                                color: isReassigning ? "#e0f2fe" : "#e5e7eb",
+                                cursor: (onStartReassignFlow || onCancelReassignFlow) ? "pointer" : "not-allowed",
+                            }}
+                            title={isReassigning ? "Cancel re-assign" : "Re-assign target for this flow"}
+                        >
+                            {isReassigning ? "Pick target..." : "Re-assign"}
+                        </button>
+
+                        {reverseTargetNodeId && (
+                            <button
+                                type="button"
+                                onClick={() => reverseLinkNow(l)}
+                                disabled={!canReverse}
+                                style={{
+                                    fontSize: 11,
+                                    padding: "4px 8px",
+                                    borderRadius: 999,
+                                    border: "1px solid rgba(148,163,184,0.6)",
+                                    background: canReverse ? "rgba(15,23,42,0.9)" : "rgba(15,23,42,0.55)",
+                                    color: canReverse ? "#e5e7eb" : "rgba(229,231,235,0.55)",
+                                    cursor: canReverse ? "pointer" : "not-allowed",
+                                }}
+                                title="Reverse this incoming flow so this node becomes the master"
+                            >
+                                Reverse link
+                            </button>
+                        )}
+
+                        <button
+                            type="button"
+                            onClick={() => copyFlowStyle(l)}
+                            style={{
+                                fontSize: 11,
+                                padding: "4px 8px",
+                                borderRadius: 999,
+                                border: "1px solid rgba(148,163,184,0.6)",
+                                background: "rgba(15,23,42,0.9)",
+                                color: "#e5e7eb",
+                                cursor: "pointer",
+                            }}
+                            title="Copy this flow's style settings"
+                        >
+                            Copy Style
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => pasteFlowStyle(l)}
+                            disabled={!clip.style}
+                            style={{
+                                fontSize: 11,
+                                padding: "4px 8px",
+                                borderRadius: 999,
+                                border: "1px solid rgba(148,163,184,0.6)",
+                                background: clip.style ? "rgba(15,23,42,0.9)" : "rgba(15,23,42,0.55)",
+                                color: clip.style ? "#e5e7eb" : "rgba(229,231,235,0.55)",
+                                cursor: clip.style ? "pointer" : "not-allowed",
+                            }}
+                            title="Paste the copied flow style onto this flow"
+                        >
+                            Paste Style
+                        </button>
+                    </div>
+
+                    {isReassigning && (
+                        <div style={{ fontSize: 11, opacity: 0.75 }}>
+                            Click a target node to re-assign this flow.
+                        </div>
+                    )}
+
+                    {/* Core */}
+                    <label>
+                        Style{" "}
+                        <select
+                            value={l.style || "particles"}
+                            onChange={(e) =>
+                                patch(l.id, { style: e.target.value })
+                            }
+                        >
+                            <option value="particles">particles</option>
+                            <option value="wavy">wavy</option>
+                            <option value="icons">icons</option>
+                            <option value="packet">packet</option>
+                            <option value="dashed">dashed</option>
+                            <option value="solid">solid</option>
+                            <option value="epic">epic</option>
+                            <option value="sweep">sweep</option>
+                            <option value="cable">cable</option>
+                        </select>
+                    </label>
+                    {(() => {
+                        const toNode = nodes.find((n) => n.id === l.to);
+                        const fromNode = nodes.find((n) => n.id === l.from);
+                        const toSets = getAnchorSetsForNode(toNode);
+                        const fromSets = getAnchorSetsForNode(fromNode);
+                        const combinedSets = [...fromSets, ...toSets];
+                        const knownIds = new Set(combinedSets.map((s) => s.id));
+                        const hasCustom = l.flowAnchorSetId && !knownIds.has(l.flowAnchorSetId);
+                        const fromIds = new Set(fromSets.map((s) => s.id));
+                        const toIds = new Set(toSets.map((s) => s.id));
+                        const selectionValue = (() => {
+                            if (!l.flowAnchorSetId) return "";
+                            if (l.flowAnchorSetOwnerId) return `${l.flowAnchorSetOwnerId}::${l.flowAnchorSetId}`;
+                            if (fromIds.has(l.flowAnchorSetId)) return `${l.from}::${l.flowAnchorSetId}`;
+                            if (toIds.has(l.flowAnchorSetId)) return `${l.to}::${l.flowAnchorSetId}`;
+                            return "";
+                        })();
+                        const handleAnchorSetChange = (value) => {
+                            if (!value) {
+                                patch(l.id, { flowAnchorSetId: undefined, flowAnchorSetOwnerId: undefined });
+                                return;
+                            }
+                            const parts = String(value).split("::");
+                            if (parts.length !== 2) {
+                                patch(l.id, { flowAnchorSetId: undefined, flowAnchorSetOwnerId: undefined });
+                                return;
+                            }
+                            patch(l.id, { flowAnchorSetOwnerId: parts[0] || undefined, flowAnchorSetId: parts[1] || undefined });
+                        };
+                        return (
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Anchor set
+                                <select
+                                    value={selectionValue}
+                                    onChange={(e) => handleAnchorSetChange(e.target.value)}
+                                >
+                                    <option value="">Auto (default)</option>
+                                    {hasCustom && (
+                                        <option value={`${l.flowAnchorSetOwnerId || l.from || l.to}::${l.flowAnchorSetId}`}>
+                                            {l.flowAnchorSetId} (missing)
+                                        </option>
+                                    )}
+                                    {fromSets.length > 0 && (
+                                        <optgroup label="From node">
+                                            {fromSets.map((set) => (
+                                                <option key={`from-${set.id}`} value={`${l.from}::${set.id}`}>
+                                                    {set.name || "Anchor Set"}
+                                                </option>
+                                            ))}
+                                        </optgroup>
+                                    )}
+                                    {toSets.length > 0 && (
+                                        <optgroup label="To node">
+                                            {toSets.map((set) => (
+                                                <option key={`to-${set.id}`} value={`${l.to}::${set.id}`}>
+                                                    {set.name || "Anchor Set"}
+                                                </option>
+                                            ))}
+                                        </optgroup>
+                                    )}
+                                </select>
+                            </label>
+                        );
+                    })()}
+
+                    <label style={{ display: "block", marginTop: 6 }}>
+                        Speed
+                        <input
+                            type="range"
+                            min={0}
+                            max={4}
+                            step={0.01}
+                            value={l.speed ?? 1}
+                            onChange={(e) =>
+                                patch(l.id, {
+                                    speed: Number(e.target.value),
+                                })
+                            }
+                        />
+                    </label>
+
+                    <label style={{ display: "block", marginTop: 6 }}>
+                        Color
+                        <input
+                            type="color"
+                            value={l.color || "#7cf"}
+                            onChange={(e) =>
+                                patch(l.id, { color: e.target.value })
+                            }
+                        />
+                    </label>
+
+                    <label
+                        style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            marginTop: 6,
+                        }}
+                    >
+                        <input
+                            type="checkbox"
+                            checked={l.active !== false}
+                            onChange={(e) =>
+                                patch(l.id, { active: e.target.checked ? true : false })
+                            }
+                        />{" "}
+                        Active
+                    </label>
+
+                    {/* Packet settings (style = packet) */}
+                    {((l.style || "particles") === "packet") && (
+                        <div style={{
+                            marginTop: 10,
+                            paddingTop: 10,
+                            borderTop: "1px dashed rgba(255,255,255,0.12)",
+                            display: "grid",
+                            gap: 10,
+                        }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Packet Flow</div>
+
+                            {(() => {
+                                const pkt = l.packet || {};
+                                const visual = pkt.visual || {};
+                                const path = pkt.path || {};
+                                const timing = pkt.timing || {};
+                                const success = pkt.success || {};
+                                const emit = pkt.emit || {};
+                                const setPkt = (patchObj) => {
+                                    patch(l.id, {
+                                        packet: {
+                                            ...pkt,
+                                            ...patchObj,
+                                        },
+                                    });
+                                };
+                                const setVisual = (patchObj) => setPkt({ visual: { ...visual, ...patchObj } });
+                                const setPath = (patchObj) => setPkt({ path: { ...path, ...patchObj } });
+                                const setTiming = (patchObj) => setPkt({ timing: { ...timing, ...patchObj } });
+                                const setSuccess = (patchObj) => setPkt({ success: { ...success, ...patchObj } });
+                                const setEmit = (patchObj) => setPkt({ emit: { ...emit, ...patchObj } });
+
+                                return (
+                                    <>
+                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                            <label>
+                                                Packet Shape
+                                                <select
+                                                    value={visual.shape || "orb"}
+                                                    onChange={(e) => setVisual({ shape: e.target.value })}
+                                                >
+                                                    <option value="orb">orb</option>
+                                                    <option value="square">square</option>
+                                                    <option value="ring">ring</option>
+                                                    <option value="shard">shard</option>
+                                                    <option value="comet">comet</option>
+                                                    <option value="waves">waves</option>
+                                                    <option value="envelope">envelope</option>
+                                                    <option value="static">static</option>
+                                                    <option value="text">text</option>
+                                                </select>
+                                            </label>
+                                            <label>
+                                                Packet Color
+                                                <input
+                                                    type="color"
+                                                    value={visual.color || l.color || "#7cf"}
+                                                    onChange={(e) => setVisual({ color: e.target.value })}
+                                                />
+                                            </label>
+                                        </div>
+
+                                        {((visual.shape || "orb") === "text") && (
+                                            <label>
+                                                Text
+                                                <input
+                                                    type="text"
+                                                    value={visual.text || "PING"}
+                                                    onChange={(e) => setVisual({ text: e.target.value })}
+                                                />
+                                            </label>
+                                        )}
+
+                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                            <label style={{ display: "block" }}>
+                                                Size
+                                                <input
+                                                    type="range"
+                                                    min={0.04}
+                                                    max={0.6}
+                                                    step={0.01}
+                                                    value={visual.size ?? 0.14}
+                                                    onChange={(e) => setVisual({ size: Number(e.target.value) })}
+                                                />
+                                            </label>
+                                            <label style={{ display: "block" }}>
+                                                Glow
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={4}
+                                                    step={0.05}
+                                                    value={visual.glow ?? 1.2}
+                                                    onChange={(e) => setVisual({ glow: Number(e.target.value) })}
+                                                />
+                                            </label>
+                                        </div>
+
+                                        <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={visual.trail !== false}
+                                                onChange={(e) => setVisual({ trail: e.target.checked ? true : false })}
+                                            />
+                                            Trail
+                                        </label>
+
+                                        <div style={{ borderTop: "1px dashed rgba(255,255,255,0.12)", paddingTop: 10, display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Path Layer</div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Path Style
+                                                    <select
+                                                        value={path.style || "invisible"}
+                                                        onChange={(e) => setPath({ style: e.target.value })}
+                                                    >
+                                                        <option value="invisible">invisible</option>
+                                                        <option value="line">line</option>
+                                                        <option value="dashed">dashed</option>
+                                                        <option value="particles">particles</option>
+                                                        <option value="pulse">pulse</option>
+                                                    </select>
+                                                </label>
+
+                                                <label>
+                                                    Path Color
+                                                    <input
+                                                        type="color"
+                                                        value={path.color || l.color || "#7cf"}
+                                                        onChange={(e) => setPath({ color: e.target.value })}
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!path.showBaseLink}
+                                                    onChange={(e) => setPath({ showBaseLink: e.target.checked ? true : false })}
+                                                />
+                                                Show normal link underneath (optional)
+                                            </label>
+
+                                            <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={(path.onlyWhenActive ?? true) !== false}
+                                                    onChange={(e) => setPath({ onlyWhenActive: e.target.checked ? true : false })}
+                                                />
+                                                Path visible only when packets run
+                                            </label>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label style={{ display: "block" }}>
+                                                    Path Opacity
+                                                    <input
+                                                        type="range"
+                                                        min={0}
+                                                        max={1}
+                                                        step={0.01}
+                                                        value={path.opacity ?? 0.75}
+                                                        onChange={(e) => setPath({ opacity: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                                <label style={{ display: "block" }}>
+                                                    Path Speed
+                                                    <input
+                                                        type="range"
+                                                        min={0}
+                                                        max={4}
+                                                        step={0.01}
+                                                        value={path.speed ?? 1}
+                                                        onChange={(e) => setPath({ speed: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ borderTop: "1px dashed rgba(255,255,255,0.12)", paddingTop: 10, display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Timing Layer</div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Start Delay (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={timing.startDelay ?? 0}
+                                                        onChange={(e) => setTiming({ startDelay: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                                <label>
+                                                    Travel Duration (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={timing.travelDuration ?? 1.2}
+                                                        onChange={(e) => setTiming({ travelDuration: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Easing
+                                                    <select
+                                                        value={timing.easing || "linear"}
+                                                        onChange={(e) => setTiming({ easing: e.target.value })}
+                                                    >
+                                                        <option value="linear">linear</option>
+                                                        <option value="easeIn">easeIn</option>
+                                                        <option value="easeOut">easeOut</option>
+                                                        <option value="easeInOut">easeInOut</option>
+                                                    </select>
+                                                </label>
+                                                <label>
+                                                    Linger (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={timing.linger ?? 0}
+                                                        onChange={(e) => setTiming({ linger: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                            </div>
+                                        </div>
+
+                                        <div style={{ borderTop: "1px dashed rgba(255,255,255,0.12)", paddingTop: 10, display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Success FX (on target)</div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Type
+                                                    <select
+                                                        value={success.type || "pulse"}
+                                                        onChange={(e) => setSuccess({ type: e.target.value })}
+                                                    >
+                                                        <option value="none">none</option>
+                                                        <option value="pulse">pulse</option>
+                                                        <option value="burst">burst</option>
+                                                        <option value="sparkles">sparkles</option>
+                                                    </select>
+                                                </label>
+                                                <label>
+                                                    Color
+                                                    <input
+                                                        type="color"
+                                                        value={success.color || l.color || "#7cf"}
+                                                        onChange={(e) => setSuccess({ color: e.target.value })}
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Size
+                                                    <input
+                                                        type="range"
+                                                        min={0.1}
+                                                        max={3}
+                                                        step={0.05}
+                                                        value={success.size ?? 1}
+                                                        onChange={(e) => setSuccess({ size: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                                <label>
+                                                    Duration (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={success.duration ?? 0.6}
+                                                        onChange={(e) => setSuccess({ duration: Number(e.target.value) })}
+                                                    />
+                                                </label>
+                                            </div>
+
+                                            <label style={{ display: "block" }}>
+                                                Intensity
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={3}
+                                                    step={0.05}
+                                                    value={success.intensity ?? 1}
+                                                    onChange={(e) => setSuccess({ intensity: Number(e.target.value) })}
+                                                />
+                                            </label>
+
+                                            {(success.type || "pulse") !== "none" && (
+                                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                    <label style={{ display: "block" }}>
+                                                        Rings
+                                                        <input
+                                                            type="range"
+                                                            min={0}
+                                                            max={6}
+                                                            step={1}
+                                                            value={success.ringCount ?? 1}
+                                                            onChange={(e) => setSuccess({ ringCount: Number(e.target.value) })}
+                                                        />
+                                                    </label>
+
+                                                    <label style={{ display: "block" }}>
+                                                        Ring Thickness
+                                                        <input
+                                                            type="range"
+                                                            min={0.02}
+                                                            max={0.35}
+                                                            step={0.01}
+                                                            value={success.ringThickness ?? 0.10}
+                                                            onChange={(e) => setSuccess({ ringThickness: Number(e.target.value) })}
+                                                        />
+                                                    </label>
+                                                    <label style={{ display: "block" }}>
+                                                        Ring Delay
+                                                        <input
+                                                            type="range"
+                                                            min={0}
+                                                            max={0.6}
+                                                            step={0.01}
+                                                            value={success.ringDelay ?? 0.04}
+                                                            onChange={(e) => setSuccess({ ringDelay: Number(e.target.value) })}
+                                                        />
+                                                    </label>
+
+                                                    <label style={{ display: "block" }}>
+                                                        Ring Opacity
+                                                        <input
+                                                            type="range"
+                                                            min={0}
+                                                            max={1}
+                                                            step={0.01}
+                                                            value={success.ringOpacity ?? 0.85}
+                                                            onChange={(e) => setSuccess({ ringOpacity: Number(e.target.value) })}
+                                                        />
+                                                    </label>
+                                                </div>
+                                            )}
+
+                                            {((success.type || "pulse") === "burst" || (success.type || "pulse") === "sparkles") && (
+                                                <div style={{ display: "grid", gap: 8 }}>
+                                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                        <label style={{ display: "block" }}>
+                                                            Sparks
+                                                            <input
+                                                                type="range"
+                                                                min={0}
+                                                                max={64}
+                                                                step={1}
+                                                                value={success.sparkCount ?? ((success.type || "pulse") === "burst" ? 16 : 10)}
+                                                                onChange={(e) => setSuccess({ sparkCount: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                        <label style={{ display: "block" }}>
+                                                            Spark Speed
+                                                            <input
+                                                                type="range"
+                                                                min={0}
+                                                                max={4}
+                                                                step={0.05}
+                                                                value={success.sparkSpeed ?? 1.35}
+                                                                onChange={(e) => setSuccess({ sparkSpeed: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                    </div>
+
+                                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                        <label style={{ display: "block" }}>
+                                                            Spark Size
+                                                            <input
+                                                                type="range"
+                                                                min={0.02}
+                                                                max={0.5}
+                                                                step={0.01}
+                                                                value={success.sparkSize ?? 0.16}
+                                                                onChange={(e) => setSuccess({ sparkSize: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                        <label style={{ display: "block" }}>
+                                                            Spread
+                                                            <input
+                                                                type="range"
+                                                                min={0}
+                                                                max={1}
+                                                                step={0.01}
+                                                                value={success.sparkSpread ?? 1}
+                                                                onChange={(e) => setSuccess({ sparkSpread: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                    </div>
+
+                                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                        <label style={{ display: "block" }}>
+                                                            Drag
+                                                            <input
+                                                                type="range"
+                                                                min={0}
+                                                                max={1}
+                                                                step={0.01}
+                                                                value={success.sparkDrag ?? 0.18}
+                                                                onChange={(e) => setSuccess({ sparkDrag: Number(e.target.value) })}
+                                                            />
+                                                        </label>
+                                                        <label>
+                                                            Spark Shape
+                                                            <select
+                                                                value={success.sparkShape || "sphere"}
+                                                                onChange={(e) => setSuccess({ sparkShape: e.target.value })}
+                                                            >
+                                                                <option value="sphere">sphere</option>
+                                                                <option value="tetra">tetra</option>
+                                                                <option value="cube">cube</option>
+                                                            </select>
+                                                        </label>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div style={{ borderTop: "1px dashed rgba(255,255,255,0.12)", paddingTop: 10, display: "grid", gap: 8 }}>
+                                            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.9 }}>Emit Defaults</div>
+                                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                                                <label>
+                                                    Packets per Send
+                                                    <input
+                                                        type="number"
+                                                        step={1}
+                                                        value={emit.count ?? 1}
+                                                        onChange={(e) => setEmit({ count: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
+                                                    />
+                                                </label>
+                                                <label>
+                                                    Interval (s)
+                                                    <input
+                                                        type="number"
+                                                        step={0.05}
+                                                        value={emit.interval ?? 0.15}
+                                                        onChange={(e) => setEmit({ interval: Math.max(0, Number(e.target.value) || 0) })}
+                                                    />
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </>
+                                );
+                            })()}
+                        </div>
+                    )}
+
+                    {/* Common meta */}
+                    <div
+                        style={{
+                            marginTop: 8,
+                            paddingTop: 8,
+                            borderTop:
+                                "1px dashed rgba(255,255,255,0.12)",
+                        }}
+                    >
+                        <div
+                            style={{
+                                display: "grid",
+                                gridTemplateColumns: "1fr 1fr",
+                                gap: 8,
+                            }}
+                        >
+                            <label>
+                                Kind{" "}
+                                <select
+                                    value={l.kind || ""}
+                                    onChange={(e) =>
+                                        patch(l.id, {
+                                            kind:
+                                                e.target.value || undefined,
+                                        })
+                                    }
+                                >
+                                    <option value="">(none)</option>
+                                    <option value="wifi">Wi-Fi</option>
+                                    <option value="wired">Wired</option>
+                                    <option value="poe">PoE</option>
+                                    <option value="cat5e">Cat5e</option>
+                                    <option value="cat6">Cat6</option>
+                                    <option value="cat6a">Cat6a</option>
+                                    <option value="cat7">Cat7</option>
+                                    <option value="speaker">Speaker</option>
+                                    <option value="fiber">Fiber</option>
+                                </select>
+                            </label>
+
+                            {/* Size/Thickness multiplier */}
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 0,
+                                }}
+                            >
+                                Scale
+                                <input
+                                    type="range"
+                                    min={0.5}
+                                    max={2}
+                                    step={0.05}
+                                    value={l.scale ?? 1}
+                                    onChange={(e) =>
+                                        patch(l.id, {
+                                            scale: Number(e.target.value),
+                                        })
+                                    }
+                                />
+                            </label>
+                        </div>
+
+                        {/* Visual effects */}
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop:
+                                    "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontWeight: 800,
+                                    marginBottom: 4,
+                                }}
+                            >
+                                Effects
+                            </div>
+
+                            <label style={{ display: "block" }}>
+                                Glow
+                                <input
+                                    type="checkbox"
+                                    checked={
+                                        (l.effects?.glow ?? false) === true
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["effects", "glow"],
+                                            e.target.checked,
+                                        )
+                                    }
+                                />{" "}
+                                Stronger glow
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 4,
+                                }}
+                            >
+                                Highlight
+                                <input
+                                    type="checkbox"
+                                    checked={
+                                        (l.effects?.highlight ?? false) ===
+                                        true
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["effects", "highlight"],
+                                            e.target.checked,
+                                        )
+                                    }
+                                />{" "}
+                                Emphasize this link
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 4,
+                                }}
+                            >
+                                Sparks
+                                <input
+                                    type="checkbox"
+                                    checked={
+                                        (l.effects?.sparks ?? false) === true
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["effects", "sparks"],
+                                            e.target.checked,
+                                        )
+                                    }
+                                />{" "}
+                                Sparks (for “epic” tube)
+                            </label>
+                        </div>
+                    </div>
+
+                    {/* Curve block */}
+                    <div
+                        style={{
+                            marginTop: 8,
+                            paddingTop: 8,
+                            borderTop:
+                                "1px dashed rgba(255,255,255,0.12)",
+                        }}
+                    >
+                        <div
+                            style={{
+                                fontWeight: 800,
+                                marginBottom: 4,
+                            }}
+                        >
+                            Curve
+                        </div>
+                        <label>
+                            Mode{" "}
+                            <select
+                                value={l.curve?.mode || "up"}
+                                onChange={(e) =>
+                                    patchNested(
+                                        l.id,
+                                        ["curve", "mode"],
+                                        e.target.value,
+                                    )
+                                }
+                            >
+                                <option value="straight">straight</option>
+                                <option value="up">up</option>
+                                <option value="side">side</option>
+                                <option value="arc">arc</option>
+                            </select>
+                        </label>
+                        <label
+                            style={{
+                                display: "block",
+                                marginTop: 6,
+                            }}
+                        >
+                            Bend
+                            <input
+                                type="range"
+                                min={0}
+                                max={1}
+                                step={0.01}
+                                value={l.curve?.bend ?? 0.3}
+                                onChange={(e) =>
+                                    patchNested(
+                                        l.id,
+                                        ["curve", "bend"],
+                                        Number(e.target.value),
+                                    )
+                                }
+                            />
+                        </label>
+                        <label
+                            style={{
+                                display: "block",
+                                marginTop: 6,
+                            }}
+                        >
+                            Noise Amp
+                            <input
+                                type="range"
+                                min={0}
+                                max={0.6}
+                                step={0.005}
+                                value={l.curve?.noiseAmp ?? 0}
+                                onChange={(e) =>
+                                    patchNested(
+                                        l.id,
+                                        ["curve", "noiseAmp"],
+                                        Number(e.target.value),
+                                    )
+                                }
+                            />
+                        </label>
+                        <label
+                            style={{
+                                display: "block",
+                                marginTop: 6,
+                            }}
+                        >
+                            Noise Freq
+                            <input
+                                type="range"
+                                min={0.2}
+                                max={8}
+                                step={0.05}
+                                value={l.curve?.noiseFreq ?? 1.5}
+                                onChange={(e) =>
+                                    patchNested(
+                                        l.id,
+                                        ["curve", "noiseFreq"],
+                                        Number(e.target.value),
+                                    )
+                                }
+                            />
+                        </label>
+                    </div>
+
+                    {/* Flow Position (single control point) — only when there are NO breakpoints */}
+                    {(!Array.isArray(l.breakpoints) || l.breakpoints.length === 0) && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop: "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div style={{ fontWeight: 800, marginBottom: 4 }}>
+                                Flow Position
+                            </div>
+                            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>
+                                Control point used when there are no breakpoints. Copy / paste X/Y/Z
+                                to align flows neatly.
+                            </div>
+
+                            <div style={{ display: "grid", gap: 6 }}>
+                                {([
+                                    ["x", 0],
+                                    ["y", 1],
+                                    ["z", 2],
+                                ]).map(([axis, idx]) => {
+                                    const fp = getFlowPos(l);
+                                    const hasClip = Number.isFinite(Number(clip.pos?.[axis]));
+                                    return (
+                                        <div
+                                            key={axis}
+                                            style={{
+                                                display: "grid",
+                                                gridTemplateColumns: "24px 1fr auto auto",
+                                                gap: 6,
+                                                alignItems: "center",
+                                            }}
+                                        >
+                                            <div style={{ fontSize: 11, opacity: 0.85 }}>{String(axis).toUpperCase()}</div>
+                                            <input
+                                                type="number"
+                                                value={fp[idx]}
+                                                onChange={(e) => setFlowPosAxis(l.id, l, axis, e.target.value)}
+                                                style={{
+                                                    width: "100%",
+                                                    fontSize: 11,
+                                                    padding: "2px 6px",
+                                                    borderRadius: 6,
+                                                    border: "1px solid rgba(148,163,184,0.6)",
+                                                    background: "rgba(15,23,42,0.9)",
+                                                    color: "#e5e7eb",
+                                                }}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => copyFlowAxis(l, axis)}
+                                                style={{
+                                                    fontSize: 11,
+                                                    padding: "3px 8px",
+                                                    borderRadius: 999,
+                                                    border: "1px solid rgba(148,163,184,0.6)",
+                                                    background: "rgba(15,23,42,0.9)",
+                                                    color: "#e5e7eb",
+                                                    cursor: "pointer",
+                                                }}
+                                                title={`Copy ${String(axis).toUpperCase()}`}
+                                            >
+                                                Copy
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => pasteFlowAxis(l, axis)}
+                                                disabled={!hasClip}
+                                                style={{
+                                                    fontSize: 11,
+                                                    padding: "3px 8px",
+                                                    borderRadius: 999,
+                                                    border: "1px solid rgba(148,163,184,0.6)",
+                                                    background: hasClip ? "rgba(15,23,42,0.9)" : "rgba(15,23,42,0.55)",
+                                                    color: hasClip ? "#e5e7eb" : "rgba(229,231,235,0.55)",
+                                                    cursor: hasClip ? "pointer" : "not-allowed",
+                                                }}
+                                                title={`Paste ${String(axis).toUpperCase()}`}
+                                            >
+                                                Paste
+                                            </button>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Breakpoints (manual path control points) */}
+                    <div
+                        style={{
+                            marginTop: 8,
+                            paddingTop: 8,
+                            borderTop:
+                                "1px dashed rgba(255,255,255,0.12)",
+                        }}
+                    >
+                        <div
+                            style={{
+                                fontWeight: 800,
+                                marginBottom: 4,
+                            }}
+                        >
+                            Breakpoints
+                        </div>
+                        <div
+                            style={{
+                                fontSize: 12,
+                                opacity: 0.8,
+                                marginBottom: 4,
+                            }}
+                        >
+                            Add control points to bend this link around
+                            corners. The path will go from the source node
+                            through each breakpoint to the target node.
+                        </div>
+
+                        {/* Add breakpoint button */}
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const source =
+                                    nodes.find((n) => n.id === l.from) || node;
+                                const target = nodes.find((n) => n.id === l.to);
+
+                                const fromPos = source?.position || [0, 0, 0];
+                                const toPos = target?.position || fromPos;
+
+                                // Existing breakpoints (ignored for placement, we recompute evenly)
+                                const existing = Array.isArray(l.breakpoints)
+                                    ? l.breakpoints
+                                    : [];
+
+                                // Total number of breakpoints after adding one
+                                const count = existing.length + 1;
+
+                                // Direction vector from source to target
+                                const dir = [
+                                    toPos[0] - fromPos[0],
+                                    toPos[1] - fromPos[1],
+                                    toPos[2] - fromPos[2],
+                                ];
+
+                                // Evenly distribute all breakpoints along the segment
+                                const next = [];
+                                for (let i = 0; i < count; i++) {
+                                    const t = (i + 1) / (count + 1); // 0–1 along the link
+                                    next.push([
+                                        fromPos[0] + dir[0] * t,
+                                        fromPos[1] + dir[1] * t,
+                                        fromPos[2] + dir[2] * t,
+                                    ]);
+                                }
+
+                                patch(l.id, { breakpoints: next });
+
+                                if (setSelectedBreakpoint) {
+                                    setSelectedBreakpoint({
+                                        linkId: l.id,
+                                        index: next.length - 1, // select the newly added one
+                                    });
+                                }
+                            }}
+                            style={{
+                                fontSize: 11,
+                                padding: "4px 8px",
+                                borderRadius: 999,
+                                border: "1px solid rgba(59,130,246,0.9)",
+                                background: "rgba(37,99,235,0.9)",
+                                color: "#e5f0ff",
+                                cursor: "pointer",
+                                marginTop: 4,
+                            }}
+                        >
+                            + Add breakpoint
+                        </button>
+
+
+                        {/* Legend of breakpoints */}
+                        {Array.isArray(l.breakpoints) &&
+                            l.breakpoints.length > 0 && (
+                                <div
+                                    style={{
+                                        marginTop: 8,
+                                        display: "grid",
+                                        gap: 6,
+                                    }}
+                                >
+                                    <div
+                                        onClick={(e) => e.stopPropagation()}
+                                        style={{
+                                            padding: 6,
+                                            borderRadius: 6,
+                                            border: "1px solid rgba(148,163,184,0.35)",
+                                            background: "rgba(2,6,23,0.55)",
+                                            display: "grid",
+                                            gridTemplateColumns: "auto 1fr 1fr 1fr auto",
+                                            gap: 4,
+                                            alignItems: "center",
+                                        }}
+                                        title="Bulk copy/paste for all breakpoints. Copy uses the selected breakpoint as source (or BP 1 if none selected). Paste applies to every breakpoint."
+                                    >
+                                        <div
+                                            style={{
+                                                fontSize: 11,
+                                                opacity: 0.85,
+                                                paddingRight: 4,
+                                            }}
+                                        >
+                                            All
+                                        </div>
+
+                                        {["X", "Y", "Z"].map((axis) => {
+                                            const axisKey = String(axis).toLowerCase();
+                                            const hasClip = Number.isFinite(
+                                                Number(clip.pos?.[axisKey]),
+                                            );
+                                            return (
+                                                <div
+                                                    key={axis}
+                                                    style={{
+                                                        display: "grid",
+                                                        gridTemplateColumns:
+                                                            "16px auto auto",
+                                                        gap: 6,
+                                                        alignItems: "center",
+                                                    }}
+                                                >
+                                                    <div
+                                                        style={{
+                                                            fontSize: 11,
+                                                            opacity: 0.85,
+                                                        }}
+                                                    >
+                                                        {axis}
+                                                    </div>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            copyAllBreakpointsAxis(
+                                                                l,
+                                                                axisKey,
+                                                            );
+                                                        }}
+                                                        style={{
+                                                            fontSize: 10,
+                                                            padding: "3px 8px",
+                                                            borderRadius: 999,
+                                                            border: "1px solid rgba(148,163,184,0.6)",
+                                                            background:
+                                                                "rgba(15,23,42,0.9)",
+                                                            color: "#e5e7eb",
+                                                            cursor: "pointer",
+                                                        }}
+                                                        title={`Copy ${axis} from selected BP (or BP 1)`}
+                                                    >
+                                                        C
+                                                    </button>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            pasteAllBreakpointsAxis(
+                                                                l,
+                                                                axisKey,
+                                                            );
+                                                        }}
+                                                        disabled={!hasClip}
+                                                        style={{
+                                                            fontSize: 10,
+                                                            padding: "3px 8px",
+                                                            borderRadius: 999,
+                                                            border: "1px solid rgba(148,163,184,0.6)",
+                                                            background: hasClip
+                                                                ? "rgba(15,23,42,0.9)"
+                                                                : "rgba(15,23,42,0.55)",
+                                                            color: hasClip
+                                                                ? "#e5e7eb"
+                                                                : "rgba(229,231,235,0.55)",
+                                                            cursor: hasClip
+                                                                ? "pointer"
+                                                                : "not-allowed",
+                                                        }}
+                                                        title={`Paste ${axis} to ALL breakpoints`}
+                                                    >
+                                                        P
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+
+                                        <div
+                                            style={{
+                                                fontSize: 11,
+                                                opacity: 0.65,
+                                                textAlign: "right",
+                                            }}
+                                        >
+                                            bulk
+                                        </div>
+                                    </div>
+
+                                    {l.breakpoints.map((bp, idx) => {
+                                        const isSelected =
+                                            selectedBreakpoint &&
+                                            selectedBreakpoint.linkId ===
+                                            l.id &&
+                                            selectedBreakpoint.index ===
+                                            idx;
+
+                                        return (
+                                            <div
+                                                key={idx}
+                                                onClick={() => {
+                                                    if (
+                                                        setSelectedBreakpoint
+                                                    ) {
+                                                        setSelectedBreakpoint(
+                                                            {
+                                                                linkId:
+                                                                l.id,
+                                                                index: idx,
+                                                            },
+                                                        );
+                                                    }
+                                                }}
+                                                style={{
+                                                    padding: 6,
+                                                    borderRadius: 6,
+                                                    cursor: "pointer",
+                                                    border: isSelected
+                                                        ? "1px solid rgba(59,130,246,0.95)"
+                                                        : "1px solid rgba(148,163,184,0.35)",
+                                                    background: isSelected
+                                                        ? "linear-gradient(135deg, rgba(30,64,175,0.9), rgba(15,23,42,0.95))"
+                                                        : "rgba(15,23,42,0.85)",
+                                                    display: "grid",
+                                                    gridTemplateColumns:
+                                                        "auto 1fr 1fr 1fr auto",
+                                                    gap: 4,
+                                                    alignItems:
+                                                        "center",
+                                                }}
+                                            >
+                                                <div
+                                                    style={{
+                                                        fontSize: 11,
+                                                        opacity: 0.8,
+                                                        paddingRight: 4,
+                                                    }}
+                                                >
+                                                    BP {idx + 1}
+                                                </div>
+
+                                                {["X", "Y", "Z"].map((axis, axisIndex) => {
+                                                    const axisKey = String(axis).toLowerCase();
+                                                    const hasClip = Number.isFinite(Number(clip.pos?.[axisKey]));
+                                                    return (
+                                                        <div
+                                                            key={axis}
+                                                            style={{
+                                                                display: "grid",
+                                                                gridTemplateColumns: "16px 1fr auto auto",
+                                                                gap: 4,
+                                                                alignItems: "center",
+                                                            }}
+                                                        >
+                                                            <div style={{ fontSize: 11, opacity: 0.85 }}>{axis}</div>
+                                                            <input
+                                                                type="number"
+                                                                step={0.05}
+                                                                value={bp?.[axisIndex] ?? 0}
+                                                                onChange={(e) => setBreakpointAxis(l.id, idx, axisKey, e.target.value)}
+                                                                style={{
+                                                                    width: "100%",
+                                                                    fontSize: 11,
+                                                                    padding: "2px 4px",
+                                                                    borderRadius: 4,
+                                                                    border: "1px solid rgba(148,163,184,0.6)",
+                                                                    background: "rgba(15,23,42,0.9)",
+                                                                    color: "#e5e7eb",
+                                                                }}
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    copyBreakpointAxis(l, idx, axisKey);
+                                                                }}
+                                                                style={{
+                                                                    fontSize: 10,
+                                                                    padding: "3px 6px",
+                                                                    borderRadius: 999,
+                                                                    border: "1px solid rgba(148,163,184,0.6)",
+                                                                    background: "rgba(15,23,42,0.9)",
+                                                                    color: "#e5e7eb",
+                                                                    cursor: "pointer",
+                                                                }}
+                                                                title={`Copy ${axis}`}
+                                                            >
+                                                                C
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    pasteBreakpointAxis(l, idx, axisKey);
+                                                                }}
+                                                                disabled={!hasClip}
+                                                                style={{
+                                                                    fontSize: 10,
+                                                                    padding: "3px 6px",
+                                                                    borderRadius: 999,
+                                                                    border: "1px solid rgba(148,163,184,0.6)",
+                                                                    background: hasClip ? "rgba(15,23,42,0.9)" : "rgba(15,23,42,0.55)",
+                                                                    color: hasClip ? "#e5e7eb" : "rgba(229,231,235,0.55)",
+                                                                    cursor: hasClip ? "pointer" : "not-allowed",
+                                                                }}
+                                                                title={`Paste ${axis}`}
+                                                            >
+                                                                P
+                                                            </button>
+                                                        </div>
+                                                    );
+                                                })}
+
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        const current =
+                                                            Array.isArray(
+                                                                l.breakpoints,
+                                                            )
+                                                                ? l.breakpoints
+                                                                : [];
+                                                        const next =
+                                                            current.filter(
+                                                                (
+                                                                    _,
+                                                                    i,
+                                                                ) =>
+                                                                    i !==
+                                                                    idx,
+                                                            );
+                                                        patch(l.id, {
+                                                            breakpoints:
+                                                            next,
+                                                        });
+
+                                                        if (
+                                                            selectedBreakpoint &&
+                                                            selectedBreakpoint.linkId ===
+                                                            l.id &&
+                                                            selectedBreakpoint.index ===
+                                                            idx &&
+                                                            setSelectedBreakpoint
+                                                        ) {
+                                                            setSelectedBreakpoint(
+                                                                null,
+                                                            );
+                                                        }
+                                                    }}
+                                                    style={{
+                                                        marginLeft: 4,
+                                                        fontSize: 11,
+                                                        padding:
+                                                            "3px 6px",
+                                                        borderRadius: 999,
+                                                        border: "1px solid rgba(239,68,68,0.9)",
+                                                        background:
+                                                            "rgba(127,29,29,0.95)",
+                                                        color: "#fee2e2",
+                                                        cursor: "pointer",
+                                                    }}
+                                                >
+                                                    ✕
+                                                </button>
+                                            </div>
+                                        );
+                                    })}
+
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            patch(l.id, {
+                                                breakpoints: [],
+                                            });
+                                            if (
+                                                selectedBreakpoint &&
+                                                selectedBreakpoint.linkId ===
+                                                l.id &&
+                                                setSelectedBreakpoint
+                                            ) {
+                                                setSelectedBreakpoint(
+                                                    null,
+                                                );
+                                            }
+                                        }}
+                                        style={{
+                                            marginTop: 4,
+                                            fontSize: 11,
+                                            textAlign: "left",
+                                            opacity: 0.8,
+                                            background: "none",
+                                            border: "none",
+                                            padding: 0,
+                                            cursor: "pointer",
+                                            color: "rgba(148,163,184,0.95)",
+                                        }}
+                                    >
+                                        Clear all breakpoints
+                                    </button>
+                                </div>
+                            )}
+                    </div>
+
+                    {/* Packet (per-link flow simulation) */}
+                    {l.style === "packet" && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop: "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div style={{ fontWeight: 800, marginBottom: 4 }}>Packet</div>
+
+                            {/* Visual */}
+                            <div style={{ fontWeight: 700, marginTop: 6, opacity: 0.9 }}>Visual</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Shape
+                                <select
+                                    value={l.packet?.visual?.shape || "orb"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "shape"], e.target.value)
+                                    }
+                                >
+                                    <option value="orb">orb</option>
+                                    <option value="cube">cube</option>
+                                    <option value="ring">ring</option>
+                                    <option value="shard">shard</option>
+                                    <option value="comet">comet</option>
+                                    <option value="waves">waves</option>
+                                    <option value="envelope">envelope</option>
+                                    <option value="static">static</option>
+                                    <option value="text">text</option>
+                                </select>
+                            </label>
+
+                            {(l.packet?.visual?.shape || "orb") === "text" && (
+                                <label style={{ display: "block", marginTop: 6 }}>
+                                    Text
+                                    <input
+                                        type="text"
+                                        value={l.packet?.visual?.text ?? "PING"}
+                                        onChange={(e) =>
+                                            patchNested(l.id, ["packet", "visual", "text"], e.target.value)
+                                        }
+                                    />
+                                </label>
+                            )}
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Packet Color
+                                <input
+                                    type="color"
+                                    value={l.packet?.visual?.color || l.color || "#7cf"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "color"], e.target.value)
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Size
+                                <input
+                                    type="range"
+                                    min={0.05}
+                                    max={0.7}
+                                    step={0.01}
+                                    value={l.packet?.visual?.size ?? 0.16}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "size"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Glow
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.packet?.visual?.glow ?? 1.6}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "glow"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Pulse
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={l.packet?.visual?.pulse ?? 0.22}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "pulse"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Spin
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={10}
+                                    step={0.05}
+                                    value={l.packet?.visual?.spin ?? 1.2}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "spin"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Trail
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={l.packet?.visual?.trail ?? 0.35}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "visual", "trail"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            {/* Path */}
+                            <div style={{ fontWeight: 700, marginTop: 10, opacity: 0.9 }}>Path</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Path Style
+                                <select
+                                    value={l.packet?.path?.style || "hidden"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "style"], e.target.value)
+                                    }
+                                >
+                                    <option value="hidden">hidden</option>
+                                    <option value="line">line</option>
+                                    <option value="dashes">dashes</option>
+                                    <option value="particles">particles</option>
+                                    <option value="pulse">pulse</option>
+                                </select>
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Path Color
+                                <input
+                                    type="color"
+                                    value={l.packet?.path?.color || l.packet?.visual?.color || l.color || "#7cf"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "color"], e.target.value)
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Opacity
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.05}
+                                    value={l.packet?.path?.opacity ?? 0.55}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "opacity"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Path Speed
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={6}
+                                    step={0.05}
+                                    value={l.packet?.path?.speed ?? 1.2}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "speed"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            {(l.packet?.path?.style || "hidden") === "particles" && (
+                                <>
+                                    <label style={{ display: "block", marginTop: 6 }}>
+                                        Particle Count
+                                        <input
+                                            type="range"
+                                            min={4}
+                                            max={120}
+                                            step={1}
+                                            value={l.packet?.path?.particleCount ?? 34}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "path", "particleCount"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+                                    <label style={{ display: "block", marginTop: 6 }}>
+                                        Particle Size
+                                        <input
+                                            type="range"
+                                            min={0.02}
+                                            max={0.35}
+                                            step={0.01}
+                                            value={l.packet?.path?.particleSize ?? 0.06}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "path", "particleSize"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+                                </>
+                            )}
+
+                            {(l.packet?.path?.style || "hidden") === "pulse" && (
+                                <label style={{ display: "block", marginTop: 6 }}>
+                                    Pulse Width
+                                    <input
+                                        type="range"
+                                        min={0.04}
+                                        max={0.6}
+                                        step={0.01}
+                                        value={l.packet?.path?.pulseWidth ?? 0.18}
+                                        onChange={(e) =>
+                                            patchNested(l.id, ["packet", "path", "pulseWidth"], Number(e.target.value))
+                                        }
+                                    />
+                                </label>
+                            )}
+
+                            <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!(l.packet?.path?.onlyWhenActive ?? true)}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "path", "onlyWhenActive"], e.target.checked)
+                                    }
+                                />
+                                Show path only when active
+                            </label>
+
+                            {/* Timing */}
+                            <div style={{ fontWeight: 700, marginTop: 10, opacity: 0.9 }}>Timeframe</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Start Delay (s)
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={5}
+                                    step={0.05}
+                                    value={l.packet?.timing?.startDelay ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "timing", "startDelay"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Travel Duration (s)
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={12}
+                                    step={0.05}
+                                    value={l.packet?.timing?.travelDuration ?? 1.1}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "timing", "travelDuration"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Easing
+                                <select
+                                    value={l.packet?.timing?.easing || "easeInOut"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "timing", "easing"], e.target.value)
+                                    }
+                                >
+                                    <option value="linear">linear</option>
+                                    <option value="easeIn">easeIn</option>
+                                    <option value="easeOut">easeOut</option>
+                                    <option value="easeInOut">easeInOut</option>
+                                </select>
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Linger at target (s)
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.packet?.timing?.linger ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "timing", "linger"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            {/* Emit Defaults */}
+                            <div style={{ fontWeight: 700, marginTop: 10, opacity: 0.9 }}>Send Defaults</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Packets per burst
+                                <input
+                                    type="range"
+                                    min={1}
+                                    max={50}
+                                    step={1}
+                                    value={l.packet?.emit?.count ?? 1}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "count"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Interval in burst (s)
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={3}
+                                    step={0.02}
+                                    value={l.packet?.emit?.interval ?? 0.12}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "interval"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!(l.packet?.emit?.loop ?? false)}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "loop"], e.target.checked)
+                                    }
+                                />
+                                Loop bursts
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Burst interval (s)
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={10}
+                                    step={0.05}
+                                    value={l.packet?.emit?.burstInterval ?? 1.0}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "burstInterval"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Bursts (0 = infinite)
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={50}
+                                    step={1}
+                                    value={l.packet?.emit?.bursts ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "bursts"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={!!(l.packet?.emit?.clearOnStart ?? true)}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "emit", "clearOnStart"], e.target.checked)
+                                    }
+                                />
+                                Clear existing on start
+                            </label>
+
+                            {/* Success */}
+                            <div style={{ fontWeight: 700, marginTop: 10, opacity: 0.9 }}>On Success (Target)</div>
+                            <label style={{ display: "block", marginTop: 4 }}>
+                                Effect
+                                <select
+                                    value={l.packet?.success?.type || "pulse"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "type"], e.target.value)
+                                    }
+                                >
+                                    <option value="none">none</option>
+                                    <option value="pulse">pulse</option>
+                                    <option value="burst">burst</option>
+                                    <option value="sparkles">sparkles</option>
+                                </select>
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Effect Color
+                                <input
+                                    type="color"
+                                    value={l.packet?.success?.color || l.packet?.visual?.color || l.color || "#7cf"}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "color"], e.target.value)
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Size
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={2.5}
+                                    step={0.05}
+                                    value={l.packet?.success?.size ?? 0.7}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "size"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Duration (s)
+                                <input
+                                    type="range"
+                                    min={0.05}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.packet?.success?.duration ?? 0.55}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "duration"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Intensity
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={3}
+                                    step={0.05}
+                                    value={l.packet?.success?.intensity ?? 1.2}
+                                    onChange={(e) =>
+                                        patchNested(l.id, ["packet", "success", "intensity"], Number(e.target.value))
+                                    }
+                                />
+                            </label>
+
+                            {(l.packet?.success?.type || "pulse") !== "none" && (
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
+                                    <label style={{ display: "block" }}>
+                                        Rings
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={6}
+                                            step={1}
+                                            value={l.packet?.success?.ringCount ?? 1}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "success", "ringCount"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Ring Thickness
+                                        <input
+                                            type="range"
+                                            min={0.02}
+                                            max={0.35}
+                                            step={0.01}
+                                            value={l.packet?.success?.ringThickness ?? 0.10}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "success", "ringThickness"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Ring Delay
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={0.6}
+                                            step={0.01}
+                                            value={l.packet?.success?.ringDelay ?? 0.04}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "success", "ringDelay"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Ring Opacity
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={1}
+                                            step={0.01}
+                                            value={l.packet?.success?.ringOpacity ?? 0.85}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["packet", "success", "ringOpacity"], Number(e.target.value))
+                                            }
+                                        />
+                                    </label>
+                                </div>
+                            )}
+
+                            {((l.packet?.success?.type || "pulse") === "burst" || (l.packet?.success?.type || "pulse") === "sparkles") && (
+                                <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                        <label style={{ display: "block" }}>
+                                            Sparks
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={64}
+                                                step={1}
+                                                value={l.packet?.success?.sparkCount ?? ((l.packet?.success?.type || "pulse") === "burst" ? 16 : 10)}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkCount"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                        <label style={{ display: "block" }}>
+                                            Spark Speed
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={4}
+                                                step={0.05}
+                                                value={l.packet?.success?.sparkSpeed ?? 1.35}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkSpeed"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                    </div>
+
+                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                        <label style={{ display: "block" }}>
+                                            Spark Size
+                                            <input
+                                                type="range"
+                                                min={0.02}
+                                                max={0.5}
+                                                step={0.01}
+                                                value={l.packet?.success?.sparkSize ?? 0.16}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkSize"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                        <label style={{ display: "block" }}>
+                                            Spread
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={1}
+                                                step={0.01}
+                                                value={l.packet?.success?.sparkSpread ?? 1}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkSpread"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                    </div>
+
+                                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                                        <label style={{ display: "block" }}>
+                                            Drag
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={1}
+                                                step={0.01}
+                                                value={l.packet?.success?.sparkDrag ?? 0.18}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkDrag"], Number(e.target.value))
+                                                }
+                                            />
+                                        </label>
+                                        <label>
+                                            Spark Shape
+                                            <select
+                                                value={l.packet?.success?.sparkShape || "sphere"}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["packet", "success", "sparkShape"], e.target.value)
+                                                }
+                                            >
+                                                <option value="sphere">sphere</option>
+                                                <option value="tetra">tetra</option>
+                                                <option value="cube">cube</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Particles / Wavy */}
+                    {(l.style === "particles" || l.style === "wavy") && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop:
+                                    "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontWeight: 800,
+                                    marginBottom: 4,
+                                }}
+                            >
+                                Particles
+                            </div>
+
+                            <label style={{ display: "block" }}>
+                                Count
+                                <input
+                                    type="range"
+                                    min={1}
+                                    max={80}
+                                    step={1}
+                                    value={l.particles?.count ?? 12}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "count"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Size
+                                <input
+                                    type="range"
+                                    min={0.02}
+                                    max={0.3}
+                                    step={0.01}
+                                    value={l.particles?.size ?? 0.06}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "size"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Opacity
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={1}
+                                    step={0.05}
+                                    value={
+                                        l.particles?.opacity ?? 1
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "opacity"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Wave Amp
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={0.6}
+                                    step={0.01}
+                                    value={
+                                        l.particles?.waveAmp ??
+                                        (l.style === "wavy"
+                                            ? 0.15
+                                            : 0)
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "waveAmp"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Wave Freq
+                                <input
+                                    type="range"
+                                    min={0.2}
+                                    max={8}
+                                    step={0.05}
+                                    value={
+                                        l.particles?.waveFreq ?? 2
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "waveFreq"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Shape
+                                <select
+                                    value={
+                                        l.particles?.shape ||
+                                        "sphere"
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "shape"],
+                                            e.target.value,
+                                        )
+                                    }
+                                >
+                                    <option value="sphere">
+                                        sphere
+                                    </option>
+                                    <option value="box">box</option>
+                                    <option value="octa">octa</option>
+                                </select>
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Spread
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={0.6}
+                                    step={0.01}
+                                    value={l.particles?.spread ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "spread"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Twist
+                                <input
+                                    type="range"
+                                    min={-6}
+                                    max={6}
+                                    step={0.1}
+                                    value={l.particles?.twist ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "twist"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Jitter
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={0.4}
+                                    step={0.01}
+                                    value={l.particles?.jitter ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "jitter"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Stretch
+                                <input
+                                    type="range"
+                                    min={0.5}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.particles?.stretch ?? 1}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "stretch"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Pulse Amp
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.02}
+                                    value={l.particles?.pulseAmp ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "pulseAmp"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Pulse Freq
+                                <input
+                                    type="range"
+                                    min={0.2}
+                                    max={8}
+                                    step={0.1}
+                                    value={l.particles?.pulseFreq ?? 2}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "pulseFreq"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Fade Tail
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.02}
+                                    value={l.particles?.fadeTail ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "fadeTail"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label style={{ display: "block", marginTop: 6 }}>
+                                Blend
+                                <select
+                                    value={l.particles?.blend || "normal"}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["particles", "blend"],
+                                            e.target.value,
+                                        )
+                                    }
+                                >
+                                    <option value="normal">normal</option>
+                                    <option value="additive">additive</option>
+                                </select>
+                            </label>
+                        </div>
+                    )}
+                    {/* Dashed */}
+                    {l.style === "dashed" && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop: "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontWeight: 800,
+                                    marginBottom: 4,
+                                }}
+                            >
+                                Dashed line
+                            </div>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Dash length
+                                <input
+                                    type="range"
+                                    min={0.2}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.dash?.length ?? 1}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["dash", "length"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Dash gap
+                                <input
+                                    type="range"
+                                    min={0.02}
+                                    max={1}
+                                    step={0.01}
+                                    value={l.dash?.gap ?? 0.25}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["dash", "gap"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Dash speed
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={3}
+                                    step={0.05}
+                                    value={l.dash?.speed ?? 1}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["dash", "speed"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Dash offset
+                                <input
+                                    type="range"
+                                    min={-4}
+                                    max={4}
+                                    step={0.05}
+                                    value={l.dash?.offset ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["dash", "offset"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Dash opacity
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={1}
+                                    step={0.05}
+                                    value={l.dash?.opacity ?? 1}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["dash", "opacity"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 6,
+                                    marginTop: 6,
+                                }}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={(l.dash?.animate ?? true) === true}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["dash", "animate"],
+                                            e.target.checked,
+                                        )
+                                    }
+                                />{" "}
+                                Animate dashes
+                            </label>
+                        </div>
+                    )}
+
+                    {/* Icons */}
+                    {l.style === "icons" && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop:
+                                    "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontWeight: 800,
+                                    marginBottom: 4,
+                                }}
+                            >
+                                Icons
+                            </div>
+                            <label style={{ display: "block" }}>
+                                Icon kind
+                                <select
+                                    value={l.icons?.kind || "arrow"}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["icons", "kind"],
+                                            e.target.value,
+                                        )
+                                    }
+                                >
+                                    <option value="arrow">
+                                        arrow
+                                    </option>
+                                    <option value="dot">dot</option>
+                                    <option value="square">
+                                        square
+                                    </option>
+                                </select>
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Size
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={2}
+                                    step={0.05}
+                                    value={l.icons?.size ?? 0.8}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["icons", "size"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Spacing
+                                <input
+                                    type="range"
+                                    min={0.1}
+                                    max={2}
+                                    step={0.05}
+                                    value={
+                                        l.icons?.spacing ?? 0.6
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["icons", "spacing"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                        </div>
+                    )}
+
+                    {/* Sweep */}
+                    {l.style === "sweep" && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop: "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div style={{ fontWeight: 900, marginBottom: 6 }}>
+                                Sweep animation
+                            </div>
+
+                            <div style={{ display: "grid", gap: 8 }}>
+                                {/* Timing */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.9 }}>
+                                        Timing
+                                    </div>
+
+                                    <label style={{ display: "block" }}>
+                                        Duration (s)
+                                        <input
+                                            type="range"
+                                            min={0.1}
+                                            max={12}
+                                            step={0.05}
+                                            value={l.sweep?.duration ?? 1.4}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "duration"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.duration ?? 1.4).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Hold at end (s)
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={4}
+                                            step={0.02}
+                                            value={l.sweep?.hold ?? 0.12}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "hold"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.hold ?? 0.12).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Pause before restart (s)
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={4}
+                                            step={0.02}
+                                            value={l.sweep?.pause ?? 0.2}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "pause"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.pause ?? 0.2).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Speed multiplier
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={4}
+                                            step={0.05}
+                                            value={l.sweep?.speed ?? l.speed ?? 1}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "speed"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.speed ?? l.speed ?? 1).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Reset gap (s)
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={2}
+                                            step={0.01}
+                                            value={l.sweep?.resetGap ?? 0.05}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "resetGap"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.resetGap ?? 0.05).toFixed(2)}
+                                        </span>
+                                    </label>
+                                </div>
+
+                                {/* Draw / direction */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.9 }}>
+                                        Draw & direction
+                                    </div>
+
+                                    <label style={{ display: "block" }}>
+                                        Draw mode{" "}
+                                        <select
+                                            value={l.sweep?.fillMode ?? "trail"}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "fillMode"], e.target.value)
+                                            }
+                                        >
+                                            <option value="trail">trail (moving window)</option>
+                                            <option value="fill">fill (grow line)</option>
+                                        </select>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Trail length
+                                        <input
+                                            type="range"
+                                            min={0.02}
+                                            max={1}
+                                            step={0.01}
+                                            value={l.sweep?.trailLength ?? 0.18}
+                                            onChange={(e) =>
+                                                patchNested(
+                                                    l.id,
+                                                    ["sweep", "trailLength"],
+                                                    Number(e.target.value),
+                                                )
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.trailLength ?? 0.18).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!!(l.sweep?.baseVisible ?? false)}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "baseVisible"], e.target.checked)
+                                            }
+                                        />{" "}
+                                        Show base line underneath
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!!(l.sweep?.invert ?? false)}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "invert"], e.target.checked)
+                                            }
+                                        />{" "}
+                                        Reverse direction (boomerang start from target)
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!!(l.sweep?.pingpong ?? false)}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "pingpong"], e.target.checked)
+                                            }
+                                        />{" "}
+                                        Ping-pong (boomerang)
+                                    </label>
+
+                                    {!!(l.sweep?.pingpong ?? false) && (
+                                        <div style={{ display: "grid", gap: 6, paddingLeft: 10 }}>
+                                            <label style={{ display: "block" }}>
+                                                Back duration (s)
+                                                <input
+                                                    type="range"
+                                                    min={0.1}
+                                                    max={12}
+                                                    step={0.05}
+                                                    value={l.sweep?.durationBack ?? l.sweep?.duration ?? 1.4}
+                                                    onChange={(e) =>
+                                                        patchNested(
+                                                            l.id,
+                                                            ["sweep", "durationBack"],
+                                                            Number(e.target.value),
+                                                        )
+                                                    }
+                                                />{" "}
+                                                <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                    {(l.sweep?.durationBack ?? l.sweep?.duration ?? 1.4).toFixed(2)}
+                                                </span>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Back hold (s)
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={4}
+                                                    step={0.02}
+                                                    value={l.sweep?.holdBack ?? 0}
+                                                    onChange={(e) =>
+                                                        patchNested(l.id, ["sweep", "holdBack"], Number(e.target.value))
+                                                    }
+                                                />{" "}
+                                                <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                    {(l.sweep?.holdBack ?? 0).toFixed(2)}
+                                                </span>
+                                            </label>
+                                        </div>
+                                    )}
+                                </div>
+
+
+                                {/* Path & breakpoints */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.9 }}>
+                                        Path & breakpoints
+                                    </div>
+
+                                    <label style={{ display: "block" }}>
+                                        Breakpoint path mode{" "}
+                                        <select
+                                            value={l.sweep?.pathMode ?? "auto"}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "pathMode"], e.target.value)
+                                            }
+                                        >
+                                            <option value="auto">auto (single curve if breakpoints)</option>
+                                            <option value="single">single curve always</option>
+                                            <option value="segments">per-segment (legacy)</option>
+                                        </select>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Path type{" "}
+                                        <select
+                                            value={l.sweep?.pathType ?? "centripetal"}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "pathType"], e.target.value)
+                                            }
+                                        >
+                                            <option value="centripetal">smooth (centripetal spline)</option>
+                                            <option value="chordal">smooth (chordal spline)</option>
+                                            <option value="catmullrom">smooth (catmull-rom + tension)</option>
+                                            <option value="linear">linear (hard corners)</option>
+                                        </select>
+                                    </label>
+
+                                    {String(l.sweep?.pathType ?? "centripetal").toLowerCase() === "catmullrom" && (
+                                        <label style={{ display: "block" }}>
+                                            Path tension
+                                            <input
+                                                type="range"
+                                                min={0}
+                                                max={1}
+                                                step={0.01}
+                                                value={l.sweep?.pathTension ?? 0.5}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["sweep", "pathTension"], Number(e.target.value))
+                                                }
+                                            />{" "}
+                                            <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                {(l.sweep?.pathTension ?? 0.5).toFixed(2)}
+                                            </span>
+                                        </label>
+                                    )}
+                                </div>
+
+                                {/* Look */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.9 }}>
+                                        Look
+                                    </div>
+
+                                    <label style={{ display: "block" }}>
+                                        Sweep color{" "}
+                                        <input
+                                            type="color"
+                                            value={l.sweep?.color ?? l.color ?? "#7cf"}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "color"], e.target.value)
+                                            }
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() =>
+                                                patchNested(l.id, ["sweep", "color"], l.color || "#7cf")
+                                            }
+                                            style={{
+                                                marginLeft: 8,
+                                                fontSize: 11,
+                                                padding: "2px 10px",
+                                                borderRadius: 999,
+                                                border: "1px solid rgba(148,163,184,0.55)",
+                                                background: "rgba(15,23,42,0.8)",
+                                                color: "#e5e7eb",
+                                                cursor: "pointer",
+                                            }}
+                                            title="Copy the main flow color into the sweep color"
+                                        >
+                                            Use flow color
+                                        </button>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!!(l.sweep?.gradient ?? false)}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "gradient"], e.target.checked)
+                                            }
+                                        />{" "}
+                                        Gradient
+                                    </label>
+
+                                    {(l.sweep?.gradient ?? false) && (
+                                        <label style={{ display: "block" }}>
+                                            Gradient color 2{" "}
+                                            <input
+                                                type="color"
+                                                value={l.sweep?.color2 ?? "#ffffff"}
+                                                onChange={(e) =>
+                                                    patchNested(l.id, ["sweep", "color2"], e.target.value)
+                                                }
+                                            />
+                                        </label>
+                                    )}
+
+                                    <label style={{ display: "block" }}>
+                                        Thickness
+                                        <input
+                                            type="range"
+                                            min={0.005}
+                                            max={0.2}
+                                            step={0.001}
+                                            value={l.sweep?.thickness ?? 0.06}
+                                            onChange={(e) =>
+                                                patchNested(
+                                                    l.id,
+                                                    ["sweep", "thickness"],
+                                                    Number(e.target.value),
+                                                )
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.thickness ?? 0.06).toFixed(3)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Glow
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={4}
+                                            step={0.05}
+                                            value={l.sweep?.glow ?? 1.15}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "glow"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.glow ?? 1.15).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Edge feather
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={0.25}
+                                            step={0.005}
+                                            value={l.sweep?.feather ?? 0.06}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "feather"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.feather ?? 0.06).toFixed(3)}
+                                        </span>
+                                    </label>
+                                </div>
+
+                                {/* Fade */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.9 }}>
+                                        Fade
+                                    </div>
+
+                                    <label style={{ display: "block" }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!!(l.sweep?.fadeEnabled ?? true)}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "fadeEnabled"], e.target.checked)
+                                            }
+                                        />{" "}
+                                        Enable fade
+                                    </label>
+
+                                    {!!(l.sweep?.fadeEnabled ?? true) && (
+                                        <div style={{ display: "grid", gap: 6, paddingLeft: 10 }}>
+                                            <label style={{ display: "block" }}>
+                                                Fade amount
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={2}
+                                                    step={0.02}
+                                                    value={l.sweep?.fade ?? 0.6}
+                                                    onChange={(e) =>
+                                                        patchNested(l.id, ["sweep", "fade"], Number(e.target.value))
+                                                    }
+                                                />{" "}
+                                                <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                    {(l.sweep?.fade ?? 0.6).toFixed(2)}
+                                                </span>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Fade curve{" "}
+                                                <select
+                                                    value={l.sweep?.fadeCurve ?? "smooth"}
+                                                    onChange={(e) =>
+                                                        patchNested(l.id, ["sweep", "fadeCurve"], e.target.value)
+                                                    }
+                                                >
+                                                    <option value="smooth">smooth</option>
+                                                    <option value="linear">linear</option>
+                                                    <option value="exp">exp</option>
+                                                    <option value="expo">expo</option>
+                                                    <option value="sine">sine</option>
+                                                </select>
+                                            </label>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Multi-pass */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.9 }}>
+                                        Multi-pass
+                                    </div>
+
+                                    <label style={{ display: "block" }}>
+                                        Passes
+                                        <input
+                                            type="range"
+                                            min={1}
+                                            max={12}
+                                            step={1}
+                                            value={l.sweep?.passes ?? 1}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "passes"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {Math.round(l.sweep?.passes ?? 1)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Pass delay (s)
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={2}
+                                            step={0.01}
+                                            value={l.sweep?.passDelay ?? 0.25}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "passDelay"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.passDelay ?? 0.25).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Pass colors (comma-separated hex)
+                                        <input
+                                            type="text"
+                                            placeholder="#7cf,#f0f,#0f0"
+                                            value={
+                                                Array.isArray(l.sweep?.colors)
+                                                    ? l.sweep.colors.join(",")
+                                                    : typeof l.sweep?.colors === "string"
+                                                        ? l.sweep.colors
+                                                        : ""
+                                            }
+                                            onChange={(e) => {
+                                                const raw = e.target.value || "";
+                                                const parts = raw
+                                                    .split(",")
+                                                    .map((x) => x.trim())
+                                                    .filter(Boolean)
+                                                    .map((x) => (x.startsWith("#") ? x : `#${x}`));
+                                                patchNested(
+                                                    l.id,
+                                                    ["sweep", "colors"],
+                                                    parts.length ? parts : null,
+                                                );
+                                            }}
+                                        />
+                                    </label>
+                                </div>
+
+                                {/* Pulses */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.9 }}>
+                                        Pulses
+                                    </div>
+
+                                    <label style={{ display: "block" }}>
+                                        Head size
+                                        <input
+                                            type="range"
+                                            min={0.1}
+                                            max={3}
+                                            step={0.05}
+                                            value={l.sweep?.headSize ?? 1}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "headSize"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.headSize ?? 1).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Head pulse amp
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={2}
+                                            step={0.02}
+                                            value={l.sweep?.headPulseAmp ?? 0.2}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "headPulseAmp"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.headPulseAmp ?? 0.2).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Head pulse freq
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={12}
+                                            step={0.1}
+                                            value={l.sweep?.headPulseFreq ?? 1.6}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "headPulseFreq"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.headPulseFreq ?? 1.6).toFixed(1)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Body pulse amp
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={2}
+                                            step={0.02}
+                                            value={l.sweep?.pulseAmp ?? 0}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "pulseAmp"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.pulseAmp ?? 0).toFixed(2)}
+                                        </span>
+                                    </label>
+
+                                    <label style={{ display: "block" }}>
+                                        Body pulse freq
+                                        <input
+                                            type="range"
+                                            min={0}
+                                            max={12}
+                                            step={0.1}
+                                            value={l.sweep?.pulseFreq ?? 1.5}
+                                            onChange={(e) =>
+                                                patchNested(l.id, ["sweep", "pulseFreq"], Number(e.target.value))
+                                            }
+                                        />{" "}
+                                        <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                            {(l.sweep?.pulseFreq ?? 1.5).toFixed(1)}
+                                        </span>
+                                    </label>
+                                </div>
+
+                                {/* End FX */}
+                                <div style={{ display: "grid", gap: 6 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 800, opacity: 0.9 }}>
+                                        End FX (at target node)
+                                    </div>
+
+                                    <label style={{ display: "block" }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={!!(l.sweep?.endFx?.enabled ?? false)}
+                                            onChange={(e) =>
+                                                patchNested(
+                                                    l.id,
+                                                    ["sweep", "endFx", "enabled"],
+                                                    e.target.checked,
+                                                )
+                                            }
+                                        />{" "}
+                                        Enable end FX
+                                    </label>
+
+                                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                                        {[
+                                            ["Wave", "wave"],
+                                            ["Ripple", "ripple"],
+                                            ["Burst", "burst"],
+                                            ["Cone", "cone"],
+                                            ["Sparkle", "sparkle"],
+                                            ["Spiral", "spiral"],
+                                        ].map(([label, type]) => (
+                                            <button
+                                                key={type}
+                                                type="button"
+                                                onClick={() =>
+                                                    patchNested(l.id, ["sweep", "endFx"], {
+                                                        enabled: true,
+                                                        type,
+                                                        size: 1.0,
+                                                        duration: 0.35,
+                                                        speed: 1.0,
+                                                        color: null,
+                                                        angleDeg: 0,
+                                                        ease: "smooth",
+                                                        softness: 0.4,
+                                                    })
+                                                }
+                                                style={{
+                                                    fontSize: 11,
+                                                    padding: "4px 10px",
+                                                    borderRadius: 999,
+                                                    border: "1px solid rgba(148,163,184,0.55)",
+                                                    background: "rgba(15,23,42,0.8)",
+                                                    color: "#e5e7eb",
+                                                    cursor: "pointer",
+                                                }}
+                                            >
+                                                {label}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {!!(l.sweep?.endFx?.enabled ?? false) && (
+                                        <div style={{ display: "grid", gap: 6, paddingLeft: 10 }}>
+                                            <label style={{ display: "block" }}>
+                                                Type{" "}
+                                                <select
+                                                    value={l.sweep?.endFx?.type ?? "wave"}
+                                                    onChange={(e) =>
+                                                        patchNested(l.id, ["sweep", "endFx", "type"], e.target.value)
+                                                    }
+                                                >
+                                                    <option value="wave">wave</option>
+                                                    <option value="ripple">ripple</option>
+                                                    <option value="burst">burst</option>
+                                                    <option value="cone">cone</option>
+                                                    <option value="sparkle">sparkle</option>
+                                                    <option value="spiral">spiral</option>
+                                                </select>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Size
+                                                <input
+                                                    type="range"
+                                                    min={0.1}
+                                                    max={4}
+                                                    step={0.05}
+                                                    value={l.sweep?.endFx?.size ?? 1}
+                                                    onChange={(e) =>
+                                                        patchNested(
+                                                            l.id,
+                                                            ["sweep", "endFx", "size"],
+                                                            Number(e.target.value),
+                                                        )
+                                                    }
+                                                />{" "}
+                                                <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                    {(l.sweep?.endFx?.size ?? 1).toFixed(2)}
+                                                </span>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Duration (s)
+                                                <input
+                                                    type="range"
+                                                    min={0.05}
+                                                    max={3}
+                                                    step={0.01}
+                                                    value={l.sweep?.endFx?.duration ?? 0.35}
+                                                    onChange={(e) =>
+                                                        patchNested(
+                                                            l.id,
+                                                            ["sweep", "endFx", "duration"],
+                                                            Number(e.target.value),
+                                                        )
+                                                    }
+                                                />{" "}
+                                                <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                    {(l.sweep?.endFx?.duration ?? 0.35).toFixed(2)}
+                                                </span>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Speed
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={6}
+                                                    step={0.05}
+                                                    value={l.sweep?.endFx?.speed ?? 1}
+                                                    onChange={(e) =>
+                                                        patchNested(
+                                                            l.id,
+                                                            ["sweep", "endFx", "speed"],
+                                                            Number(e.target.value),
+                                                        )
+                                                    }
+                                                />{" "}
+                                                <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                    {(l.sweep?.endFx?.speed ?? 1).toFixed(2)}
+                                                </span>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Softness
+                                                <input
+                                                    type="range"
+                                                    min={0}
+                                                    max={1}
+                                                    step={0.02}
+                                                    value={l.sweep?.endFx?.softness ?? 0.4}
+                                                    onChange={(e) =>
+                                                        patchNested(
+                                                            l.id,
+                                                            ["sweep", "endFx", "softness"],
+                                                            Number(e.target.value),
+                                                        )
+                                                    }
+                                                />{" "}
+                                                <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                    {(l.sweep?.endFx?.softness ?? 0.4).toFixed(2)}
+                                                </span>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Angle (deg)
+                                                <input
+                                                    type="range"
+                                                    min={-180}
+                                                    max={180}
+                                                    step={1}
+                                                    value={l.sweep?.endFx?.angleDeg ?? 0}
+                                                    onChange={(e) =>
+                                                        patchNested(
+                                                            l.id,
+                                                            ["sweep", "endFx", "angleDeg"],
+                                                            Number(e.target.value),
+                                                        )
+                                                    }
+                                                />{" "}
+                                                <span style={{ fontSize: 11, opacity: 0.8 }}>
+                                                    {Math.round(l.sweep?.endFx?.angleDeg ?? 0)}
+                                                </span>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Ease{" "}
+                                                <select
+                                                    value={l.sweep?.endFx?.ease ?? "smooth"}
+                                                    onChange={(e) =>
+                                                        patchNested(l.id, ["sweep", "endFx", "ease"], e.target.value)
+                                                    }
+                                                >
+                                                    <option value="smooth">smooth</option>
+                                                    <option value="linear">linear</option>
+                                                    <option value="exp">exp</option>
+                                                    <option value="expo">expo</option>
+                                                    <option value="sine">sine</option>
+                                                </select>
+                                            </label>
+
+                                            <label style={{ display: "block" }}>
+                                                Color override{" "}
+                                                <input
+                                                    type="color"
+                                                    value={l.sweep?.endFx?.color ?? "#ffffff"}
+                                                    onChange={(e) =>
+                                                        patchNested(
+                                                            l.id,
+                                                            ["sweep", "endFx", "color"],
+                                                            e.target.value,
+                                                        )
+                                                    }
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                        patchNested(l.id, ["sweep", "endFx", "color"], null)
+                                                    }
+                                                    style={{
+                                                        marginLeft: 8,
+                                                        fontSize: 11,
+                                                        padding: "2px 10px",
+                                                        borderRadius: 999,
+                                                        border: "1px solid rgba(148,163,184,0.55)",
+                                                        background: "rgba(15,23,42,0.8)",
+                                                        color: "#e5e7eb",
+                                                        cursor: "pointer",
+                                                    }}
+                                                    title="Clear override (use sweep color)"
+                                                >
+                                                    Clear
+                                                </button>
+                                            </label>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Cable bundle */}
+                    {l.style === "cable" && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop:
+                                    "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontWeight: 800,
+                                    marginBottom: 4,
+                                }}
+                            >
+                                Cable bundle
+                            </div>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 4,
+                                }}
+                            >
+                                Count{" "}
+                                <input
+                                    type="range"
+                                    min={1}
+                                    max={32}
+                                    step={1}
+                                    value={l.cable?.count ?? 4}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["cable", "count"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />{" "}
+                                <span
+                                    style={{
+                                        fontSize: 11,
+                                        opacity: 0.8,
+                                    }}
+                                >
+                                    {l.cable?.count ?? 4} strands
+                                </span>
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Spread{" "}
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={0.6}
+                                    step={0.005}
+                                    value={l.cable?.spread ?? 0.12}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["cable", "spread"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />{" "}
+                                <span
+                                    style={{
+                                        fontSize: 11,
+                                        opacity: 0.8,
+                                    }}
+                                >
+                                    {(l.cable?.spread ?? 0.12).toFixed(2)} m
+                                </span>
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Roughness{" "}
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={l.cable?.roughness ?? 0.25}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["cable", "roughness"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />{" "}
+                                <span
+                                    style={{
+                                        fontSize: 11,
+                                        opacity: 0.8,
+                                    }}
+                                >
+                                    {(l.cable?.roughness ?? 0.25).toFixed(2)}
+                                </span>
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Endpoint anchor{" "}
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={l.cable?.anchor ?? 1}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["cable", "anchor"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />{" "}
+                                <span
+                                    style={{
+                                        fontSize: 11,
+                                        opacity: 0.8,
+                                    }}
+                                >
+                                    {((l.cable?.anchor ?? 1) * 100).toFixed(0)}
+                                    % to core
+                                </span>
+                            </label>
+
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Scramble / waviness{" "}
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={l.cable?.scramble ?? 0}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["cable", "scramble"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />{" "}
+                                <span
+                                    style={{
+                                        fontSize: 11,
+                                        opacity: 0.8,
+                                    }}
+                                >
+                                    {(l.cable?.scramble ?? 0).toFixed(2)}
+                                </span>
+                            </label>
+                        </div>
+                    )}
+
+
+                    {/* Epic tube */}
+                    {l.style === "epic" && (
+                        <div
+                            style={{
+                                marginTop: 8,
+                                paddingTop: 8,
+                                borderTop:
+                                    "1px dashed rgba(255,255,255,0.12)",
+                            }}
+                        >
+                            <div
+                                style={{
+                                    fontWeight: 800,
+                                    marginBottom: 4,
+                                }}
+                            >
+                                Epic Tube
+                            </div>
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Thickness
+                                <input
+                                    type="range"
+                                    min={0.02}
+                                    max={0.25}
+                                    step={0.005}
+                                    value={
+                                        l.tube?.thickness ?? 0.06
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["tube", "thickness"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Glow
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={3}
+                                    step={0.05}
+                                    value={l.tube?.glow ?? 1.3}
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["tube", "glow"],
+                                            Number(e.target.value),
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Color
+                                <input
+                                    type="color"
+                                    value={l.tube?.color ?? l.color ?? "#80d8ff"}
+
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["tube", "color"],
+                                            e.target.value,
+                                        )
+                                    }
+                                />
+                            </label>
+                            <label
+                                style={{
+                                    display: "block",
+                                    marginTop: 6,
+                                }}
+                            >
+                                Trail
+                                <input
+                                    type="checkbox"
+                                    checked={
+                                        (l.tube?.trail ?? true) ===
+                                        true
+                                    }
+                                    onChange={(e) =>
+                                        patchNested(
+                                            l.id,
+                                            ["tube", "trail"],
+                                            e.target.checked,
+                                        )
+                                    }
+                                />
+                            </label>
+                        </div>
+                    )}
+                </div>
+            );
+            })}
+
+            {confirmDlg && (
+                <div
+                    style={{
+                        position: "fixed",
+                        inset: 0,
+                        zIndex: 100000,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        background: "rgba(0,0,0,0.55)",
+                        backdropFilter: "blur(4px)",
+                    }}
+                    onMouseDown={(e) => {
+                        // click outside to cancel
+                        if (e.target === e.currentTarget) confirmDlg.onCancel?.();
+                    }}
+                >
+                    <div
+                        style={{
+                            width: 420,
+                            maxWidth: "92vw",
+                            borderRadius: 14,
+                            border: "1px solid rgba(148,163,184,0.32)",
+                            background: "rgba(2,6,23,0.92)",
+                            boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
+                            padding: 14,
+                            color: "#e5e7eb",
+                        }}
+                    >
+                        <div style={{ fontWeight: 900, fontSize: 14, marginBottom: 6 }}>
+                            {confirmDlg.title || "Confirm"}
+                        </div>
+                        <div style={{ opacity: 0.92, fontSize: 12, marginBottom: 12 }}>
+                            {confirmDlg.message || "Are you sure?"}
+                        </div>
+
+                        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                            <button
+                                type="button"
+                                onClick={() => confirmDlg.onCancel?.()}
+                                style={{
+                                    fontSize: 12,
+                                    padding: "7px 10px",
+                                    borderRadius: 10,
+                                    border: "1px solid rgba(148,163,184,0.35)",
+                                    background: "rgba(15,23,42,0.85)",
+                                    color: "#e5e7eb",
+                                    cursor: "pointer",
+                                }}
+                            >
+                                Cancel (Esc)
+                            </button>
+                            <button
+                                ref={confirmYesRef}
+                                type="button"
+                                onClick={() => confirmDlg.onConfirm?.()}
+                                style={{
+                                    fontSize: 12,
+                                    padding: "7px 10px",
+                                    borderRadius: 10,
+                                    border: "1px solid rgba(148,163,184,0.65)",
+                                    background: "rgba(59,130,246,0.22)",
+                                    color: "#e5e7eb",
+                                    cursor: "pointer",
+                                    fontWeight: 800,
+                                }}
+                            >
+                                Yes (Enter)
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+        </div>
+    );
+}
+export function RackHUD({ node }) {
+    if (!node) return null;
+
+    const rep = node.represent || {};
+    const rack = rep.rackId ? getRackById(rep.rackId) : rep.rack;
+
+    // If this node has no rack info, don't show anything
+    if (!rack) return null;
+
+    const unit =
+        typeof window !== "undefined"
+            ? window.localStorage.getItem("epic3d.productUnits.v1") || "cm"
+            : "cm";
+
+    const w = rack.width ?? rack.dims?.w;
+    const h = rack.height ?? rack.dims?.h;
+    const l = rack.length ?? rack.dims?.l;
+
+    return (
+        <div
+            style={{
+                position: "absolute",
+                top: 80,
+                right: 16,
+                zIndex: 30,
+                minWidth: 220,
+                padding: "10px 12px",
+                borderRadius: 12,
+                background: "rgba(15,23,42,0.92)",
+                border: "1px solid rgba(148,163,184,0.6)",
+                boxShadow: "0 18px 40px rgba(0,0,0,0.7)",
+                color: "#e5f3ff",
+                fontSize: 12,
+                pointerEvents: "none",
+            }}
+        >
+            <div
+                style={{
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.12,
+                    opacity: 0.75,
+                    marginBottom: 2,
+                }}
+            >
+                Rack
+            </div>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                {rack.name || node.label || "Rack"}
+            </div>
+            {(w || h || l) && (
+                <div style={{ opacity: 0.9 }}>
+                    W×H×L: {w ?? 0} × {h ?? 0} × {l ?? 0} {unit}
+                </div>
+            )}
+            {rack.weight != null && rack.weight !== 0 && (
+                <div style={{ opacity: 0.9 }}>Weight: {rack.weight}</div>
+            )}
+        </div>
+    );
+}
+
+export function ProductHUD({ node }) {
+    const id = node?.product?.id;
+    if (!id) return null;
+
+    const product = getProductById(id);
+    if (!product) return null;
+
+    const unit =
+        typeof window !== "undefined"
+            ? window.localStorage.getItem("epic3d.productUnits.v1") || "cm"
+            : "cm";
+
+    const w = product.width ?? product.dims?.w;
+    const h = product.height ?? product.dims?.h;
+    const l = product.length ?? product.dims?.l;
+
+    const title = [product.category, product.make, product.model, product.name]
+        .filter(Boolean)
+        .join(" › ");
+
+    return (
+        <div
+            style={{
+                position: "absolute",
+                top: 80,
+                left: 16,
+                zIndex: 30,
+                minWidth: 260,
+                padding: "10px 12px",
+                borderRadius: 12,
+                background: "rgba(15,23,42,0.92)",
+                border: "1px solid rgba(148,163,184,0.6)",
+                boxShadow: "0 18px 40px rgba(0,0,0,0.7)",
+                color: "#e5f3ff",
+                fontSize: 12,
+                pointerEvents: "none",
+            }}
+        >
+            <div
+                style={{
+                    fontSize: 10,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.12,
+                    opacity: 0.75,
+                    marginBottom: 2,
+                }}
+            >
+                Product
+            </div>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>
+                {title || "Product"}
+            </div>
+            {(w || h || l) && (
+                <div style={{ opacity: 0.9 }}>
+                    W×H×L: {w ?? 0} × {h ?? 0} × {l ?? 0} {unit}
+                </div>
+            )}
+        </div>
+    );
+}

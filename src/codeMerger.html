@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>CodeMerger</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background: #0f172a;
+            color: #e5e7eb;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        header {
+            padding: 16px 24px;
+            border-bottom: 1px solid #1f2937;
+            background: radial-gradient(circle at top left, #1d4ed8 0, transparent 50%), #020617;
+            display: flex;
+            align-items: baseline;
+            gap: 12px;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 20px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: #f9fafb;
+        }
+
+        header span {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+
+        main {
+            flex: 1;
+            display: grid;
+            grid-template-rows: minmax(0, 1fr) auto minmax(0, 0.8fr);
+            gap: 12px;
+            padding: 12px 18px 16px;
+        }
+
+        .panes {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            min-height: 0;
+        }
+
+        .pane {
+            border-radius: 10px;
+            border: 1px solid #1f2937;
+            background: #020617;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .pane-header {
+            padding: 8px 10px;
+            border-bottom: 1px solid #111827;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .pane-title {
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #9ca3af;
+        }
+
+        .pane-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+        }
+
+        .file-input-label {
+            padding: 3px 8px;
+            border-radius: 6px;
+            border: 1px solid #1f2937;
+            cursor: pointer;
+            color: #9ca3af;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            background: linear-gradient(to bottom, #020617, #020617);
+        }
+
+        .file-input-label:hover {
+            border-color: #374151;
+            background: linear-gradient(to bottom, #020617, #030712);
+        }
+
+        .file-input-label span {
+            font-size: 11px;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .pane-body {
+            flex: 1;
+            min-height: 0;
+            position: relative;
+        }
+
+        textarea {
+            width: 100%;
+            height: 100%;
+            border: none;
+            outline: none;
+            resize: none;
+            background: transparent;
+            color: #e5e7eb;
+            padding: 10px;
+            font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            tab-size: 2;
+            white-space: pre;
+        }
+
+        textarea::placeholder {
+            color: #4b5563;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 4px 4px 4px 2px;
+        }
+
+        .merge-options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            font-size: 11px;
+            color: #9ca3af;
+        }
+
+        .toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .toggle input {
+            margin: 0;
+            width: 13px;
+            height: 13px;
+            accent-color: #22c55e;
+        }
+
+        .merge-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn {
+            border-radius: 999px;
+            border: 1px solid transparent;
+            padding: 7px 16px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            cursor: pointer;
+            background: linear-gradient(to right, #22c55e, #16a34a);
+            color: #022c22;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            box-shadow: 0 0 0 1px rgba(21, 128, 61, 0.35), 0 12px 35px rgba(16, 185, 129, 0.35);
+        }
+
+        .btn span {
+            font-size: 14px;
+        }
+
+        .btn:hover {
+            background: linear-gradient(to right, #4ade80, #22c55e);
+        }
+
+        .btn-secondary {
+            padding: 6px 12px;
+            font-size: 11px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            border-radius: 999px;
+            border: 1px solid #4b5563;
+            background: transparent;
+            color: #9ca3af;
+            cursor: pointer;
+        }
+
+        .btn-secondary:hover {
+            border-color: #6b7280;
+            color: #e5e7eb;
+        }
+
+        .status {
+            font-size: 11px;
+            color: #9ca3af;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 999px;
+            background: #22c55e;
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.7);
+        }
+
+        .result-pane {
+            border-radius: 10px;
+            border: 1px solid #1f2937;
+            background: radial-gradient(circle at top right, rgba(34, 197, 94, 0.2), transparent 55%), #020617;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .result-header {
+            padding: 8px 10px;
+            border-bottom: 1px solid #111827;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .result-title {
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #a7f3d0;
+        }
+
+        .result-body {
+            flex: 1;
+            min-height: 0;
+        }
+
+        .result-summary {
+            font-size: 11px;
+            color: #9ca3af;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .result-tag {
+            border-radius: 999px;
+            border: 1px solid #16a34a;
+            padding: 3px 8px;
+            font-size: 11px;
+            color: #bbf7d0;
+            background: rgba(22, 163, 74, 0.1);
+        }
+
+        .badge {
+            border-radius: 999px;
+            padding: 2px 7px;
+            border: 1px solid #1f2937;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: #9ca3af;
+        }
+
+        .badge-hot {
+            border-color: #22c55e;
+            color: #bbf7d0;
+        }
+
+        .stat-number {
+            color: #e5e7eb;
+            font-weight: 600;
+        }
+
+        @media (max-width: 900px) {
+            main {
+                grid-template-rows: auto auto auto;
+                height: auto;
+            }
+            .panes {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <h1>CodeMerger</h1>
+    <span>Function & const name-aware merge</span>
+</header>
+
+<main>
+    <section class="panes">
+        <div class="pane">
+            <div class="pane-header">
+                <div class="pane-title">Left: Base / existing code</div>
+                <div class="pane-actions">
+                    <label class="file-input-label">
+                        <span>＋ Load file</span>
+                        <input type="file" id="leftFile" accept="*/*" />
+                    </label>
+                    <span class="badge">A</span>
+                </div>
+            </div>
+            <div class="pane-body">
+                <textarea id="leftCode" spellcheck="false" placeholder="// Paste your existing/base JS/TS code here..."></textarea>
+            </div>
+        </div>
+
+        <div class="pane">
+            <div class="pane-header">
+                <div class="pane-title">Right: Incoming / updated code</div>
+                <div class="pane-actions">
+                    <label class="file-input-label">
+                        <span>＋ Load file</span>
+                        <input type="file" id="rightFile" accept="*/*" />
+                    </label>
+                    <span class="badge">B</span>
+                </div>
+            </div>
+            <div class="pane-body">
+                <textarea id="rightCode" spellcheck="false" placeholder="// Paste new/updated JS/TS code here..."></textarea>
+            </div>
+        </div>
+    </section>
+
+    <section class="controls">
+        <div class="merge-options">
+            <label class="toggle">
+                <input type="checkbox" id="preferRight" checked />
+                <span>When same name differs, use right version</span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="includeOrphans" checked />
+                <span>Add methods/consts that exist only on right</span>
+            </label>
+            <label class="toggle">
+                <input type="checkbox" id="keepTopBoilerplate" checked />
+                <span>Keep leading non-method code from left</span>
+            </label>
+        </div>
+        <div class="merge-actions">
+            <div class="status" id="status">
+                <span class="status-dot"></span>
+                <span>Idle. Ready to merge.</span>
+            </div>
+            <button class="btn" id="mergeBtn">
+                <span>⤵</span>
+                <span>Merge code</span>
+            </button>
+            <button class="btn-secondary" id="copyResultBtn">Copy result</button>
+        </div>
+    </section>
+
+    <section class="result-pane">
+        <div class="result-header">
+            <div class="result-title">Merged output</div>
+            <div class="result-summary">
+                <span class="badge badge-hot">Smart merge</span>
+                <span>Added methods: <span class="stat-number" id="statAddedMethods">0</span></span>
+                <span>Modified methods: <span class="stat-number" id="statModifiedMethods">0</span></span>
+                <span>Unchanged methods: <span class="stat-number" id="statSameMethods">0</span></span>
+                <span>+ lines: <span class="stat-number" id="statAddedLines">0</span></span>
+                <span>- lines: <span class="stat-number" id="statRemovedLines">0</span></span>
+                <span>Net: <span class="stat-number" id="statNetLines">0</span></span>
+            </div>
+        </div>
+        <div class="result-body">
+            <textarea id="resultCode" spellcheck="false" placeholder="// Click “Merge code” to generate merged output..." readonly></textarea>
+        </div>
+    </section>
+</main>
+
+<script>
+    // ---------- File loading ----------
+    function loadFileIntoTextarea(input, textarea) {
+        const file = input.files && input.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = e => {
+            textarea.value = e.target.result;
+        };
+        reader.readAsText(file);
+    }
+
+    document.getElementById("leftFile").addEventListener("change", function () {
+        loadFileIntoTextarea(this, document.getElementById("leftCode"));
+    });
+
+    document.getElementById("rightFile").addEventListener("change", function () {
+        loadFileIntoTextarea(this, document.getElementById("rightCode"));
+    });
+
+    // ---------- Code unit extraction ----------
+    /**
+     * Extract "units" from JS/TS-like code:
+     *  - Named functions:   function foo(...) { ... }
+     *  - Const function:    const foo = function(...) { ... }
+     *  - Arrow function:    const foo = (...) => { ... }
+     *  - Named const:       const FOO = ...;
+     *
+     * We key by name and only touch these units. All other code remains untouched.
+     */
+    function extractUnits(code) {
+        const units = [];
+        const len = code.length;
+
+        // Function-like patterns (strict, to avoid grabbing if/for/while etc.)
+        const patterns = [
+            { // function foo(...) { ... }
+                type: "function",
+                regex: /\bfunction\s+([A-Za-z0-9_$]+)\s*\(/g
+            },
+            { // const foo = function(...) { ... }
+                type: "function",
+                regex: /\b(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*function\s*\(/g
+            },
+            { // const foo = (...) => { ... }
+                type: "function",
+                regex: /\b(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*\([^)]*\)\s*=>\s*\{/g
+            },
+            { // const FOO = something; (non-block const)
+                type: "const",
+                regex: /\b(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=/g
+            }
+        ];
+
+        // Helper: find end index for block with braces
+        function findBlockEnd(startIndex) {
+            let depth = 0;
+            let inString = false;
+            let stringChar = null;
+            let inLineComment = false;
+            let inBlockComment = false;
+
+            for (let i = startIndex; i < len; i++) {
+                const ch = code[i];
+                const next = code[i + 1];
+
+                // comments
+                if (!inString) {
+                    if (!inBlockComment && ch === "/" && next === "/") {
+                        inLineComment = true;
+                        i++;
+                        continue;
+                    }
+                    if (inLineComment && ch === "\n") {
+                        inLineComment = false;
+                    }
+                    if (!inLineComment && ch === "/" && next === "*") {
+                        inBlockComment = true;
+                        i++;
+                        continue;
+                    }
+                    if (inBlockComment && ch === "*" && next === "/") {
+                        inBlockComment = false;
+                        i++;
+                        continue;
+                    }
+                }
+                if (inLineComment || inBlockComment) continue;
+
+                // strings
+                if (!inString && (ch === '"' || ch === "'" || ch === "`")) {
+                    inString = true;
+                    stringChar = ch;
+                    continue;
+                } else if (inString && ch === stringChar && code[i - 1] !== "\\") {
+                    inString = false;
+                    stringChar = null;
+                    continue;
+                }
+                if (inString) continue;
+
+                if (ch === "{") {
+                    depth++;
+                } else if (ch === "}") {
+                    depth--;
+                    if (depth === 0) return i + 1;
+                }
+            }
+            return len;
+        }
+
+        // Helper: find end of simple const (to semicolon or newline)
+        function findStatementEnd(startIndex) {
+            for (let i = startIndex; i < len; i++) {
+                const ch = code[i];
+                if (ch === ";") return i + 1;
+                if (ch === "\n") return i + 1;
+            }
+            return len;
+        }
+
+        patterns.forEach(({ type, regex }) => {
+            regex.lastIndex = 0;
+            let match;
+            while ((match = regex.exec(code)) !== null) {
+                const name = match[1];
+                if (!name) continue;
+
+                const start = match.index;
+
+                let end;
+                if (type === "function") {
+                    const braceIndex = code.indexOf("{", regex.lastIndex - match[0].length + match[0].length);
+                    if (braceIndex === -1) continue;
+                    end = findBlockEnd(braceIndex);
+                } else {
+                    // const assignment
+                    end = findStatementEnd(regex.lastIndex);
+                }
+
+                if (end <= start) continue;
+                const text = code.slice(start, end);
+                units.push({ name, kind: type, start, end, text });
+            }
+        });
+
+        // Sort units by start index to preserve source order
+        units.sort((a, b) => a.start - b.start);
+        return units;
+    }
+
+    function buildUnitMap(units) {
+        const map = new Map();
+        units.forEach(u => {
+            if (!map.has(u.name)) map.set(u.name, []);
+            map.get(u.name).push(u);
+        });
+        return map;
+    }
+
+    function countLines(text) {
+        if (!text) return 0;
+        return text.split(/\r?\n/).length;
+    }
+
+    function normalizeForCompare(text) {
+        return text.replace(/\s+/g, " ").trim();
+    }
+
+    /**
+     * Merge:
+     *  - Walk left units in original order, replace by right if same name & different and preferRight=true.
+     *  - Keep non-unit code from left as-is.
+     *  - Optionally append right-only units at the bottom.
+     */
+    function mergeCode(leftCode, rightCode, opts) {
+        const leftUnits = extractUnits(leftCode);
+        const rightUnits = extractUnits(rightCode);
+
+        const leftMap = buildUnitMap(leftUnits);
+        const rightMap = buildUnitMap(rightUnits);
+
+        let merged = "";
+        let cursor = 0;
+
+        let addedMethods = 0;
+        let modifiedMethods = 0;
+        let sameMethods = 0;
+        let addedLines = 0;
+        let removedLines = 0;
+
+        const usedRightUnits = new Set();
+
+        // Optionally keep the top part before first unit from left
+        if (opts.keepTopBoilerplate && leftUnits.length > 0) {
+            const firstStart = leftUnits[0].start;
+            merged += leftCode.slice(0, firstStart);
+            cursor = firstStart;
+        }
+
+        // Process each left unit in order
+        leftUnits.forEach(unit => {
+            if (unit.start > cursor) {
+                merged += leftCode.slice(cursor, unit.start);
+            }
+
+            const rightCandidates = rightMap.get(unit.name);
+            const leftText = unit.text;
+            const leftLines = countLines(leftText);
+
+            if (rightCandidates && rightCandidates.length > 0) {
+                const rightUnit = rightCandidates[0];
+                usedRightUnits.add(rightUnit);
+
+                const rightText = rightUnit.text;
+                const rightLines = countLines(rightText);
+
+                if (normalizeForCompare(leftText) !== normalizeForCompare(rightText)) {
+                    if (opts.preferRight) {
+                        merged += rightText;
+                        modifiedMethods++;
+                        if (rightLines > leftLines) {
+                            addedLines += (rightLines - leftLines);
+                        } else if (leftLines > rightLines) {
+                            removedLines += (leftLines - rightLines);
+                        }
+                    } else {
+                        merged += leftText;
+                        sameMethods++;
+                    }
+                } else {
+                    merged += leftText;
+                    sameMethods++;
+                }
+            } else {
+                // Only on left
+                merged += leftText;
+                sameMethods++;
+            }
+
+            cursor = unit.end;
+        });
+
+        // Trailing non-unit code from left
+        if (cursor < leftCode.length) {
+            merged += leftCode.slice(cursor);
+        }
+
+        // Add right-only units at bottom
+        if (opts.includeOrphans) {
+            let appended = "\n\n// --- Merged from right side: new functions/consts ---\n";
+            let appendedSomething = false;
+
+            rightUnits.forEach(unit => {
+                if (!usedRightUnits.has(unit) && !leftMap.has(unit.name)) {
+                    appendedSomething = true;
+                    appended += "\n" + unit.text + "\n";
+                    const lines = countLines(unit.text);
+                    addedLines += lines;
+                    addedMethods++;
+                }
+            });
+
+            if (appendedSomething) {
+                merged += appended;
+            }
+        }
+
+        const netLines = addedLines - removedLines;
+
+        return {
+            merged,
+            addedMethods,
+            modifiedMethods,
+            sameMethods,
+            addedLines,
+            removedLines,
+            netLines
+        };
+    }
+
+    // ---------- UI wiring ----------
+    const mergeBtn = document.getElementById("mergeBtn");
+    const copyBtn = document.getElementById("copyResultBtn");
+    const leftCodeEl = document.getElementById("leftCode");
+    const rightCodeEl = document.getElementById("rightCode");
+    const resultCodeEl = document.getElementById("resultCode");
+    const statusEl = document.getElementById("status");
+
+    const statAddedMethodsEl = document.getElementById("statAddedMethods");
+    const statModifiedMethodsEl = document.getElementById("statModifiedMethods");
+    const statSameMethodsEl = document.getElementById("statSameMethods");
+    const statAddedLinesEl = document.getElementById("statAddedLines");
+    const statRemovedLinesEl = document.getElementById("statRemovedLines");
+    const statNetLinesEl = document.getElementById("statNetLines");
+
+    mergeBtn.addEventListener("click", () => {
+        const leftCode = leftCodeEl.value || "";
+        const rightCode = rightCodeEl.value || "";
+
+        if (!leftCode.trim() && !rightCode.trim()) {
+            statusEl.innerHTML = '<span class="status-dot" style="background:#f97316;box-shadow:0 0 8px rgba(248,113,113,0.7)"></span><span>No code to merge. Add code on left and/or right.</span>';
+            return;
+        }
+
+        statusEl.innerHTML = '<span class="status-dot"></span><span>Merging by function/const name…</span>';
+
+        const opts = {
+            preferRight: document.getElementById("preferRight").checked,
+            includeOrphans: document.getElementById("includeOrphans").checked,
+            keepTopBoilerplate: document.getElementById("keepTopBoilerplate").checked
+        };
+
+        const res = mergeCode(leftCode, rightCode, opts);
+
+        resultCodeEl.value = res.merged;
+        statAddedMethodsEl.textContent = res.addedMethods;
+        statModifiedMethodsEl.textContent = res.modifiedMethods;
+        statSameMethodsEl.textContent = res.sameMethods;
+        statAddedLinesEl.textContent = res.addedLines;
+        statRemovedLinesEl.textContent = res.removedLines;
+        statNetLinesEl.textContent = res.netLines;
+
+        statusEl.innerHTML =
+            '<span class="status-dot"></span>' +
+            '<span>Merged. Modified methods: ' + res.modifiedMethods +
+            ', new: ' + res.addedMethods +
+            ', net lines: ' + res.netLines + '.</span>';
+    });
+
+    copyBtn.addEventListener("click", async () => {
+        const text = resultCodeEl.value;
+        if (!text.trim()) return;
+
+        try {
+            await navigator.clipboard.writeText(text);
+            const prev = statusEl.innerHTML;
+            statusEl.innerHTML = '<span class="status-dot"></span><span>Merged code copied to clipboard.</span>';
+            setTimeout(() => { statusEl.innerHTML = prev; }, 2000);
+        } catch (err) {
+            const prev = statusEl.innerHTML;
+            statusEl.innerHTML = '<span class="status-dot" style="background:#f97316;box-shadow:0 0 8px rgba(248,113,113,0.7)"></span><span>Could not copy to clipboard (browser limitation).</span>';
+            setTimeout(() => { statusEl.innerHTML = prev; }, 2500);
+        }
+    });
+</script>
+</body>
+</html>

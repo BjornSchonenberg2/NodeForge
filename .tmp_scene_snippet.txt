@@ -1,0 +1,80 @@
+    const mergedWireStroke = React.useMemo(() => {
+        let stroke = wireStrokeProp;
+
+        // Back-compat: if only the old wireReveal API is provided, convert it
+        if (!stroke && wireReveal) {
+            stroke = {
+                enabled: !!wireReveal.enabled,
+                mode: wireReveal.mode || "lr",
+                // your "Duration (s)" slider drives both in/out
+                duration: typeof wireReveal.duration === "number" ? wireReveal.duration : 1.2,
+                feather: typeof wireReveal.feather === "number" ? wireReveal.feather : 0.08,
+                surfaceFeather: typeof wireReveal.feather === "number" ? wireReveal.feather : 0.08,
+            };
+        }
+
+        // No config at all → let ImportedModel use its defaults (no reveal)
+        if (!stroke) return undefined;
+
+        // If the REVEAL checkbox is off, don't run the effect at all
+        if (!stroke.enabled) return undefined;
+
+        // 🔑 IMPORTANT: never run the reveal effect when the wireframe overlay is off
+        // This is what guarantees the solid textured model is fully visible.
+        if (!wireframe) {
+            return {
+                ...stroke,
+                // keep duration identical so timing matches both directions
+                duration: stroke.duration,
+                featherStart: 0.001,
+            };
+        }
+        return stroke;
+    }, [wireStrokeProp, wireReveal, wireframe]);
+
+
+
+    const allowSelect = !uiHidden;
+    const selectedForRender = allowSelect ? selected : null;
+    const selectedMultiForRender = allowSelect ? selectedMulti : [];
+    const selectedFlowAnchorForRender = allowSelect ? selectedFlowAnchor : null;
+
+// Fast lookup for multi-selection like "node:123" / "room:abc"
+    const selectedMultiSet = useMemo(() => {
+        const s = new Set();
+        (selectedMultiForRender || []).forEach((it) => {
+            if (it?.type && it?.id) s.add(`${it.type}:${it.id}`);
+        });
+        return s;
+    }, [selectedMultiForRender]);
+    // De-dupe multi-selection so an entity can never be updated twice per tick.
+// This is a common cause of "teleport/fly" when selecting via a box.
+    const uniqueSelectedMulti = useMemo(() => {
+        const out = [];
+        const seen = new Set();
+        (selectedMultiForRender || []).forEach((it) => {
+            if (!it?.type || !it?.id) return;
+            const k = `${it.type}:${it.id}`;
+            if (seen.has(k)) return;
+            seen.add(k);
+            out.push(it);
+        });
+        return out;
+    }, [selectedMultiForRender]);
+
+    const handleRoomPointerDown = useCallback((id, e) => {
+        if (!allowSelect) return;
+        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
+        if (!isLeft) return;
+        if (selectedFlowAnchorForRender) return;
+        if (selectedBreakpoint) return;
+        if (selectedForRender?.type === "node") return;
+        if ((selectedMultiForRender || []).some((s) => s?.type === "node")) return;
+        if (dragState?.active) return;
+        if (onRoomPointerDown) onRoomPointerDown(id, e);
+        else setSelected?.({ type: "room", id });
+    }, [allowSelect, dragState?.active, onRoomPointerDown, selectedForRender, selectedFlowAnchorForRender, selectedBreakpoint, selectedMultiForRender, setSelected]);
+
+    const handleNodePointerDown = useCallback((id, e) => {
+        if (!allowSelect) return;
+        const isLeft = (e?.button === 0 || e?.button === undefined) && (e?.buttons == null || (e.buttons & 1));
