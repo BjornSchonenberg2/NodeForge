@@ -1,15 +1,18 @@
 {
   "files": {
     "main.css": "/NodeForge/static/css/main.a384b902.css",
-    "main.js": "/NodeForge/static/js/main.fafca7bd.js",
+    "main.js": "/NodeForge/static/js/main.792c848f.js",
     "static/js/453.f1f38ec3.chunk.js": "/NodeForge/static/js/453.f1f38ec3.chunk.js",
     "static/media/Halcyon.glb": "/NodeForge/static/media/Halcyon.7d27291af43990b8f3e7.glb",
+    "static/media/burger.glb": "/NodeForge/static/media/burger.4008ec15f12c45ae1ed4.glb",
     "static/media/Argosie.glb": "/NodeForge/static/media/Argosie.dfcb1efb951cf9605866.glb",
     "static/media/Model-MY-GO-Textured.glb": "/NodeForge/static/media/Model-MY-GO-Textured.131bae85b9611e3be2cd.glb",
     "static/media/tex.glb": "/NodeForge/static/media/tex.a947d3ea573d011a0c4d.glb",
     "static/media/Grandstream GRP2614.glb": "/NodeForge/static/media/Grandstream GRP2614.7e6bd5b0f8d92b8f2640.glb",
+    "static/media/JBL-headphones.glb": "/NodeForge/static/media/JBL-headphones.cc5e2ae6b64bb7d07cd0.glb",
     "static/media/722 yacht.glb": "/NodeForge/static/media/722 yacht.8191bf0a4308da1d9c65.glb",
     "static/media/camera.glb": "/NodeForge/static/media/camera.eef8f1308d30ba515b39.glb",
+    "static/media/keyboard.glb": "/NodeForge/static/media/keyboard.435ac4f1075186427210.glb",
     "static/media/722GA.png": "/NodeForge/static/media/722GA.f1ffc9edad4c57a340f5.png",
     "static/media/LAVIE Box 4 - Front.jpg": "/NodeForge/static/media/LAVIE Box 4 - Front.ba00d4ea5935fc7a93e0.jpg",
     "static/media/LAVIE Box 4 - Front - open.JPG": "/NodeForge/static/media/LAVIE Box 4 - Front - open.fd9167fd1284d751674d.JPG",
@@ -24,7 +27,10 @@
     "static/media/LED Ceilling Light Reccessed Spot.jpg": "/NodeForge/static/media/LED Ceilling Light Reccessed Spot.1d2397173aeafadafe5e.jpg",
     "static/media/UniFi Dream Machine Pro Max.png": "/NodeForge/static/media/UniFi Dream Machine Pro Max.135545ab693a76e435df.png",
     "static/media/UniFi Dream Machine Pro.png": "/NodeForge/static/media/UniFi Dream Machine Pro.c1d16064f5fc336ac20e.png",
+    "static/media/Burger - Main Deck.png": "/NodeForge/static/media/Burger - Main Deck.29f8ec79b821f788a29e.png",
+    "static/media/Burger - Hull Deck.png": "/NodeForge/static/media/Burger - Hull Deck.3e44550788b8e52d36ab.png",
     "static/media/HPE ProLiant MicroServer Gen10+ V2.png": "/NodeForge/static/media/HPE ProLiant MicroServer Gen10+ V2.a5eaf4a34fdaa32c0a5f.png",
+    "static/media/Burger - FlyBridge.png": "/NodeForge/static/media/Burger - FlyBridge.64aefe1f130e7d7f45ab.png",
     "static/media/Samsung The Frame 43LS03F - QLED.png": "/NodeForge/static/media/Samsung The Frame 43LS03F - QLED.898d47cd667eef60179c.png",
     "static/media/SYIPTV Server NUC.png": "/NodeForge/static/media/SYIPTV Server NUC.3c4524bb64e64d2ba5ef.png",
     "static/media/HPE ProLiant DL360 Gen 11.png": "/NodeForge/static/media/HPE ProLiant DL360 Gen 11.3fdf98792a6da9d0e869.png",
@@ -37,11 +43,11 @@
     "static/media/UniFi Access Point.jpg": "/NodeForge/static/media/UniFi Access Point.be5801f18b3ca7ebf4d2.jpg",
     "index.html": "/NodeForge/index.html",
     "main.a384b902.css.map": "/NodeForge/static/css/main.a384b902.css.map",
-    "main.fafca7bd.js.map": "/NodeForge/static/js/main.fafca7bd.js.map",
+    "main.792c848f.js.map": "/NodeForge/static/js/main.792c848f.js.map",
     "453.f1f38ec3.chunk.js.map": "/NodeForge/static/js/453.f1f38ec3.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.a384b902.css",
-    "static/js/main.fafca7bd.js"
+    "static/js/main.792c848f.js"
   ]
 }
